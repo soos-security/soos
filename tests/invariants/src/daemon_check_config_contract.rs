@@ -159,6 +159,9 @@ fn run_phase_preview(tag: &str, check_rc: i32) -> PreviewRun {
     harness.push('\n');
     harness.push_str(&readonly_line(&script, "MAX_DAEMON_TOML_SCAN_BYTES"));
     harness.push('\n');
+    // Setup-only (owner-approved 2026-10-18, #437): the restart bound read from the script.
+    harness.push_str(&readonly_line(&script, "UNIT_START_TIMEOUT_S"));
+    harness.push('\n');
     harness.push_str(&format!(
         "SYSCONFDIR='{etc}'\nDAEMON_TOML='{toml}'\nDAEMON_READ_CONFIG='{toml}'\n\
          DAEMON_BIN='{bin}'\nUNIT=soos-daemon.service\nQUERY_TIMEOUT_S=10\n\

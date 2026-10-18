@@ -1,74 +1,109 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `feat/daemon-check-config`
-- **Base (merge-base)**: `3f76090`
-- **Reviewed-Diff-Fingerprint**: `f16a70df61b4de1216a2cb7067590028ab9e0ed2ad73a20a2068938e060c6bfe`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_daemon_check_config.md`, `AI/auditor_constraints_daemon_check_config.md`, `AI/walkthroughs/240_daemon_check_config.md`, `Docs/DAEMON.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `crates/daemon/src/check_config.rs`, `crates/daemon/src/config.rs`, `crates/daemon/src/lib.rs`, `crates/daemon/src/main.rs`, `crates/daemon/tests/check_config_tests.rs`, `scripts/setup.sh`, `tests/docker/setup_root_preview_test.sh`, `tests/fixtures/setup/daemon.toml`, `tests/invariants/src/daemon_check_config_contract.rs`, `tests/invariants/src/lib.rs`
+- **Target Branch**: `fix/setup-start-bounds`
+- **Base (merge-base)**: `1043be6`
+- **Reviewed-Diff-Fingerprint**: `07976bebc0e960c19888c023df20bca4b8a61ace406ebcdd20c10247db92701a`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/237_setup_start_bounds.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `scripts/setup.sh`, `tests/invariants/src/daemon_check_config_contract.rs`, `tests/invariants/src/setup_contract.rs`
 
 ## 1. Executive Summary
 
-The change adds `soos-daemon --check-config [--config <FILE>]` (GitHub #441) and makes the setup
-root half validate the `daemon.toml` it has just created with the installed daemon before the
-restart. The start path `load_or_default_with_system_path` now delegates to the new
-`DaemonConfig::load_classified`, and the refactor is behavior-preserving: an explicit path is read
-with the same bounded reader and `config_read_error` text as the old `load_from_path`, and only a
-`NotFound` at the system path (without `--config`) yields the runtime defaults, as before. The check
-returns from `main()` before the Tokio runtime, logging, the panic hook, `mlockall`, the pipeline and
-the socket. No pre-existing test assertion was removed or changed. Scoped tests, clippy and fmt are
-green. Only MINOR / SUGGESTION findings remain.
+Independent re-review of `fix/setup-start-bounds` (GitHub #437) after the fix of the previous MAJOR
+finding. The branch, rebased onto `origin/main` `1043be6` (#445, `soos-daemon --check-config`),
+moves the six `systemctl start|restart|stop|try-restart "${UNIT}"` calls of `scripts/setup.sh`
+from `QUERY_TIMEOUT_S` (10 s) to a new `readonly UNIT_START_TIMEOUT_S=90`, adds SET40-SET42,
+documentation and matrix rows SET40-SET43.
+
+Since the last review, two commits landed:
+
+- `9f85a78` adds three lines to the DCC8 harness of
+  `tests/invariants/src/daemon_check_config_contract.rs` (`run_phase_preview`): a comment and
+  `harness.push_str(&readonly_line(&script, "UNIT_START_TIMEOUT_S")); harness.push('\n');`, the
+  same pattern already used for `DAEMON_PREVIEW_MARKER` and `MAX_DAEMON_TOML_SCAN_BYTES`. It is
+  setup-only (owner-approved on 2026-10-18): no line removed, no assertion added or changed.
+  `readonly_line` panics when the line is absent, so the harness fails loudly rather than
+  silently defining nothing.
+- `ccc800a` updates walkthrough 237 (rebase note, worst case including the 10 s check, the DCC8/DCC9
+  mention of `QUERY_TIMEOUT_S`), closing the previous walkthrough MINOR.
+
+`cargo test --locked -p soos-invariants -- --test-threads=3` (with the requested environment):
+**795 passed, 0 failed**, including DCC8 accepted/refused, DCC9, SET40, SET41 and SET42. The previous
+MAJOR is resolved. Two MINORs are carried forward. **APPROVED**.
 
 ## 2. Test Changes
 
 Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: `crates/daemon/tests/check_config_tests.rs` (new), `tests/invariants/src/daemon_check_config_contract.rs` (new), `tests/invariants/src/lib.rs` (one `mod` declaration appended, no test touched), `tests/fixtures/setup/daemon.toml` (new fixture), `tests/docker/setup_root_preview_test.sh` (modified).
-- Removed or changed `assert` / `#[test]` / `proptest!` / `#[should_panic]` lines: **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Test files touched: `tests/invariants/src/setup_contract.rs` (additive, SET40-SET42) and
+  `tests/invariants/src/daemon_check_config_contract.rs` (3 added lines, setup-only, `9f85a78`).
+- Removed or changed `assert` / `#[test]` / `proptest!` / `#[should_panic]` lines: **none**. The only
+  removed lines of the patch are the six `run_bounded "${QUERY_TIMEOUT_S}" systemctl ...` lines of
+  `scripts/setup.sh` and three walkthrough lines.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
 - Inline `mod tests` changes: none.
-- `tests/docker/setup_root_preview_test.sh`: the only removed lines are `readonly ALL_CASES=(A1 A2 B C1 C2 D E1 E2)` (extended with `F1 F2`, no case dropped) and `sed -n '2,65p'` in `usage()` (header grew to line 74, verified). The stand-in daemon gains a `--check-config` branch that records the call and never starts or binds; this is a test-double change required so the existing creation cases do not block on the socket. No existing `case_*` assertion is altered. Setup-only, justified by the ADR item (6).
-- `git diff $(git merge-base origin/main HEAD) HEAD -- tests 'crates/*/tests' android/app/src/test`: additions only, as listed above.
+- Justification of the `daemon_check_config_contract.rs` change: the harness runs the real
+  `phase_preview` under `set -u`; the branch's restart line references `UNIT_START_TIMEOUT_S`, so the
+  harness must define it. Reading it from the script (not hard-coding 90) keeps the harness bound to
+  production. DCC8/DCC9 assertions are byte-identical to `1043be6`.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Old vs new loader: `path_opt = Some(p)` previously called `load_from_path(p)` = `read_daemon_config_text(p).map_err(config_read_error(p, ..))` then `from_toml_str`; new code is identical (DCC1 asserts identical error text for every class). `path_opt = None`: `NotFound` → runtime default, any other read error → error naming the system path, as before. PASS.
-- Classification: `NotFound | NotARegularFile | Unreadable` → 66; `TooLarge | Malformed` → 78; parse/validation → 78. Matches `Docs/DAEMON.md` §1.9 table and the ADR. PASS.
-- `--mock-camera` only flips `use_mock_camera` after validation, so the conflict does not hide a validation difference; config-level acceptance is exactly the start's. PASS.
-- `setup.sh`: the check sits between `JOURNAL+=(daemon_toml_created)` and the restart; on failure the file is removed and the last journal entry (that very entry) is popped, so `fail_and_rollback` does not `try-restart`; `/etc/soos` created by the run is still rolled back via `soos_conf_dir_created` (DCC8 asserts `rc=1 journal=soos_conf_dir_created`). `DAEMON_BIN="${PREFIX}/libexec/soos/soos-daemon"` matches `install.sh` (`TARGET_LIBEXEC_DIR`) and the unit's `ExecStart`. Stale-binary scenario: `phase_system` skips install only when installed files equal the build, so the checked binary is the freshly built one. PASS.
+- Composition with #445 in `phase_preview` (`scripts/setup.sh:1660-1680`): the file is created by
+  hard link, journaled `daemon_toml_created`, then checked with
+  `run_bounded "${QUERY_TIMEOUT_S}" "${DAEMON_BIN}" --check-config --config "${DAEMON_TOML}"` (10 s),
+  and only then restarted with `run_bounded "${UNIT_START_TIMEOUT_S}" systemctl restart` (90 s).
+  Check before restart; correct bound for each. PASS.
+- Check refused: file removed, journal entry dropped, `return 1`; the caller
+  (`scripts/setup.sh:1818-1824`) goes to `fail_and_rollback` (exit 1) and never reaches the
+  `daemon_toml_created` `try-restart`; the daemon is untouched. PASS.
+- Restart or readiness failed: file removed, entry dropped, second restart under
+  `UNIT_START_TIMEOUT_S`; if it also fails, `PREVIEW_DAEMON_DOWN=true` and the caller exits 70
+  (`EXIT_NOT_READY`) without further rollback; otherwise exit 1 through rollback. PASS.
+- Rollback `try-restart` (`:1500`), EXIT trap start (`:1537`), enrollment stop/start (`:1734`,
+  `:1746`) all use `UNIT_START_TIMEOUT_S`; the read-only `is-enabled`/`is-active` helper (`:506`)
+  and every `systemctl --user` call stay on `QUERY_TIMEOUT_S`. PASS.
+- Worst case of the camera-view step: 10 s check + 2 x (90 + 2) s restarts + 2 readiness waits,
+  about 270 s, finite and as stated in the walkthrough. PASS.
+- Scenario tried: an attacker-free regression where someone renames the constant: SET40
+  (`setup_readonly_seconds`) and the DCC8 harness (`readonly_line`) both panic. PASS.
 
 ### PAM Concurrency & Deadlines
-- No change in `crates/pam`. The setup call is bounded by `run_bounded "${QUERY_TIMEOUT_S}"` (10 s). PASS.
+- No change in `crates/pam`. All new bounds are finite `readonly` integers. PASS.
 
 ### Panic Safety & Fail-Closed
-- `check_config.rs` has `#![forbid(unsafe_code)]`, no `unwrap/expect/panic/indexing` (only `unwrap_or_default`, `saturating_*`). Write failures are ignored; the exit code still carries the result. Any non-zero (including a timeout or a missing binary) removes the file: fail-closed toward "no new config". PASS.
+- No production Rust change. No path from a refused check or a failed restart to a reported
+  success. PASS.
 
 ### Test Integrity & Anti-Weakening
-- No pre-existing assertion touched (section 2). New tests would fail on plausible wrong implementations: wrong class for directory/FIFO (DCC1/DCC6), falling back to defaults for a directory at the system path (DCC1), quoting the TOML source line (canary in DCC6), socket directory creation (DCC4), check after restart or twice (DCC8). The invariant harness now aborts (exit 99) unless the `systemctl` stub is first in `PATH`, closing the host-`systemctl` reach described in the walkthrough. PASS.
+- `9f85a78` verified as exactly the `readonly_line` setup line (plus comment and newline). PASS.
+- SET40/SET41/SET42 fail against plausible wrong implementations (a call left on
+  `QUERY_TIMEOUT_S`, `"$(tailscale serve)"`, a missing chown hint). PASS, with the two MINOR gaps
+  below.
 
 ### Memory, Bounds & Secrets
-- Input bounded by the existing 1 MiB reader (`MAX_DAEMON_CONFIG_BYTES = 1024 * 1024`, verified). Output bounded to 512 bytes, first line only, control characters replaced, cut on a char boundary (DCC3). No frames, embeddings or credentials involved. PASS.
+- No secret, frame or embedding involved; nothing new logged. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/` or hook change. Docker harness logic not executed locally (CI job `setup-root-preview`); reviewed by reading: stand-in writes `CHECK_LOG` under `TEST_DIR=/var/lib/soos-setup-test`, matching the test's `readonly CHECK_LOG`; mode `check-refuses` is set after the healthy start in `reset_case`, and an unknown mode in the start branch serves `healthy`. PASS (CI pending).
+- Only `scripts/setup.sh` among automation files; no dependency, workflow or hook change. PASS.
 
 ### English-Only Policy
-- Code, comments, docs, commit message in English; no French tokens found in added lines. PASS.
-
-### Doc factual accuracy
-- `Docs/PACKAGING_AND_PROVISIONING.md` §3.0 exists; `Docs/DAEMON.md` §1.1–§1.7 are the validated tables and §1.9 is new after §1.8; walkthrough 240 is unique; DCC1–DCC11 rows exist; "bounded by 10 s" equals `QUERY_TIMEOUT_S=10`. PASS (see MINOR 2).
-
-### Commands re-run (scoped, `CARGO_TARGET_DIR=~/.cache/soos-targets/daemon-check-config`, `--test-threads=3`)
-- `cargo test -p soos-daemon --test check_config_tests`: 7 passed.
-- `cargo test -p soos-daemon` config suites (`config_tests`, `config_validation_tests`, `evidence_global_cap_config_tests`, `inference_threads_config_tests`, `ir_emitter_daemon_config_tests`, `presence_config_tests`, `threshold_config_tests`): all passed.
-- `cargo test -p soos-invariants`: 792 passed.
-- `cargo clippy -p soos-daemon -p soos-invariants --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean. `bash -n` on both scripts: clean.
+- All added text and both new commit messages are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `scripts/setup.sh:1658` — the `[FAIL]` line says `--check-config refused` for any non-zero status, including a 10 s timeout or a missing/unexecutable binary (exit 124/126/127). Behavior is correct (fail-closed); the wording can mislead an operator. Optional: include the exit status in the message.
-- **[MINOR]** `scripts/setup.sh:488` (pre-existing helper) — `run_bounded` runs the command unbounded when `timeout` is absent, so "bounded by 10 s" in `Docs/PACKAGING_AND_PROVISIONING.md` and the ADR holds only where coreutils `timeout` exists (always true on supported distributions). No change required.
-- **[SUGGESTION]** `tests/invariants/src/daemon_check_config_contract.rs` `run_phase_preview` — the per-run directory under `std::env::temp_dir()` is removed before use but not after; a `tempfile::TempDir` would avoid leftovers.
+- **[MINOR]** `tests/invariants/src/setup_contract.rs` (`scan_shell`, SET41) — carried forward:
+  `$(/usr/bin/tailscale serve ...)` (the word is preceded by `/`, a word character for the scanner)
+  or a command held in a variable (`"$("${ts}" serve)"`) is not flagged. `setup.sh` contains
+  neither today.
+- **[MINOR]** `tests/invariants/src/setup_contract.rs` (SET40) — carried forward: the cross checks
+  are per line, so a `\`-continued `run_bounded "${QUERY_TIMEOUT_S}" \` / `systemctl restart
+  "${UNIT}"` would escape the "bounded by `UNIT_START_TIMEOUT_S`" rule; none exists, and the
+  `bounded >= 6` floor still catches a moved call only if its `systemctl ... "${UNIT}"` line keeps
+  the `run_bounded` prefix.
+- **[SUGGESTION]** `Docs/PACKAGING_AND_PROVISIONING.md` "Time bounds" paragraph — could mention
+  that the #445 `soos-daemon --check-config` run is bounded by `QUERY_TIMEOUT_S` = 10 s before the
+  restart.
 
 ## 5. Final Verdict
 

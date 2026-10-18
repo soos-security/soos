@@ -1727,3 +1727,432 @@ fn test_set_daemon_stop_marker_cleared_only_after_restart() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Daemon start bounds, Tailscale substitution rule, target-directory owner (GitHub #437,
+// part of #362; walkthrough 237; rows SET40-SET43)
+// ---------------------------------------------------------------------------
+
+/// Integer value of `<key>=<n>` in the `[Service]` section of the shipped daemon unit.
+fn daemon_unit_seconds(key: &str) -> u64 {
+    let unit = read_repo("packaging/soos-daemon.service");
+    let mut in_service = false;
+    let mut found = Vec::new();
+    for line in unit.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_service = t == "[Service]";
+            continue;
+        }
+        if let Some(value) = t.strip_prefix(&format!("{key}=")) {
+            if in_service {
+                found.push(value.parse::<u64>().unwrap_or_else(|e| {
+                    panic!("{key}={value} must be a plain number of seconds: {e}")
+                }));
+            }
+        }
+    }
+    assert_eq!(
+        found.len(),
+        1,
+        "{key}= must be set exactly once in [Service]"
+    );
+    found[0]
+}
+
+/// Integer value of `readonly <name>=<n>` in setup.sh.
+fn setup_readonly_seconds(name: &str) -> u64 {
+    let prefix = format!("readonly {name}=");
+    let values: Vec<u64> = read_repo(SETUP)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix(prefix.as_str()).map(str::to_string))
+        .map(|v| {
+            v.parse::<u64>()
+                .unwrap_or_else(|e| panic!("{name}={v} must be a plain number of seconds: {e}"))
+        })
+        .collect();
+    assert_eq!(
+        values.len(),
+        1,
+        "setup.sh must declare `readonly {name}=<seconds>` exactly once"
+    );
+    values[0]
+}
+
+/// SET40: every `systemctl start|restart|stop|try-restart` of `soos-daemon.service` in setup.sh
+/// is bounded by `UNIT_START_TIMEOUT_S`, which covers the unit's `TimeoutStartSec` plus a
+/// margin of 10 to 60 s; `QUERY_TIMEOUT_S` (10 s) never bounds such a call and stays the
+/// bound of the read-only `is-enabled` / `is-active` queries.
+#[test]
+fn test_set_s6_daemon_unit_calls_bounded_by_unit_start_timeout() {
+    let start_timeout = daemon_unit_seconds("TimeoutStartSec");
+    let bound = setup_readonly_seconds("UNIT_START_TIMEOUT_S");
+    let query = setup_readonly_seconds("QUERY_TIMEOUT_S");
+    assert!(
+        bound >= start_timeout + 10 && bound <= start_timeout + 60,
+        "UNIT_START_TIMEOUT_S={bound} must be TimeoutStartSec={start_timeout} plus a margin \
+         of 10 to 60 s"
+    );
+    assert!(
+        query < start_timeout,
+        "QUERY_TIMEOUT_S={query} is a read-only query bound, below TimeoutStartSec"
+    );
+    let code = setup_code();
+    let mut bounded = 0;
+    for line in code.lines() {
+        let t = line.trim();
+        for verb in ["start", "restart", "stop", "try-restart"] {
+            if !t.contains(&format!("systemctl {verb} \"${{UNIT}}\"")) {
+                continue;
+            }
+            assert!(
+                t.contains(&format!(
+                    "run_bounded \"${{UNIT_START_TIMEOUT_S}}\" systemctl {verb} \"${{UNIT}}\""
+                )),
+                "a systemctl {verb} of the daemon unit must be bounded by UNIT_START_TIMEOUT_S: \
+                 {line}"
+            );
+            bounded += 1;
+        }
+        if t.contains("systemctl") && !t.contains("systemctl --user") {
+            for verb in ["start", "restart", "stop", "try-restart"] {
+                assert!(
+                    !(t.contains("${QUERY_TIMEOUT_S}")
+                        && t.contains(&format!("systemctl {verb} "))),
+                    "QUERY_TIMEOUT_S must never bound a systemctl {verb} of the daemon: {line}"
+                );
+            }
+        }
+        assert!(
+            !(t.contains("${UNIT_START_TIMEOUT_S}") && t.contains("systemctl --user")),
+            "UNIT_START_TIMEOUT_S is the bound of soos-daemon.service only: {line}"
+        );
+    }
+    assert!(
+        bounded >= 6,
+        "expected at least 6 bounded start/restart/stop/try-restart calls of the daemon unit, \
+         found {bounded}"
+    );
+    assert!(
+        code.contains("run_bounded \"${QUERY_TIMEOUT_S}\" systemctl \"$1\" --quiet \"${UNIT}\""),
+        "the read-only unit queries stay bounded by QUERY_TIMEOUT_S"
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ShellCtx {
+    /// `"..."`
+    Double,
+    /// `'...'`
+    Single,
+    /// `$( ... )`
+    Subst,
+    /// `` `...` ``
+    Backtick,
+    /// `( ... )` inside code (subshell, arithmetic, array)
+    Paren,
+    /// `${ ... }`
+    Brace,
+    /// Body of an unquoted here-document (expansions active, `"` literal).
+    Heredoc,
+}
+
+/// Scans `chars` starting in `stack` and returns the Tailscale violations (`line N: tailscale
+/// <word>`) with the final context stack. A `tailscale <word>` is a violation when any
+/// enclosing context is a command substitution (`$(...)` or backticks) and `<word>` is not
+/// `version`: quotes inside or around the substitution do not make it a printed message.
+fn scan_shell(
+    chars: &[char],
+    mut stack: Vec<ShellCtx>,
+    first_line: usize,
+) -> (Vec<String>, Vec<ShellCtx>) {
+    let is_word_char = |c: char| c.is_ascii_alphanumeric() || "_-./".contains(c);
+    let mut found = Vec::new();
+    let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
+    let mut line_no = first_line;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let top = stack.last().copied();
+        let next = chars.get(i + 1).copied();
+        if c == '\n' {
+            line_no += 1;
+            i += 1;
+            // Here-document bodies start on the line after the one that opened them.
+            for (delim, expand) in std::mem::take(&mut pending_heredocs) {
+                loop {
+                    assert!(
+                        i < chars.len(),
+                        "unterminated here-document {delim} (line {line_no})"
+                    );
+                    let start = i;
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    let body = &chars[start..i];
+                    let body_line = line_no;
+                    if i < chars.len() {
+                        i += 1;
+                    }
+                    line_no += 1;
+                    let text: String = body.iter().collect();
+                    if text.trim_start_matches('\t') == delim {
+                        break;
+                    }
+                    if expand {
+                        let (inner, rest) = scan_shell(body, vec![ShellCtx::Heredoc], body_line);
+                        assert_eq!(
+                            rest,
+                            vec![ShellCtx::Heredoc],
+                            "here-document line {body_line} must be balanced: {text}"
+                        );
+                        found.extend(inner);
+                    }
+                }
+            }
+            continue;
+        }
+        let prev = if i == 0 { '\n' } else { chars[i - 1] };
+        if c == 't' && !is_word_char(prev) {
+            let rest: String = chars[i..chars.len().min(i + 64)].iter().collect();
+            if let Some(after) = rest.strip_prefix("tailscale") {
+                if after.starts_with([' ', '\t']) {
+                    let inside = stack
+                        .iter()
+                        .any(|s| matches!(s, ShellCtx::Subst | ShellCtx::Backtick));
+                    let word: String = after
+                        .trim_start()
+                        .chars()
+                        .take_while(|ch| ch.is_ascii_alphanumeric() || "-_".contains(*ch))
+                        .collect();
+                    if inside && word != "version" {
+                        found.push(format!("line {line_no}: tailscale {word}"));
+                    }
+                }
+            }
+        }
+        match top {
+            Some(ShellCtx::Single) => {
+                if c == '\'' {
+                    stack.pop();
+                }
+                i += 1;
+                continue;
+            }
+            Some(ShellCtx::Double | ShellCtx::Heredoc) => {
+                match c {
+                    '\\' => i += 1,
+                    '"' if top == Some(ShellCtx::Double) => {
+                        stack.pop();
+                    }
+                    '$' if next == Some('(') => {
+                        stack.push(ShellCtx::Subst);
+                        i += 1;
+                    }
+                    '$' if next == Some('{') => {
+                        stack.push(ShellCtx::Brace);
+                        i += 1;
+                    }
+                    '`' => stack.push(ShellCtx::Backtick),
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        // Code context: top level, `$( )`, backticks, `( )`, `${ }`.
+        if c == '#'
+            && top != Some(ShellCtx::Brace)
+            && (prev.is_whitespace() || ";|&(".contains(prev))
+        {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        match c {
+            '\\' => i += 1,
+            '\'' => stack.push(ShellCtx::Single),
+            '"' => stack.push(ShellCtx::Double),
+            '`' => {
+                if top == Some(ShellCtx::Backtick) {
+                    stack.pop();
+                } else {
+                    stack.push(ShellCtx::Backtick);
+                }
+            }
+            '$' if next == Some('(') => {
+                stack.push(ShellCtx::Subst);
+                i += 1;
+            }
+            '$' if next == Some('{') => {
+                stack.push(ShellCtx::Brace);
+                i += 1;
+            }
+            '(' => stack.push(ShellCtx::Paren),
+            ')' if matches!(top, Some(ShellCtx::Subst | ShellCtx::Paren)) => {
+                stack.pop();
+            }
+            '}' if top == Some(ShellCtx::Brace) => {
+                stack.pop();
+            }
+            // A here-string `<<<` has no body.
+            '<' if next == Some('<') && chars.get(i + 2) == Some(&'<') => i += 2,
+            '<' if next == Some('<') => {
+                let mut j = i + 2;
+                if chars.get(j) == Some(&'-') {
+                    j += 1;
+                }
+                while chars.get(j) == Some(&' ') {
+                    j += 1;
+                }
+                let quoted = matches!(chars.get(j), Some('\'' | '"'));
+                let start = if quoted { j + 1 } else { j };
+                let mut end = start;
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                {
+                    end += 1;
+                }
+                let delim: String = chars[start..end].iter().collect();
+                assert!(
+                    !delim.is_empty(),
+                    "here-document without a delimiter (line {line_no})"
+                );
+                pending_heredocs.push((delim, !quoted));
+                i = if quoted { end + 1 } else { end };
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    assert!(
+        pending_heredocs.is_empty(),
+        "here-document never started: {pending_heredocs:?}"
+    );
+    (found, stack)
+}
+
+/// Every Tailscale command other than `tailscale version` inside a command substitution of a
+/// whole script; panics when the scanner does not end balanced, so a script it cannot follow
+/// fails loudly instead of passing.
+fn tailscale_in_substitution(script: &str) -> Vec<String> {
+    let chars: Vec<char> = script.chars().collect();
+    let (found, rest) = scan_shell(&chars, Vec::new(), 1);
+    assert!(
+        rest.is_empty(),
+        "the shell scanner did not end balanced: {rest:?}"
+    );
+    found
+}
+
+/// SET41: a Tailscale command other than the read-only `tailscale version` never runs inside a
+/// command substitution, even when the substitution sits in a quoted string (SET3 counts quote
+/// characters, so `"$(tailscale serve ...)"` would pass it as a printed message). The scanner
+/// itself is checked first on known-good and known-bad snippets.
+#[test]
+fn test_set_s7_no_tailscale_command_inside_command_substitution() {
+    for (snippet, bad) in [
+        ("x=\"$(tailscale serve --bg unix:/run/x)\"\n", true),
+        ("info \"done: $(tailscale funnel --bg unix:/x)\"\n", true),
+        ("x=`tailscale up`\n", true),
+        ("x=\"`tailscale status`\"\n", true),
+        (
+            "x=\"$(printf '%s' \"$(tailscale status --json)\")\"\n",
+            true,
+        ),
+        ("x=\"$(bash -c 'tailscale serve reset')\"\n", true),
+        (
+            "x=\"$(\n    run_bounded 5 tailscale funnel reset\n)\"\n",
+            true,
+        ),
+        ("cat <<EOF\nnode: $(tailscale status)\nEOF\n", true),
+        (
+            "out=\"$(run_bounded 10 tailscale version 2>/dev/null)\"\n",
+            false,
+        ),
+        (
+            "info \"       tailscale funnel --bg unix:${REMOTE_SOCKET}\"\n",
+            false,
+        ),
+        (
+            "plan tailscale \"printed only\" \"no tailscale serve or funnel\"\n",
+            false,
+        ),
+        ("command -v tailscale >/dev/null 2>&1\n", false),
+        ("# x=\"$(tailscale serve)\"\n", false),
+        ("cat <<'EOF'\nprinted: $(tailscale serve)\nEOF\n", false),
+        ("n=${#JOURNAL[@]}; v=${x#tailscale }\n", false),
+        ("read -r -a w <<< \"${x}\"\ny=\"$(tailscale ip)\"\n", true),
+        ("read -r -a w <<< \"$(tailscale version)\"\n", false),
+    ] {
+        let found = tailscale_in_substitution(snippet);
+        assert_eq!(
+            !found.is_empty(),
+            bad,
+            "scanner verdict for {snippet:?} must be {}: {found:?}",
+            if bad { "rejected" } else { "accepted" }
+        );
+    }
+    let found = tailscale_in_substitution(&read_repo(SETUP));
+    assert!(
+        found.is_empty(),
+        "setup.sh runs a Tailscale command other than `tailscale version` inside a command \
+         substitution: {found:?}"
+    );
+}
+
+/// SET42: the cargo target directory holds a file that the resolved build user does not own
+/// (the fake account resolves to another uid than the real owner of the harness files, so no
+/// root is needed): preflight refuses with exit 2, prints the exact `sudo chown -R` fix and
+/// the first foreign entry, never escalates, never builds and changes nothing.
+#[test]
+fn test_set_target_dir_foreign_owner_refused_before_build() {
+    let mut h = Harness::new("foreigntarget");
+    let target = h.repo.join("target");
+    fs::create_dir_all(target.join("release")).expect("target dir");
+    fs::write(target.join("release/stale"), "stale").expect("stale file");
+    let other_uid = real_uid().parse::<u64>().expect("numeric uid") + 1;
+    h.set_env("STUB_UID", &other_uid.to_string());
+    let before = h.snapshot();
+    let out = h.run(&["--yes"]);
+    let t = text(&out);
+    assert_eq!(code(&out), 2, "{t}");
+    assert!(
+        t.contains("holds files not owned by the build user 'alice'"),
+        "the refusal must name the build user:\n{t}"
+    );
+    assert!(
+        t.contains(&format!("sudo chown -R alice: {}", target.display())),
+        "the refusal must print the exact fix:\n{t}"
+    );
+    assert!(
+        t.contains("nothing was changed"),
+        "the preflight summary must say nothing changed:\n{t}"
+    );
+    let lines = h.log_lines();
+    for absent in [
+        "cargo",
+        "sudo",
+        "runuser",
+        "install.sh",
+        "install_rustup.sh",
+    ] {
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.split_whitespace().nth(1) == Some(absent)),
+            "{absent} must not run after a refused preflight: {lines:?}"
+        );
+    }
+    assert!(
+        lines.iter().all(|l| is_read_only_call(l)),
+        "a refused preflight only queries: {lines:?}"
+    );
+    assert!(
+        !target.join("release/soos-daemon").exists(),
+        "nothing may be built"
+    );
+    assert_eq!(before, h.snapshot(), "a refused preflight writes nothing");
+}
