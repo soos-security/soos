@@ -83,20 +83,30 @@ scripts/capture_readme_assets.sh   # refresh MANIFEST.toml afterwards
   `crates/remote/assets` and canned JSON built by `soos_test_fixtures::readme_web::route`: auth state,
   status, alerts, push (disabled), camera (idle), offline history (recording, synthetic intervals
   relative to the capture time, GitHub #398) and an event stream with status, alerts and battery
-  events, plus the fixture-only page `/readme/tour-seen` (GitHub #448, below). Scenes `unlocked` and
+  events, plus the fixture-only pages `/readme/tour-seen` and `/readme/capture` (GitHub #448, below). Scenes `unlocked` and
   `locked-alerts`. The bodies carry the exact keys of the `soos-remote`
   types (checked against the sources) and no identity: no login, host name, IP address, passkey id or
   push endpoint. `soos-remote` itself gains no flag, route or mode.
 - The script opens each scene in an already installed headless Chrome/Chromium with a throw-away
   profile at 390×844 CSS pixels, device scale factor 2, light and dark, then strips every PNG
-  metadata chunk (`--strip-png`). It installs and downloads nothing and is never a CI step. Times
-  shown by the page ("Updated N s ago", alert and offline clock times) follow the capture time; the
-  browser runs with `TZ=UTC` so the capture host's time zone never shows.
+  metadata chunk (`--strip-png`). It installs and downloads nothing and is never a CI step.
+- **Fixed synthetic clock**: every scene and theme shows the same instant,
+  `soos_test_fixtures::readme_web::FIXED_CAPTURE_UNIX_MS` = 2026-10-01T09:41:00Z, never the real
+  capture date. The server runs with `--clock fixed` and builds every body (status, alerts, offline
+  history, event stream) from that instant; the screenshot is taken on the fixture page
+  `/readme/capture`, which serves the assets' `index.html` with `<base href="/">` and an inline clock
+  script (`CAPTURE_CLOCK_SCRIPT`) inserted before `app.js`, so `Date.now()` and `new Date()` return
+  the same instant (`new Date(value)` is unchanged). The asset files are never modified. The browser
+  runs with `TZ=UTC`, so the page shows "Updated 0 s ago", "idle for 12 min" and alerts at 09:38 AM in
+  both themes, and a rerun gives byte-identical PNGs (checked on the capture host with the same
+  Chrome build; another browser version or font set may render differently). The fixture server
+  lives up to 240 s per scene (two browser runs per theme).
 - **First-run tour**: the web app's feature tour (ADR 2026-10-17, GitHub #414/#418) opens on a fresh
   browser profile and would cover the page. The browser therefore first opens the fixture page
   `/readme/tour-seen` (`soos_test_fixtures::readme_web::TOUR_SEEN_PAGE`), which sets the app's own
-  tour flag (`soos-remote-tour-v1` = `seen`) in the throw-away profile and replaces itself with `/`.
-  The page is fixture-only; `soos-remote` gains no flag, route or mode (RAC20).
+  tour flag (`soos-remote-tour-v1` = `seen`) in the throw-away profile and replaces itself with `/`;
+  a second browser run in the same profile then takes the screenshot of `/readme/capture`.
+  Both pages are fixture-only; `soos-remote` gains no flag, route or mode (RAC20, RAC21).
 - The four captures `web-unlocked-light.png`, `web-unlocked-dark.png`, `web-locked-alerts-light.png`
   and `web-locked-alerts-dark.png` are committed (GitHub #448) and shown in the README "Screenshots"
   section. They were produced by the agent with an installed Google Chrome; the owner's visual check

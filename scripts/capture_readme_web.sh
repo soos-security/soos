@@ -12,7 +12,11 @@
 # Docs/assets/screenshots/web-<scene>-<light|dark>.png at 390x844 CSS pixels,
 # device scale factor 2, with every PNG metadata chunk stripped.
 # The browser first opens the fixture page /readme/tour-seen, which marks the
-# web app's first-run feature tour as seen and loads / (GitHub #448).
+# web app's first-run feature tour as seen and loads / (GitHub #448). A second
+# run in the same profile takes the screenshot of /readme/capture: index.html
+# with the page clock frozen at the fixture's fixed capture instant, while the
+# server builds every body from that same instant (--clock fixed), so every
+# scene and theme shows the same date and times.
 #
 # Optional and never a CI requirement: nothing is installed or downloaded.
 # The browser binary is taken from $CHROME or found on PATH. Run
@@ -63,7 +67,7 @@ mkdir -p "$OUT"
 for scene in "${SCENES[@]}"; do
     portfile="$work/port-$scene"
     cargo run --locked -q -p soos-test-fixtures --example readme_web_fixture_server -- \
-        --scene "$scene" --assets "$ROOT/crates/remote/assets" --serve-ms 60000 > "$portfile" &
+        --scene "$scene" --assets "$ROOT/crates/remote/assets" --serve-ms 240000 --clock fixed > "$portfile" &
     server_pid=$!
     port=""
     for _ in $(seq 1 100); do
@@ -82,7 +86,7 @@ for scene in "${SCENES[@]}"; do
             --disable-extensions --disable-sync --disable-background-networking
             --disable-component-update --hide-scrollbars --user-data-dir="$profile"
             --window-size="$VIEWPORT" --force-device-scale-factor="$SCALE"
-            --virtual-time-budget="$SETTLE_MS" --screenshot="$raw")
+            --virtual-time-budget="$SETTLE_MS")
         if [[ "$variant" == "dark" ]]; then
             flags+=(--force-dark-mode --blink-settings=preferredColorScheme=0)
         else
@@ -92,6 +96,9 @@ for scene in "${SCENES[@]}"; do
         # profile, then loads / (GitHub #448), so the tour never covers the capture.
         # TZ=UTC keeps the capture host's time zone out of the clock times shown.
         TZ=UTC "$browser" "${flags[@]}" "http://127.0.0.1:$port/readme/tour-seen" > /dev/null 2>&1
+        # Same profile, page clock frozen at the fixed capture instant: the screenshot.
+        TZ=UTC "$browser" "${flags[@]}" --screenshot="$raw" \
+            "http://127.0.0.1:$port/readme/capture" > /dev/null 2>&1
         cargo run --locked -q -p soos-test-fixtures --example readme_web_fixture_server -- \
             --strip-png "$raw" "$OUT/web-$scene-$variant.png"
         echo "==> $OUT/web-$scene-$variant.png"

@@ -22,23 +22,23 @@ source = "synthetic"
 [[asset]]
 path = "screenshots/web-locked-alerts-dark.png"
 generator = "scripts/capture_readme_web.sh"
-sha256 = "fe0ad0e99436fab12c85df1ee042d6a1df9f4b01fff00de62e030c77848b1e26"
+sha256 = "4cb600f4d25b486cf802bcde0b8e367920d94d906a5d0422ee4ab3669546af33"
 source = "synthetic"
 
 [[asset]]
 path = "screenshots/web-locked-alerts-light.png"
 generator = "scripts/capture_readme_web.sh"
-sha256 = "f28624f28fda31d10cf957621f90435dd76acc8486ef93886052c9d738c91d0e"
+sha256 = "02a30d2b43fa208fa888e9cd6f1a95b43eeca672c98a59131e4febac4d22c71b"
 source = "synthetic"
 
 [[asset]]
 path = "screenshots/web-unlocked-dark.png"
 generator = "scripts/capture_readme_web.sh"
-sha256 = "f05c0742e68f7f06844038f5f0f24b56ac37a196d82073af85bfe38a61b906d8"
+sha256 = "c150088e9f1fbaf3e84773d996c20b0a980a0f58db93812243b6c46b94d48d98"
 source = "synthetic"
 
 [[asset]]
 path = "screenshots/web-unlocked-light.png"
 generator = "scripts/capture_readme_web.sh"
-sha256 = "a4930aac8a627002b8142f1c24a7adf3e317886604da92f0187208d9d8a39aa2"
+sha256 = "03838f7b67427ba092191cd64b78b7cc46507d5e67238a07982f19c5a9666a35"
 source = "synthetic"

@@ -75,7 +75,8 @@ The live diagnostic is shown at the top of this page. The values in every screen
 drawn face, not from the real models.
 
 The phone companion web app, captured by `scripts/capture_readme_web.sh` in a headless browser from a loopback
-fixture server with canned, identity-free data (no login, host name or address; clock times in UTC):
+fixture server with canned, identity-free data (no login, host name or address) at one fixed synthetic instant,
+2026-10-01 09:41 UTC:
 
 | Unlocked (light) | Locked, two failed `sudo` passwords (light) |
 |---|---|

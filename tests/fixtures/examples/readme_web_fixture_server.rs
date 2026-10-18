@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! readme_web_fixture_server --scene <unlocked|locked-alerts> --assets <dir> [--serve-ms N]
+//!     [--clock <real|fixed>]
 //! readme_web_fixture_server --strip-png <in.png> <out.png>
 //! ```
 
@@ -13,7 +14,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use soos_test_fixtures::readme_web::{serve, strip_png_metadata, WebScene};
+use soos_test_fixtures::readme_web::{
+    serve_with_clock, strip_png_metadata, FixtureClock, WebScene,
+};
 
 /// Default and bounds of `--serve-ms`.
 const DEFAULT_SERVE_MS: u64 = 60_000;
@@ -35,6 +38,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut scene = None;
     let mut assets = None;
     let mut serve_ms = DEFAULT_SERVE_MS;
+    let mut clock = FixtureClock::Real;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let value = iter.next().ok_or_else(|| format!("{arg} needs a value"))?;
@@ -47,6 +51,9 @@ fn run(args: &[String]) -> Result<(), String> {
                     .map_err(|_| "--serve-ms needs a number".to_string())?
                     .clamp(MIN_SERVE_MS, MAX_SERVE_MS);
             }
+            "--clock" => {
+                clock = FixtureClock::parse(value).ok_or("--clock needs real or fixed")?;
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -57,7 +64,14 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut stdout = std::io::stdout();
     writeln!(stdout, "PORT={port}").map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
-    serve(listener, scene, &assets, Duration::from_millis(serve_ms)).map_err(|e| e.to_string())
+    serve_with_clock(
+        listener,
+        scene,
+        &assets,
+        Duration::from_millis(serve_ms),
+        clock,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[allow(
