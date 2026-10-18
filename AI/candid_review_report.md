@@ -1,115 +1,115 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `feat/android-cards`
-- **Base (merge-base)**: `33b5672`
-- **Reviewed-Diff-Fingerprint**: `f4819c726776ac52df7d652896d7c5d3cfdbf40c8358a402c04c7edd9ac54299`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_cards.md`,
-  `AI/auditor_constraints_android_cards.md`, `AI/tester_contract_android_cards.md`,
-  `AI/walkthroughs/236_android_battery_offline_cards.md`, `Docs/REMOTE_COMPANION.md`, `README.md`,
-  `android/app/src/main/java/org/soos/remote/cards/CardModel.kt`,
-  `android/app/src/main/java/org/soos/remote/net/ApiJson.kt`,
-  `android/app/src/main/java/org/soos/remote/net/SoosApi.kt`,
-  `android/app/src/main/java/org/soos/remote/ui/PcCards.kt`,
-  `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt`,
-  `android/app/src/main/res/values/strings.xml`,
-  `android/app/src/test/java/org/soos/remote/ApiJsonTest.kt`,
-  `android/app/src/test/java/org/soos/remote/CardModelTest.kt`,
-  `android/app/src/test/java/org/soos/remote/SoosApiTest.kt`,
-  `tests/invariants/src/android_native_contract.rs`
+- **Target Branch**: `chore/release-dry-run`
+- **Base (merge-base)**: `3f76090` (origin/main after #430)
+- **Reviewed-Diff-Fingerprint**: `52ff21b8554390ecebdb880f90c05d75efc9c76134a16c1dd5d0f39f1d79f99b`
+- **Audited Files**: `.github/workflows/ci.yml`, `AI/BACKLOG.md`, `AI/DECISIONS.md`,
+  `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_release_dry_run.md`,
+  `AI/auditor_constraints_release_dry_run.md`, `AI/walkthroughs/239_release_dry_run.md`,
+  `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/README.md`,
+  `Docs/RELEASING.md`, `scripts/release_dry_run.sh`, `tests/docker/release_dry_run_test.sh`,
+  `tests/invariants/src/lib.rs`, `tests/invariants/src/release_dry_run_contract.rs`
 
 ## 1. Executive Summary
 
-Re-review after the branch was rebased from `3f76090` onto `origin/main` `33b5672` (which gained
-#445, #440, #434 and #435). The frozen patch (`target/candid_diff.patch`, 1864 lines, 18 files)
-adds read-only *Battery* and *Offline history* cards to the native Android app: two plain GETs
-(`/api/battery`, `/api/offline`) on the shared `SoosApi`, two strict bounded parsers, a pure
-`CardModel`, two Compose cards, fixed `strings.xml` texts, JVM tests and invariant ANA-S15.
+The branch adds a local-only release dry run (`scripts/release_dry_run.sh`) that builds a
+`git archive` source tarball, a deterministic `cargo vendor` tarball and `SHA256SUMS` from the
+committed HEAD, a Docker harness that checks reproducibility and an offline build from the two
+tarballs, two extra steps in the existing advisory `system-onnxruntime` CI job, an ADR, docs and
+an invariant contract (12 tests). No Rust production crate is touched. The reviewer independently
+re-ran the scoped invariants tests and clippy, ran the script twice on the real repository
+(byte-identical outputs, 489 vendored crates matching `Cargo.lock`), unpacked the tarballs and
+resolved the workspace offline with an empty `CARGO_HOME`, and exercised the vendor-check failure
+and usage-error paths. No CRITICAL or MAJOR finding.
 
-Rebase integrity was checked mechanically against the pre-rebase commit `f237f1d`:
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-- Every Kotlin, resource, test, invariant, spec, walkthrough, README and `Docs/` file has the
-  **same blob** at `HEAD` as at `f237f1d`; the file list of the diff is identical.
-- `AI/VERIFICATION_MATRIX.md` has a different blob (main moved on) but its +/- hunk lines are
-  identical to the pre-rebase diff (add-only, no removed line).
-- `AI/DECISIONS.md` differs from main by exactly one added line, the branch ADR; the pre-rebase
-  diff also added one blank line before it, which was dropped (whitespace only).
-- Between the two bases, main did not touch `android/`, `crates/remote/src/battery.rs`,
-  `offline.rs`, `routes.rs` or `assets/app.js`, so the pinned server contracts are unchanged.
-
-No CRITICAL, MAJOR or MINOR finding.
-
-## 2. Test Changes (mechanical listing)
-
-- Test files touched: `ApiJsonTest.kt`, `SoosApiTest.kt` (append-only: imports plus new tests),
-  `CardModelTest.kt` (new), `tests/invariants/src/android_native_contract.rs` (append-only, new
-  ANA-S15 section after the last existing test).
-- Removed or changed checks (`^-` with `assert`/`#[test]`/`@Test`/`proptest!`/`should_panic`):
-  **none**.
-- New escape hatches (`#[ignore]`, `@Ignore`, `should_panic`, tolerance, epsilon): **none**.
-- Inline `mod tests` changes: **none**.
-- All removed lines in the patch are documentation prose (README, `Docs/REMOTE_COMPANION.md`),
-  KDoc comments (`ApiJson.Malformed`, `SoosApi`, `refresh`, `alertTime`), the visibility of
-  `alertTime` / `timeText` (`private` to `internal`), and the two app-specific tour where lines
-  (`tour_battery_where`, `tour_offline_alerts_where`), which ADR item (4) explicitly allows; the
-  byte-equal tour texts pinned by ATR-S1 are untouched and the invariants pass.
-- Matrix: rows ANA22 to ANA26 each appear once; a scan of every first-column ID of
-  `AI/VERIFICATION_MATRIX.md` found no duplicate.
+- Test files touched: `tests/docker/release_dry_run_test.sh` (new), `tests/invariants/src/lib.rs`
+  (one new `mod release_dry_run_contract;` declaration, add-only),
+  `tests/invariants/src/release_dry_run_contract.rs` (new).
+- `grep '^-[^-].*(assert|#[test]|#[tokio::test|proptest!|#[should_panic)'`: **no output**. No
+  pre-existing assertion was removed or changed.
+- `grep '^\+.*(#[ignore|#[cfg(any())]|should_panic|tolerance|epsilon)'`: **no output**.
+- `git diff 3f76090 HEAD -- tests 'crates/*/tests' android/app/src/test`: only the three files
+  above; the `lib.rs` hunk is a pure addition. No inline `mod tests` hunk in any crate.
+- The ADR records that a separate CI job was rejected precisely because it would require changing
+  the immutable MAC5 assertion (`portable_crates_contract::test_mac_pr_loop_treats_only_the_macos_job_as_advisory`,
+  which pins exactly two `ADVISORY_CHECKS`); the reviewer confirmed that assertion and
+  `scripts/pr_checks_gate.sh` are unchanged.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Client: `SoosApp.kt` still obtains `api` via `remember(pc.origin) { SharedApi.forOrigin(pc.origin) }`;
-  `battery()` / `offline()` go through the existing `get()` helper, so the in-memory cookie and the
-  `login_required` drop apply (`SoosApiTest.batteryAndOfflineSendTheSessionCookieAndDropItOnLoginRequired`).
-- Parsers: tried `percent = 4294967296` (Long above 100, refused), `50.5`, `"50"`, values with a
-  non-`present` state, `present` without charge, `unavailable` without reason, a reason without
-  `unavailable`, non-`active` with a monitor other than `unknown` or with intervals, 33 intervals,
-  inverted spans, a `u64::MAX` start, bodies of 16384 / 16385 chars: all refused or accepted as
-  the server rules (`battery.rs`, `offline.rs`) require, and each case has a test.
-- `CardModel.offlineDuration`: boundaries 59 999 / 60 000 / 3 599 999 / 3 600 000 / 172 799 999 /
-  172 800 000 / `Long.MAX_VALUE` / negative are all tested; no overflow (division only).
-- UI state: `clearCards()` runs on the unreachable and signed-out branches, `loadCards()` only on
-  the authenticated branch; a failed load shows a fixed error text, never server text.
-- PASS.
+- Reproducibility: ran `scripts/release_dry_run.sh --offline --out-dir` twice into two scratch
+  directories; `SHA256SUMS` and both tarballs `cmp`-identical; the vendor tarball decompresses to
+  525,568,000 bytes, matching the ADR's "526 MB". PASS.
+- Version source: `[workspace.package] version = "0.1.0"` in `Cargo.toml`; the outputs are named
+  `soos-0.1.0*`. The awk parser stops at the first `version` inside `[workspace.package]` only;
+  decoys in other tables are covered by `test_rdr_s3_version_comes_from_head_workspace_package`. PASS.
+- `SOURCE_DATE_EPOCH` = committer time (`%ct`), the same time `git archive` uses for a commit
+  argument, so both tarballs carry one mtime. PASS.
+- Source tarball guard: the repository tracks no `.cargo/` or `vendor/` (`git ls-files`), and no
+  `.gitattributes` exists, so `export-ignore`/`export-subst` cannot alter the archive. PASS.
+- `vendor_crates`: the `grep ... && fail` list does not trip `set -e` when the lock has no
+  registry source (zero-dependency fixture path), verified by the RDR1 fixture run. PASS.
+- Outputs are staged in `mktemp -d` inside the output directory and moved with `mv -f` on the same
+  file system; the `EXIT` trap removes the staging directory; `--out-dir /` and option-like values
+  are refused. PASS.
+- Docs claims checked against code: PKGBUILD `source=()` is empty (line 29), RPM `Source0` exists,
+  `ADVISORY_CHECKS` already lists the `System ONNX Runtime (Arch, offline, advisory on PRs)` job,
+  the Dockerfile sets `SOOS_SORT_CONTAINER=1`, `CARGO_HOME=/usr/local/cargo` with no baked registry
+  (the system harness mounts its registry as a volume), `WORKDIR /workspace`, root user; the
+  harness's in-container guards therefore hold. 489 crates confirmed. PASS.
+- CI time budget: the latest `main` run of the `system-onnxruntime` job took about 8.5 min against
+  `timeout-minutes: 75`; the new step has its own 40-minute limit. PASS.
 
 ### PAM Concurrency & Deadlines
-- No change under `crates/pam` or any Rust production crate. Network calls run on
-  `Dispatchers.IO` through the existing transport and its unchanged bounds. PASS.
+- Not affected: no change under `crates/pam` or any Rust production crate. The harness asserts
+  `libpam_soos.so` does not link ONNX Runtime. PASS (N/A).
 
 ### Panic Safety & Fail-Closed
-- `parseBattery` / `parseOffline` catch `Malformed` and `JSONException` and return `null`; array
-  access is by `0 until length()` with an `as? JSONObject` check; `offlineReasonText` only sees
-  parser-admitted reasons. No path grants anything: the cards are read-only with no action. PASS.
+- No Rust production code changed. The vendor check fails closed: removing one vendored crate gave
+  `vendored crates differ from Cargo.lock (488 vendored, 489 locked ...)`, exit 1; an unknown
+  argument exits 2; non-crates.io sources, malformed or missing lock checksums, symlinks and
+  ambiguous `.cargo-checksum.json` files fail (RDR-S2 tests). PASS.
 
 ### Test Integrity & Anti-Weakening
-- No pre-existing assertion removed or changed (section 2). New tests would fail against plausible
-  wrong implementations (accepting values without `present`, an off-by-one interval bound,
-  dropping the session cookie, sending `Origin` / `X-Soos-Action` on a GET). PASS.
+- No pre-existing assertion touched (section 2). The new tests run the real script against a
+  temporary fixture git repository and assert concrete bytes (gzip header flags and MTIME, tar
+  owner/mtime/mode, exact output set, `sha256sum -c`), so a non-deterministic or wrongly named
+  implementation fails them. `cargo test -p soos-invariants -- --test-threads=3`: 799 passed,
+  0 failed (12 in `release_dry_run_contract`); `cargo clippy -p soos-invariants --all-targets
+  -- -D warnings`: clean. PASS.
 
 ### Memory, Bounds & Secrets
-- Body length checked before `JSONObject` parsing (`MAX_VIEW_BODY_CHARS` = 16384, equal to the
-  transport bound); intervals checked against `MAX_OFFLINE_INTERVALS` = 32 before the list is
-  allocated, pinned to `crates/remote/src/lib.rs` by ANA-S15. Nothing logged; no server, status
-  number or exception text displayed. PASS.
+- No secret, key or credential is read or written; nothing signs. The harness bounds
+  `SOOS_RDR_JOBS` (1..64) and `SOOS_RDR_BUILD_ATTEMPTS` (1..3) and builds under
+  `--network none` with the release directory mounted read-only. PASS.
 
 ### Supply Chain & Automation
-- No change to `AndroidManifest.xml`, Gradle files, the version catalog, `verification-metadata.xml`,
-  `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/`; no new permission (the `aapt2`
-  allowlist invariant passes). PASS.
+- `ci.yml`: no new action, no `upload-artifact`, no cache save, no `${{ github.event.* }}` in
+  `run:`; the two steps are plain `rustup toolchain install --profile minimal` (reads
+  `rust-toolchain.toml`) and the harness. No `Cargo.toml`, `Cargo.lock` or `deny.toml` change. The
+  only network step is `cargo fetch --locked`, plus the existing image build. PASS.
 
 ### English-Only Policy
-- All code, comments, strings and docs in the patch are English. PASS.
+- All added files, comments and script output are English; a scan for French accented characters
+  in the changed files returned nothing. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- None.
-
-Validation run on the rebased branch:
-`LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/android-cards CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3 cargo test --locked -p soos-invariants -- --test-threads=3`
-gave 810 passed, 0 failed, 0 ignored. The JVM tests (`ApiJsonTest`, `SoosApiTest`, `CardModelTest`)
-were not run locally; their sources are byte-identical to the pre-rebase review and they run in
-the CI job `Android (debug build)`.
+- **[MINOR]** `AI/VERIFICATION_MATRIX.md` RDR4/RDR5 — the "local Docker run on 2026-10-18" evidence
+  (including "4 min 17 s") could not be reproduced by this reviewer (Docker phase 3 not re-run);
+  the reviewer only reproduced phase 1 reproducibility and the offline workspace resolution. The
+  rows already state that CI evidence follows on the pull request; confirm with the PR run of the
+  `system-onnxruntime` job.
+- **[SUGGESTION]** `scripts/release_dry_run.sh:128` — the `"package":"<hex>"` grep would also
+  match a vendored file whose crate-relative path is literally `package` in the `files` map; this
+  fails closed (exit 1, "exactly one package checksum"), so it can only cause a false failure,
+  never a false pass. Parsing the trailing `"package"` key only would remove the ambiguity.
+- **[SUGGESTION]** `AI/walkthroughs/239_release_dry_run.md` — the number jumps from 231 to 239
+  (presumably reserved by parallel branches); make sure no other branch lands a different 239.
 
 ## 5. Final Verdict
 
