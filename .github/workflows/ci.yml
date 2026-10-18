@@ -28,7 +28,10 @@
 #                        the real-model tests on that library (after lint;
 #                        advisory on pull requests: not part of CI Success,
 #                        listed in scripts/pr_checks_gate.sh; required on push
-#                        to main through ci-success-main)
+#                        to main through ci-success-main); it then runs the
+#                        release dry run (two byte-identical source and vendor
+#                        tarball builds, offline build from the tarballs only;
+#                        nothing uploaded or published)
 #   6g. setup-root-preview — scripts/setup.sh camera view, daemon side, as real
 #                        root under a real systemd in ubuntu:24.04 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
@@ -412,6 +415,13 @@ jobs:
   # It depends on live Arch [extra] state (keyring, mirrors, rebuilds), so it is
   # advisory on pull requests (runs for signal, not part of CI Success, listed in
   # scripts/pr_checks_gate.sh) and required on push to main (ci-success-main).
+  # The same job then runs the release dry run (GitHub #444, part of #361; ADR
+  # 2026-10-18 "Release Dry Run Publishes Nothing"): scripts/release_dry_run.sh
+  # twice (byte-identical tarballs and SHA256SUMS), then an offline build of the
+  # release workspace from the two tarballs only in the same Arch image
+  # (tests/docker/release_dry_run_test.sh). The repository is public: no
+  # artifact is uploaded, nothing is tagged, signed or published, and every
+  # produced file is discarded with the runner.
   # ---------------------------------------------------------------------------
   system-onnxruntime:
     name: "System ONNX Runtime (Arch, offline, advisory on PRs)"
@@ -426,6 +436,13 @@ jobs:
 
       - name: Offline build and real-model tests against the Arch onnxruntime-cpu
         run: ./tests/docker/system_onnxruntime_test.sh
+
+      - name: Install Rust toolchain (rust-toolchain.toml, host cargo vendor)
+        run: rustup toolchain install --profile minimal
+
+      - name: Release dry run (reproducible tarballs, offline build, publishes nothing)
+        timeout-minutes: 40
+        run: ./tests/docker/release_dry_run_test.sh
 
   # ---------------------------------------------------------------------------
   # Job 6d: packaging/soos-daemon.service under a real systemd (PID 1) in a

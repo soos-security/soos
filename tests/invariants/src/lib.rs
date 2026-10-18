@@ -439,6 +439,14 @@ mod setup_user_phase_contract;
 #[cfg(all(test, unix))]
 mod system_onnxruntime_contract;
 
+/// Release dry run: reproducible source and vendor tarballs, vendored crate set equal to
+/// Cargo.lock by package checksum, version from [workspace.package], offline build harness and
+/// no publish, sign, tag or upload step (GitHub #444, part of #361, ADR 2026-10-18 "Release Dry
+/// Run Publishes Nothing"; spec AI/architect_spec_release_dry_run.md; rows RDR1-RDR6,
+/// RDR-S1-RDR-S8).
+#[cfg(all(test, unix))]
+mod release_dry_run_contract;
+
 /// README assets: every README image resolves under `Docs/assets/` with alt text, every asset
 /// is listed in `Docs/assets/MANIFEST.toml` with a known generator and a matching SHA-256,
 /// size budget, no metadata or animation, dev-only and hardware-free capture tooling (GitHub

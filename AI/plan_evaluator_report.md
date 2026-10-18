@@ -1,49 +1,48 @@
 # Plan Evaluation Report
 - **Date**: 2026-10-18
-- **Issue**: GitHub #439 (part of epic #357; GitHub-only, no backlog id) — read-only battery and offline-history cards in the native Android app
-- **Branch**: `feat/android-cards`
+- **Issue**: GitHub #444 (part of epic #361, no backlog id) — reproducible source and vendor tarballs with a release dry run that never publishes
+- **Branch**: `chore/release-dry-run`
 - **Base commit**: `3f76090`
-- **Plan evaluated**: `AI/architect_spec_android_cards.md` §0–§8
-- **Mode**: self-check by the implementing agent. The independent candid review runs separately, before the push.
+- **Plan evaluated**: `AI/architect_spec_release_dry_run.md` §0–§4
+- **Mode**: self-check by the implementing agent (tooling, CI and documentation change; no runtime crate). The independent candid review still runs separately.
 
 ## 1. Coverage Matrix
 
-| #439 acceptance line | Spec element | Status |
+| #444 acceptance line | Spec element | Status |
 |---|---|---|
-| `SoosApi.battery()` / `offline()` through the shared client, cookie, `login_required` drops the session | §3 (existing private `get()`/`send()`) | Covered |
-| Strict, bounded `parseBattery` (every state incl. `disabled`) | §2.1 | Covered |
-| Strict, bounded `parseOffline` (states, reason, monitor, intervals newest first) | §2.2 | Covered |
-| Unknown enum, wrong type, negative or out-of-range number, > 32 intervals, > 16384 characters refuse the whole view, no "other" fallback | §2.1, §2.2 | Covered |
-| Two read-only soos-brand cards, refresh on open, Refresh, pull to refresh | §5 | Covered |
-| Fixed `strings.xml` texts, theme colours, no server/exception text, no logging, `java.time` + `ZoneId.systemDefault()` | §5 | Covered |
-| Tour battery text names the new card | §6 (where line; the shared text is pinned byte-equal to `app.js`) | Covered with deviation, see F-1 |
-| No permission, manifest, dependency, server or signing change | §0, §8 | Covered |
-| JVM tests, add-only invariant extension, matrix ANA22+, ADR, §2j, walkthrough | §7 | Covered |
+| `scripts/release_dry_run.sh`, local only, bounded options, `--dry-run` plan | §2.1, RDR-S3, RDR-S4 | Covered |
+| `soos-<workspace version>.tar.gz` from HEAD with `git archive`, mtime = commit time | §2.1 step 3, RDR-S3, RDR-S5 | Covered |
+| `soos-<ver>-vendor.tar.zst` from `cargo vendor --locked` + `.cargo/config.toml` snippet, sorted, owner 0, fixed mtime, fixed zstd level | §2.1 steps 5 and 7, RDR-S5 | Covered |
+| `SHA256SUMS` over both files in `target/release-dry-run/` | §2.1 step 8 | Covered |
+| No gpg, no gh release, no network after the fetch step | §2.1 "Never", RDR-S1, RDR-S5 | Covered |
+| Invariant: no publish/sign/upload command | RDR-S1 | Covered |
+| Invariant: vendored set equals Cargo.lock by `.cargo-checksum.json` package checksum | §2.2, RDR-S2 | Covered (behavioural) |
+| Invariant: version from `[workspace.package]` | RDR-S3 | Covered (behavioural + static) |
+| Two runs byte-identical; offline build from the tarballs only in the clean Arch system-ORT image, `--network none`, `ORT_SKIP_DOWNLOAD=1`, no `.git`, no registry | §2.3, RDR-S6 | Covered |
+| Advisory on PRs like `system-onnxruntime`, no artifact upload | §1.1, §2.4, RDR-S7 | Covered with a recorded deviation (steps in the existing job, see §3) |
+| ADR, matrix rows, backlog entry, `Docs/RELEASING.md` owner-only checklist, packaging pointer, walkthrough | §4, RDR-S8 | Covered |
+| Optional SBOM | — | Not done (optional; no new tool) |
 
 ## 2. Facts Verified
 
-| Claim | Evidence |
-|---|---|
-| Paths | `crates/remote/src/routes.rs:114` `BATTERY_PATH = "/api/battery"`, `:116` `OFFLINE_PATH = "/api/offline"`; dispatched at `server.rs:1400-1401` |
-| Battery view shape and cross-field rules | `battery.rs:46-116` (`BatteryState`, `ChargeStatus`, `BatteryView`, `without_values`), `aggregate` `:295-319` (`charge: Some(..)` for `Present`), `parse_capacity` ≤ 100 `:216` |
-| Offline view shape and cross-field rules | `offline.rs:817-879` (`OfflineState`, `OfflineUnavailableReason`, `NetworkMonitor`, `OfflineView`, `disabled`, `store_failed`), `view()` `:1090-1113`, `OfflineInterval` `:103-129`, store refuses `start > end` `:545` |
-| Interval bound | `lib.rs:700` `MAX_OFFLINE_INTERVALS: usize = 32` |
-| Auth of both routes | `Docs/REMOTE_COMPANION.md` §6 table: tailnet, or Funnel with a session, `403 login_required` otherwise |
-| Transport bound | `UrlConnectionTransport.kt` `MAX_RESPONSE_BYTES = 16384` (pinned by ANA-S8) |
-| `tour_battery_text` is pinned | `android_tour_contract.rs` ATR-S1 asserts byte equality with `app.js:2183`; ATR-S2 needs `web app` and `battery_status = false` in `tour_battery_where` |
-| SoosApp constraints | ANA-S14 forbids `.message`, `localizedMessage`, `toString()}` and bare `Text(result` in `SoosApp.kt`; ATR-S5/S6 pin the tour wiring, which is not touched |
+| Fact | Check | Actual | Match |
+|---|---|---|---|
+| Workspace version | `Cargo.toml` `[workspace.package]` | `0.1.0` | Yes |
+| Registry-only lock | `grep -c 'checksum = ' Cargo.lock`, `grep -c 'source = "git' Cargo.lock` | 489, 0 | Yes |
+| Vendored set size | local `cargo vendor --locked --offline` | 489 directories, 538 MiB | Yes |
+| Advisory list pinned | `portable_crates_contract` MAC5 `assert_eq!` on the `ADVISORY_CHECKS` line | exactly two names | Yes |
+| Job assertions are `contains` | `test_sort_s5_ci_job_runs_offline_arch_harness` | needles only | Yes |
+| Job duration | `gh run view 39137537240` | 8 min 27 s of 75 | Yes |
+| zstd determinism | level 12, `-T1` vs `-T3` | byte-identical | Yes |
 
-## 3. Pillar Analysis
+## 3. Findings
 
-- **Security**: read-only GETs; no new header, body, origin, host or storage; tokens select fixed texts only; the parser is total and bounded.
-- **Bounded resources**: 16384 characters, 32 intervals, fixed-size views.
-- **Panic/exception safety**: every `org.json` access type-checked; `JSONException` and an internal `Malformed` caught inside the parser; `DateTimeException` caught in the formatter.
-- **Privacy**: battery level, charge state, mains presence, offline reasons and times only (what the web app shows); nothing logged.
-- **Tests immutable**: only additions to `ApiJsonTest.kt`, `SoosApiTest.kt` and `android_native_contract.rs`, plus a new `CardModelTest.kt`.
-
-## 4. Findings
-
-- **F-1 (accepted deviation, documented)**: the task asked to adjust `tour_battery_text`. That text is byte-equal to the web tour and pinned by ATR-S1; changing it needs a change of `crates/remote/assets/app.js` (a server change, excluded) and of an existing test assertion (forbidden). The app-specific `tour_battery_where` line names the new Battery card instead, which ATR-S2 allows. Reported in the PR body and the walkthrough.
-- **F-2 (accepted)**: strict parsing without an "other" fallback means a future server enum shows "could not be loaded" until the app is updated, as for the alerts (ADR 2026-10-17 item (3)).
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| X-1 | Major | A separate job in `ADVISORY_CHECKS` breaks MAC5 (immutable test); a separate job outside it blocks `pr_loop.sh` | Steps in the existing advisory `system-onnxruntime` job (§1.1); reported to the owner in the PR body |
+| X-2 | Minor | zstd level 19 takes > 4 min per run (two runs per CI job) | Level 12 pinned (13 s, 48 MB) |
+| X-3 | Minor | `TAR_OPTIONS`, `GZIP`, `ZSTD_CLEVEL`, `ZSTD_NBTHREADS` and the umask change the bytes | Unset / fixed in the script, pinned by RDR-S5 |
+| X-4 | Minor | Reading the version from the work tree could mismatch the archived HEAD | Version read from `git show HEAD:Cargo.toml` |
+| X-5 | Minor | Writing the cargo snippet into `.cargo/config.toml` while `cargo vendor` runs | Snippet captured to a staging file first, then moved |
 
 VALIDATION_VERDICT: APPROVED

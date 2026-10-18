@@ -1,115 +1,123 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `feat/android-cards`
-- **Base (merge-base)**: `33b5672`
-- **Reviewed-Diff-Fingerprint**: `f4819c726776ac52df7d652896d7c5d3cfdbf40c8358a402c04c7edd9ac54299`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_android_cards.md`,
-  `AI/auditor_constraints_android_cards.md`, `AI/tester_contract_android_cards.md`,
-  `AI/walkthroughs/236_android_battery_offline_cards.md`, `Docs/REMOTE_COMPANION.md`, `README.md`,
-  `android/app/src/main/java/org/soos/remote/cards/CardModel.kt`,
-  `android/app/src/main/java/org/soos/remote/net/ApiJson.kt`,
-  `android/app/src/main/java/org/soos/remote/net/SoosApi.kt`,
-  `android/app/src/main/java/org/soos/remote/ui/PcCards.kt`,
-  `android/app/src/main/java/org/soos/remote/ui/SoosApp.kt`,
-  `android/app/src/main/res/values/strings.xml`,
-  `android/app/src/test/java/org/soos/remote/ApiJsonTest.kt`,
-  `android/app/src/test/java/org/soos/remote/CardModelTest.kt`,
-  `android/app/src/test/java/org/soos/remote/SoosApiTest.kt`,
-  `tests/invariants/src/android_native_contract.rs`
+- **Target Branch**: `chore/release-dry-run`
+- **Base (merge-base)**: `54d69f0` (origin/main after #445, #440, #434, #435 and #442)
+- **Reviewed-Diff-Fingerprint**: `0d5740dced03567e87512506dee5b5916e2ecf0745959163e32085cd14fdd62f`
+- **Audited Files**: `.github/workflows/ci.yml`, `AI/BACKLOG.md`, `AI/DECISIONS.md`,
+  `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_release_dry_run.md`,
+  `AI/auditor_constraints_release_dry_run.md`, `AI/walkthroughs/239_release_dry_run.md`,
+  `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/README.md`,
+  `Docs/RELEASING.md`, `scripts/release_dry_run.sh`, `tests/docker/release_dry_run_test.sh`,
+  `tests/invariants/src/lib.rs`, `tests/invariants/src/release_dry_run_contract.rs`
 
 ## 1. Executive Summary
 
-Re-review after the branch was rebased from `3f76090` onto `origin/main` `33b5672` (which gained
-#445, #440, #434 and #435). The frozen patch (`target/candid_diff.patch`, 1864 lines, 18 files)
-adds read-only *Battery* and *Offline history* cards to the native Android app: two plain GETs
-(`/api/battery`, `/api/offline`) on the shared `SoosApi`, two strict bounded parsers, a pure
-`CardModel`, two Compose cards, fixed `strings.xml` texts, JVM tests and invariant ANA-S15.
+Independent re-review after the rebase of `chore/release-dry-run` (GitHub #444, part of #361) from
+`3f76090` onto `54d69f0`. The frozen patch (`target/candid_diff.patch`, 2295 lines) was compared,
+file by file, with the pre-rebase branch (`origin/chore/release-dry-run`, commit `325dbac` against
+`3f76090`): the added and removed lines of 12 of the 15 files are identical, and
+`AI/plan_evaluator_report.md` (excluded from the fingerprint) is byte-identical. The only
+differences are in the three append-conflict files:
 
-Rebase integrity was checked mechanically against the pre-rebase commit `f237f1d`:
+- `AI/BACKLOG.md`: the same 28 added lines; one blank separator line moved from before the entry
+  to after it. The `### GitHub #444` entry sits at line 2043 inside
+  `## Full Project Review Remediation (2026-09-29)` (line 1979), directly after the #415/#416
+  model-deploy entry and before main's new `## Active-IR Anti-Spoofing (epic #353)` section
+  (line 2072). It is not filed under the IR epic.
+- `AI/VERIFICATION_MATRIX.md`: the same component section, preceded by a blank line and a `---`
+  separator after main's last table (LKI12), matching the separator style used between the
+  other components.
+- `AI/DECISIONS.md`: the same single appended ADR line, now after main's #439 ADR.
 
-- Every Kotlin, resource, test, invariant, spec, walkthrough, README and `Docs/` file has the
-  **same blob** at `HEAD` as at `f237f1d`; the file list of the diff is identical.
-- `AI/VERIFICATION_MATRIX.md` has a different blob (main moved on) but its +/- hunk lines are
-  identical to the pre-rebase diff (add-only, no removed line).
-- `AI/DECISIONS.md` differs from main by exactly one added line, the branch ADR; the pre-rebase
-  diff also added one blank line before it, which was dropped (whitespace only).
-- Between the two bases, main did not touch `android/`, `crates/remote/src/battery.rs`,
-  `offline.rs`, `routes.rs` or `assets/app.js`, so the pinned server contracts are unchanged.
+No semantic conflict with main's changes was found and the soos-invariants suite passes
+(822 tests). No CRITICAL or MAJOR finding.
 
-No CRITICAL, MAJOR or MINOR finding.
+## 2. Test Changes
 
-## 2. Test Changes (mechanical listing)
+Mechanical listing from the frozen patch:
 
-- Test files touched: `ApiJsonTest.kt`, `SoosApiTest.kt` (append-only: imports plus new tests),
-  `CardModelTest.kt` (new), `tests/invariants/src/android_native_contract.rs` (append-only, new
-  ANA-S15 section after the last existing test).
-- Removed or changed checks (`^-` with `assert`/`#[test]`/`@Test`/`proptest!`/`should_panic`):
-  **none**.
-- New escape hatches (`#[ignore]`, `@Ignore`, `should_panic`, tolerance, epsilon): **none**.
-- Inline `mod tests` changes: **none**.
-- All removed lines in the patch are documentation prose (README, `Docs/REMOTE_COMPANION.md`),
-  KDoc comments (`ApiJson.Malformed`, `SoosApi`, `refresh`, `alertTime`), the visibility of
-  `alertTime` / `timeText` (`private` to `internal`), and the two app-specific tour where lines
-  (`tour_battery_where`, `tour_offline_alerts_where`), which ADR item (4) explicitly allows; the
-  byte-equal tour texts pinned by ATR-S1 are untouched and the invariants pass.
-- Matrix: rows ANA22 to ANA26 each appear once; a scan of every first-column ID of
-  `AI/VERIFICATION_MATRIX.md` found no duplicate.
+- Test files touched: `tests/docker/release_dry_run_test.sh` (new),
+  `tests/invariants/src/release_dry_run_contract.rs` (new), `tests/invariants/src/lib.rs`
+  (one added `#[cfg(all(test, unix))] mod release_dry_run_contract;` with its doc comment).
+- Removed or changed assertions (`^-` lines with `assert`, `#[test]`, `proptest!`,
+  `#[should_panic]`): none.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
+- Inline `mod tests` changes: none.
+
+All test changes are additions. No pre-existing assertion was modified by the rebase.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Client: `SoosApp.kt` still obtains `api` via `remember(pc.origin) { SharedApi.forOrigin(pc.origin) }`;
-  `battery()` / `offline()` go through the existing `get()` helper, so the in-memory cookie and the
-  `login_required` drop apply (`SoosApiTest.batteryAndOfflineSendTheSessionCookieAndDropItOnLoginRequired`).
-- Parsers: tried `percent = 4294967296` (Long above 100, refused), `50.5`, `"50"`, values with a
-  non-`present` state, `present` without charge, `unavailable` without reason, a reason without
-  `unavailable`, non-`active` with a monitor other than `unknown` or with intervals, 33 intervals,
-  inverted spans, a `u64::MAX` start, bodies of 16384 / 16385 chars: all refused or accepted as
-  the server rules (`battery.rs`, `offline.rs`) require, and each case has a test.
-- `CardModel.offlineDuration`: boundaries 59 999 / 60 000 / 3 599 999 / 3 600 000 / 172 799 999 /
-  172 800 000 / `Long.MAX_VALUE` / negative are all tested; no overflow (division only).
-- UI state: `clearCards()` runs on the unreachable and signed-out branches, `loadCards()` only on
-  the authenticated branch; a failed load shows a fixed error text, never server text.
-- PASS.
+
+- Rebase fidelity: per-file comparison of `+`/`-` lines between the old and new branch diffs
+  → identical for `ci.yml`, both scripts, both invariant files, all `Docs/` files, the spec, the
+  auditor constraints and walkthrough 239 → PASS.
+- Interaction with main's #434 (lock-screen adapters): `PKGBUILD`, `soos.spec` and `install.sh`
+  now install `soos-lockstatus`, `soos-lock-widget`, `packaging/gnome-shell/soos-lockscreen@soos/*`
+  and `packaging/lockscreen/hyprlock-soos.conf`. The two crates were already workspace members on
+  the old base and have no cargo features, so the harness's
+  `cargo build --release --workspace --no-default-features --features system-onnxruntime` still
+  builds both binaries. The packaging files are tracked and there is no `.gitattributes`
+  (`export-ignore`), so `git archive HEAD` puts them in the source tarball → PASS.
+- Interaction with #435 (`crates/vision/src/ir_active.rs`) and #445 (`crates/daemon/src/check_config.rs`):
+  plain workspace sources with no new dependency, `Cargo.toml`/`Cargo.lock` unchanged between
+  `3f76090` and `54d69f0`, so the vendor set and the `--check-vendor` comparison are unaffected → PASS.
+- Interaction with #440 (`setup.sh` start bounds) and #442 (Android): no CI, build or vendor
+  impact; `android/` is part of the git archive as before → PASS.
+- `ci.yml`: main changed nothing in `.github/` between the two bases; the branch's hunk (header
+  comment, job comment, `rustup toolchain install`, release dry-run step with
+  `timeout-minutes: 40`) applies unchanged in the `system-onnxruntime` job. The last CI run of
+  PR #447 took 12m34s for that job, inside its 75-minute job timeout → PASS.
+- Doc coherence: the `Docs/PACKAGING_AND_PROVISIONING.md` §7.5 edit merged cleanly next to
+  main's lock-screen text; `Docs/RELEASING.md` does not enumerate shipped binaries, so #434 does
+  not make it stale → PASS.
 
 ### PAM Concurrency & Deadlines
-- No change under `crates/pam` or any Rust production crate. Network calls run on
-  `Dispatchers.IO` through the existing transport and its unchanged bounds. PASS.
+
+No change under `crates/pam` or any runtime crate → N/A, PASS.
 
 ### Panic Safety & Fail-Closed
-- `parseBattery` / `parseOffline` catch `Malformed` and `JSONException` and return `null`; array
-  access is by `0 until length()` with an `as? JSONObject` check; `offlineReasonText` only sees
-  parser-admitted reasons. No path grants anything: the cards are read-only with no action. PASS.
+
+No Rust production code changed. The scripts keep their fail-closed `--check-vendor` behaviour
+(content unchanged; RDR-S2 tests pass) → PASS.
 
 ### Test Integrity & Anti-Weakening
-- No pre-existing assertion removed or changed (section 2). New tests would fail against plausible
-  wrong implementations (accepting values without `present`, an off-by-one interval bound,
-  dropping the session cookie, sending `Origin` / `X-Soos-Action` on a GET). PASS.
+
+The section 2 listing is additions only; the new contract module is registered under
+`#[cfg(all(test, unix))]` like its neighbours; the whole `soos-invariants` suite, including the
+pre-existing CI invariants (SHA-pinned actions, workflow `permissions: contents: read`,
+`ci-success` needs, `ADVISORY_CHECKS` in `scripts/pr_checks_gate.sh`), passes on the rebased
+tree → PASS.
 
 ### Memory, Bounds & Secrets
-- Body length checked before `JSONObject` parsing (`MAX_VIEW_BODY_CHARS` = 16384, equal to the
-  transport bound); intervals checked against `MAX_OFFLINE_INTERVALS` = 32 before the list is
-  allocated, pinned to `crates/remote/src/lib.rs` by ANA-S15. Nothing logged; no server, status
-  number or exception text displayed. PASS.
+
+No secret, token or credential is read or written; no `${{ secrets.* }}` added → PASS.
 
 ### Supply Chain & Automation
-- No change to `AndroidManifest.xml`, Gradle files, the version catalog, `verification-metadata.xml`,
-  `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/`; no new permission (the `aapt2`
-  allowlist invariant passes). PASS.
+
+- Every `uses:` in `ci.yml` is pinned by a 40-hex SHA (a grep for unpinned `uses:` returns nothing).
+- Workflow-level `permissions: contents: read` unchanged; no job-level escalation added.
+- `ci-success-main` still needs `[ci-success, system-onnxruntime]`; the job stays advisory on pull
+  requests through the existing `ADVISORY_CHECKS` entry.
+- No `${{ github.event.* }}` interpolation in `run:`; no `upload-artifact`, cache save, `gh`,
+  `git tag`/`push`, `gpg` or `curl` command in either script (comments only) → PASS.
 
 ### English-Only Policy
-- All code, comments, strings and docs in the patch are English. PASS.
+
+All added text is English → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- None.
+None. Commands run on the rebased tree:
 
-Validation run on the rebased branch:
-`LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/android-cards CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3 cargo test --locked -p soos-invariants -- --test-threads=3`
-gave 810 passed, 0 failed, 0 ignored. The JVM tests (`ApiJsonTest`, `SoosApiTest`, `CardModelTest`)
-were not run locally; their sources are byte-identical to the pre-rebase review and they run in
-the CI job `Android (debug build)`.
+- `bash -n scripts/release_dry_run.sh` and `bash -n tests/docker/release_dry_run_test.sh`: OK.
+- `LIBONNXRUNTIME_NO_PKG_CONFIG=1 ... cargo test --locked -p soos-invariants -- --test-threads=3`:
+  822 passed, 0 failed, 0 ignored.
+
+The Docker harness itself (`tests/docker/release_dry_run_test.sh`) was not run locally; it runs in
+the `system-onnxruntime` CI job.
 
 ## 5. Final Verdict
 
