@@ -177,7 +177,10 @@ Options:
   --presence <on|off>      Presence auto-unlock: off creates
                            <sysconfdir>/soos/presence.disable, on removes it;
                            without it the current state is kept and reported
-                           (the daemon default is on)
+                           (the daemon default is on); applied only when
+                           <sysconfdir> is /etc (soos-daemon reads
+                           /etc/soos/presence.disable), otherwise the exact
+                           command is printed and reported not applied
   --lock-widget <on|off>   Lock-screen face-scan widget, on by default: off
                            creates <sysconfdir>/soos/lockwidget.disable (the
                            GNOME card is off for every user and setup enables
@@ -515,6 +518,13 @@ fi
 
 # Paths derived from the options (the same layout as scripts/install.sh).
 PRESENCE_FLAG="${SYSCONFDIR}/soos/presence.disable"
+# The only presence kill switch soos-daemon reads (crates/daemon/src/presence/mod.rs
+# DEFAULT_KILL_SWITCH_DIR and PRESENCE_DISABLE_FLAG; main.rs takes no path option for it),
+# also the file soos-gui reads and toggles (crates/gui/src/feature_control.rs SOOS_ETC_DIR).
+# The presence step is reported done only when PRESENCE_FLAG is this file; otherwise setup
+# still records the request in PRESENCE_FLAG but reports it "not applied" and prints the
+# command for this file (GitHub #453, same rule as DAEMON_READ_CONFIG).
+readonly PRESENCE_READ_FLAG="/etc/soos/presence.disable"
 # Lock-screen adapters (GitHub #432, PR 6 of #352): the paths scripts/install.sh writes.
 LOCK_WIDGET_FLAG="${SYSCONFDIR}/soos/lockwidget.disable"
 readonly GNOME_EXTENSION_UUID="soos-lockscreen@soos"
@@ -991,7 +1001,51 @@ enroll_command() {
         "${TARGET_USER}"
 }
 
+# True when <sysconfdir>/soos/presence.disable is not the file soos-daemon reads (a
+# non-default --sysconfdir): the presence step is then never reported as applied.
+presence_flag_elsewhere() {
+    [[ "${PRESENCE_FLAG}" != "${PRESENCE_READ_FLAG}" ]]
+}
+
+# "not applied: ..." with the exact administrator command that makes soos-daemon see the
+# requested state ($1: off or on).
+presence_not_applied() {
+    local cmd="sudo rm -f ${PRESENCE_READ_FLAG}"
+    [[ "$1" == off ]] && cmd="sudo touch ${PRESENCE_READ_FLAG}"
+    printf 'not applied: soos-daemon reads %s, not %s (--sysconfdir); as an administrator run: %s' \
+        "${PRESENCE_READ_FLAG}" "${PRESENCE_FLAG}" "${cmd}"
+}
+
+# The presence state requested for this run: off or on (without --presence, the state the
+# flag records now).
+presence_requested() {
+    case "${PRESENCE}" in
+        off|on) printf '%s' "${PRESENCE}" ;;
+        *)
+            if [[ -e "${PRESENCE_FLAG}" || -L "${PRESENCE_FLAG}" ]]; then
+                printf 'off'
+            else
+                printf 'on'
+            fi
+            ;;
+    esac
+}
+
+# The presence state. With a non-default --sysconfdir no component reads the flag files
+# below it, so only the state recorded there is named, followed by the "not applied" note.
 presence_report() {
+    if presence_flag_elsewhere; then
+        if [[ -e "${PRESENCE_FLAG}" || -L "${PRESENCE_FLAG}" ]]; then
+            printf 'off recorded in %s (--presence on records on), %s' "${PRESENCE_FLAG}" "$(presence_not_applied off)"
+        else
+            printf 'on recorded (no %s; --presence off records off), %s' "${PRESENCE_FLAG}" "$(presence_not_applied on)"
+        fi
+        return 0
+    fi
+    presence_state
+}
+
+presence_state() {
     if [[ -e "${KILL_SWITCH}" || -L "${KILL_SWITCH}" ]]; then
         printf 'everything off (%s present: face PAM and presence auto-unlock stopped)' "${KILL_SWITCH}"
     elif [[ -e "${PRESENCE_FLAG}" || -L "${PRESENCE_FLAG}" ]]; then
@@ -1862,10 +1916,18 @@ phase_presence() {
         error "${PRESENCE_FLAG} is a symbolic link; refusing to follow it"
         return 1
     fi
+    # A flag the daemon never reads (non-default --sysconfdir) is still kept as setup's record
+    # of the request, but the step is reported "not applied" with the exact command.
+    local elsewhere=false
+    presence_flag_elsewhere && elsewhere=true
     case "${PRESENCE}" in
         off)
             if [[ -e "${PRESENCE_FLAG}" ]]; then
-                printf '[DONE] presence: already done (auto-unlock off)\n'
+                if [[ "${elsewhere}" == true ]]; then
+                    printf '[SKIP] presence: off in %s, %s\n' "${PRESENCE_FLAG}" "$(presence_not_applied off)"
+                else
+                    printf '[DONE] presence: already done (auto-unlock off)\n'
+                fi
                 return 0
             fi
             ensure_soos_conf_dir || return 1
@@ -1873,19 +1935,35 @@ phase_presence() {
             JOURNAL+=(presence_flag_created)
             FLAG_CREATED_NOW=true
             chmod 0644 -- "${PRESENCE_FLAG}" || return 1
-            printf '[DONE] presence: auto-unlock turned off (%s)\n' "${PRESENCE_FLAG}"
+            if [[ "${elsewhere}" == true ]]; then
+                printf '[SKIP] presence: %s created, %s\n' "${PRESENCE_FLAG}" "$(presence_not_applied off)"
+            else
+                printf '[DONE] presence: auto-unlock turned off (%s)\n' "${PRESENCE_FLAG}"
+            fi
             ;;
         on)
             if [[ ! -e "${PRESENCE_FLAG}" ]]; then
-                printf '[DONE] presence: already done (auto-unlock on)\n'
+                if [[ "${elsewhere}" == true ]]; then
+                    printf '[SKIP] presence: on in %s, %s\n' "${PRESENCE_FLAG}" "$(presence_not_applied on)"
+                else
+                    printf '[DONE] presence: already done (auto-unlock on)\n'
+                fi
                 return 0
             fi
             rm -f -- "${PRESENCE_FLAG}" || return 1
             JOURNAL+=(presence_flag_removed)
-            printf '[DONE] presence: auto-unlock turned on (%s removed)\n' "${PRESENCE_FLAG}"
+            if [[ "${elsewhere}" == true ]]; then
+                printf '[SKIP] presence: %s removed, %s\n' "${PRESENCE_FLAG}" "$(presence_not_applied on)"
+            else
+                printf '[DONE] presence: auto-unlock turned on (%s removed)\n' "${PRESENCE_FLAG}"
+            fi
             ;;
         *)
-            printf '[DONE] presence: %s\n' "$(presence_report)"
+            if [[ "${elsewhere}" == true ]]; then
+                printf '[SKIP] presence: %s\n' "$(presence_report)"
+            else
+                printf '[DONE] presence: %s\n' "$(presence_report)"
+            fi
             ;;
     esac
 }
@@ -2302,17 +2380,24 @@ if user_in_group; then
 else
     plan access "will run" "soos-admin add-user ${TARGET_USER}"
 fi
+# With a non-default --sysconfdir every presence plan line also says "not applied".
+PRESENCE_PLAN_NOTE=""
+presence_flag_elsewhere && PRESENCE_PLAN_NOTE=", $(presence_not_applied "$(presence_requested)")"
 case "${PRESENCE}" in
     off)
-        if [[ -e "${PRESENCE_FLAG}" ]]; then
+        if [[ -e "${PRESENCE_FLAG}" ]] && presence_flag_elsewhere; then
+            plan presence "already done" "off recorded in ${PRESENCE_FLAG}${PRESENCE_PLAN_NOTE}"
+        elif [[ -e "${PRESENCE_FLAG}" ]]; then
             plan presence "already done" "auto-unlock off"
         else
-            plan presence "will run" "create ${PRESENCE_FLAG}"
+            plan presence "will run" "create ${PRESENCE_FLAG}${PRESENCE_PLAN_NOTE}"
         fi
         ;;
     on)
         if [[ -e "${PRESENCE_FLAG}" ]]; then
-            plan presence "will run" "remove ${PRESENCE_FLAG}"
+            plan presence "will run" "remove ${PRESENCE_FLAG}${PRESENCE_PLAN_NOTE}"
+        elif presence_flag_elsewhere; then
+            plan presence "already done" "on recorded (no ${PRESENCE_FLAG})${PRESENCE_PLAN_NOTE}"
         else
             plan presence "already done" "auto-unlock on"
         fi
