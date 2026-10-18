@@ -2935,6 +2935,10 @@ Companion off-switch and opt-in wording aligned with the setup defaults (#400 an
 | SRP4 | A real run with `--sysconfdir <etc>//` reports `[DONE] lock widget: turned off (<etc>/soos/lockwidget.disable)` and never "not applied" | `soos-invariants::setup_user_phase_contract::test_srp4_double_slash_sysconfdir_run_reports_the_flag_done` | ✅ Verified |
 | SRP5 | The comparison never follows a symbolic link (a link to the read directory stays "not applied"); a `..` component of `--sysconfdir` or `--prefix` exits 2 before any change | `soos-invariants::setup_user_phase_contract::test_srp5_links_are_not_followed_and_dot_dot_is_refused` | ✅ Verified |
 | SRP6 | `Docs/PACKAGING_AND_PROVISIONING.md` documents the rescue read path and the normalisation (`/etc/`, `/etc//`, `..`, symbolic link); the ADR records the fix; matrix rows and walkthrough 244 present | `soos-invariants::setup_user_phase_contract::test_srp6_documentation_and_traceability` | ✅ Verified |
+| SRP7 | A relative `CARGO_TARGET_DIR` with `..` (`../shared-target`) still installs: the root half and `install.sh` get the `..`-free directory cargo wrote, and the build reports it | `soos-invariants::setup_user_phase_contract::test_srp7_relative_target_dir_with_dot_dot_reaches_the_system_phase` | ✅ Verified |
+| SRP8 | An absolute `CARGO_TARGET_DIR` with `..` still installs, and a `..` behind a symbolic link is taken as the kernel takes it for cargo (the directory cargo wrote, never the lexical one) | `soos-invariants::setup_user_phase_contract::test_srp8_absolute_target_dir_with_dot_dot_reaches_the_system_phase` | ✅ Verified |
+| SRP9 | The root half started directly refuses an `--artifact-dir` with a `..` component with exit 2, before any change | `soos-invariants::setup_user_phase_contract::test_srp9_system_phase_refuses_a_dot_dot_artifact_dir` | ✅ Verified |
+| SRP10 | `Docs/PACKAGING_AND_PROVISIONING.md` documents the resolution of a `CARGO_TARGET_DIR` with `..` (`pwd -P`) and the `--artifact-dir` refusal; matrix rows SRP7–SRP10 and walkthrough 244 record it | `soos-invariants::setup_user_phase_contract::test_srp10_artifact_dir_resolution_documented` | ✅ Verified |
 
 ---
 

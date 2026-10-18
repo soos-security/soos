@@ -2856,6 +2856,25 @@ if ! (cd "${WORKSPACE_ROOT}" && as_build_user CARGO_TARGET_DIR="${TARGET_DIR}" S
     error "The release build failed; nothing was installed."
     exit "${EXIT_BUILD}"
 fi
+# The root half refuses a `..` component in --artifact-dir as in every path option (GitHub
+# #455), but CARGO_TARGET_DIR may hold one (a relative value such as ../shared-target is
+# resolved against the checkout). The directory exists now, so a target directory with a `..`
+# component is resolved here as the kernel resolved it for cargo (cd -P, pwd -P: links
+# followed, `..` taken physically) before anything uses it again. This is not a read-path
+# comparison. A target directory without `..` is kept exactly as it is.
+if [[ "/${TARGET_DIR}/" == */../* ]]; then
+    resolved_target="$(cd -P -- "${TARGET_DIR}" && pwd -P && printf 'x')" || resolved_target=""
+    resolved_target="${resolved_target%x}"
+    resolved_target="${resolved_target%$'\n'}"
+    if [[ "${resolved_target}" != /* || "${resolved_target}" == *$'\n'* \
+            || "/${resolved_target}/" == */../* || ! -d "${resolved_target}/release" ]]; then
+        printf '[FAIL] build\n'
+        error "The cargo target directory $(printf '%q' "${TARGET_DIR}") could not be resolved to a path without '..'; nothing was installed. Set CARGO_TARGET_DIR to a path without '..'."
+        exit "${EXIT_BUILD}"
+    fi
+    TARGET_DIR="${resolved_target}"
+    ARTIFACT_DIR="${TARGET_DIR}/release"
+fi
 printf '[DONE] build: %s\n' "${ARTIFACT_DIR}"
 
 # --- root half ---

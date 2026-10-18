@@ -2170,3 +2170,135 @@ fn test_srp6_documentation_and_traceability() {
         .join("AI/walkthroughs/244_setup_read_paths.md")
         .is_file());
 }
+
+/// Runs a real `--yes --no-remote` setup with `CARGO_TARGET_DIR=<value>` and checks that the
+/// root half received, and `install.sh` installed from, `<expected>` (a path without `..`),
+/// the directory the fake cargo really wrote.
+fn srp_run_with_target_dir(h: &mut Harness, value: &str, expected: &Path) {
+    h.set_env("CARGO_TARGET_DIR", value);
+    let out = h.run(&["--yes", "--no-remote"]);
+    let t = text(&out);
+    assert_eq!(code(&out), 0, "CARGO_TARGET_DIR={value}: {t}");
+    let expected = expected.display().to_string();
+    assert!(!expected.contains("/../"), "{expected}");
+    assert!(
+        Path::new(&expected).join("soos-daemon").is_file(),
+        "the fake cargo wrote {expected}"
+    );
+    assert!(
+        t.contains(&format!("[DONE] build: {expected}\n")),
+        "CARGO_TARGET_DIR={value}: the build reports {expected}:\n{t}"
+    );
+    let lines = h.log_lines();
+    let escalate = &lines[find_line(&lines, &["uid=1000 sudo", "--system-phase"])];
+    assert!(
+        escalate.contains(&format!(" --artifact-dir {expected} ")),
+        "CARGO_TARGET_DIR={value}: the root half gets {expected}: {escalate}"
+    );
+    assert!(
+        !escalate.contains("/../"),
+        "CARGO_TARGET_DIR={value}: no `..` reaches the root half: {escalate}"
+    );
+    let install = &lines[find_line(&lines, &["uid=0 install.sh", "--artifact-dir"])];
+    assert!(
+        install.contains(&format!(" --artifact-dir {expected} ")),
+        "CARGO_TARGET_DIR={value}: install.sh installs from {expected}: {install}"
+    );
+    assert!(
+        !t.contains("must not contain a '..' component"),
+        "CARGO_TARGET_DIR={value}: {t}"
+    );
+}
+
+/// SRP7: a relative `CARGO_TARGET_DIR` with a `..` component (`../shared-target`, documented as
+/// resolved against the checkout) still installs: after the build the user half passes the root
+/// half a `..`-free `--artifact-dir`, the directory cargo wrote.
+#[test]
+fn test_srp7_relative_target_dir_with_dot_dot_reaches_the_system_phase() {
+    let mut h = Harness::new("srp_rel_target");
+    let expected = fs::canonicalize(&h.dir)
+        .unwrap()
+        .join("shared-target/release");
+    srp_run_with_target_dir(&mut h, "../shared-target", &expected);
+}
+
+/// SRP8: an absolute `CARGO_TARGET_DIR` with a `..` component still installs, and the `..` is
+/// taken as the kernel takes it for cargo (through a symbolic link, never by text): the root half
+/// gets the directory cargo really wrote, never the lexical one.
+#[test]
+fn test_srp8_absolute_target_dir_with_dot_dot_reaches_the_system_phase() {
+    let mut h = Harness::new("srp_abs_target");
+    let base = fs::canonicalize(&h.dir).unwrap();
+    let value = format!("{}/repo/../plain-target", base.display());
+    srp_run_with_target_dir(&mut h, &value, &base.join("plain-target/release"));
+
+    let mut h = Harness::new("srp_link_target");
+    let base = fs::canonicalize(&h.dir).unwrap();
+    fs::create_dir_all(base.join("deep/sub")).unwrap();
+    std::os::unix::fs::symlink(base.join("deep/sub"), base.join("link")).unwrap();
+    let value = format!("{}/link/../linked-target", base.display());
+    srp_run_with_target_dir(&mut h, &value, &base.join("deep/linked-target/release"));
+    assert!(
+        !base.join("linked-target").exists(),
+        "the lexical resolution of the `..` is never used"
+    );
+}
+
+/// SRP9: the root half invoked directly still refuses an `--artifact-dir` with a `..`
+/// component, with exit 2 and before any change.
+#[test]
+fn test_srp9_system_phase_refuses_a_dot_dot_artifact_dir() {
+    let mut h = Harness::new("srp_root_dot_dot");
+    h.set_env("STUB_AS_ROOT", "1");
+    let raw = format!("{}/target/../target/release", srp_lexical(&h.repo));
+    let before = h.snapshot();
+    let out = h.run(&[
+        "--system-phase",
+        "--yes",
+        "--user",
+        "alice",
+        "--artifact-dir",
+        &raw,
+        "--local-seat",
+        "no",
+        "--distro",
+        "arch",
+    ]);
+    let t = text(&out);
+    assert_eq!(code(&out), 2, "{t}");
+    assert!(
+        t.contains("--artifact-dir must not contain a '..' component"),
+        "{t}"
+    );
+    let lines = h.log_lines();
+    assert!(
+        lines.iter().all(|l| is_read_only_call(l)),
+        "a refused root half changes nothing: {lines:?}"
+    );
+    assert_eq!(before, h.snapshot(), "a refused root half writes nothing");
+}
+
+/// SRP10: the documentation and the traceability record the resolution of a `CARGO_TARGET_DIR`
+/// with `..` and the refusal kept for a direct `--artifact-dir`.
+#[test]
+fn test_srp10_artifact_dir_resolution_documented() {
+    let pkg = read_repo("Docs/PACKAGING_AND_PROVISIONING.md");
+    let flat: String = pkg.split_whitespace().collect::<Vec<_>>().join(" ");
+    let para = flat
+        .split("**Read paths (GitHub #455).**")
+        .nth(1)
+        .expect("read-paths paragraph");
+    let para = &para[..para.find(" | ").unwrap_or(para.len())];
+    for needle in ["`CARGO_TARGET_DIR`", "`pwd -P`", "`--artifact-dir`"] {
+        assert!(para.contains(needle), "read-paths paragraph: {needle}");
+    }
+    let matrix = read_repo("AI/VERIFICATION_MATRIX.md");
+    for row in 7..=10 {
+        assert!(
+            matrix.contains(&format!("| SRP{row} |")),
+            "matrix row SRP{row}"
+        );
+    }
+    let walkthrough = read_repo("AI/walkthroughs/244_setup_read_paths.md");
+    assert!(walkthrough.contains("CARGO_TARGET_DIR"), "walkthrough 244");
+}
