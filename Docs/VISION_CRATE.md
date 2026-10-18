@@ -19,6 +19,7 @@ crates/vision/
     ├── color.rs        # Pure Rust color conversion (YUYV, Grey, RGB24, MJPEG)
     ├── align.rs        # 5-point landmark affine alignment to 112x112
     ├── crop.rs         # Upstream-parity PAD context window, crop-and-resize
+    ├── ir_active.rs    # Lit/unlit active-illumination cues (veto only, provisional, uncalibrated)
     ├── ir_liveness.rs  # PadInputModality, fail-closed IR gate, DEFAULT_IR_PAD_THRESHOLD
     ├── pad_fusion.rs   # Multi-scale PAD fusion (mean live probability)
     ├── quality.rs      # Pre-PAD face quality gate (face size, Laplacian sharpness)
@@ -245,6 +246,51 @@ The recalibration proposal built on them is ADR 2026-10-01 "Real-Face Embedding 
 Recalibration Proposal", accepted on 2026-10-01: SFace (`sface_2021dec`) with
 `DEFAULT_MATCH_THRESHOLD = 0.50` (walkthrough 162).
 
+#### 2.4.5 Active-Illumination Differential Liveness Cues (`ir_active.rs`, GitHub #431, PR 2 of #353)
+
+A near-infrared module lights the scene with its own emitter. `evaluate_ir_active_cues` compares a
+**lit** frame (emitter on) with an **unlit** frame (emitter off) of the same scene, using the SCRFD
+face box and the 5-point landmarks, and reports the first cue that rejects the pair. It is a pure,
+zero-I/O function: it never logs, and nothing in the daemon or the policy calls it yet. Strict IR
+mode (split item 4 of #353) will call it once it drives the emitter and pairs frames by commanded
+state. ADR 2026-10-18 "Active-Illumination Differential Liveness Cues".
+
+| Order | Cue | Statistic (`IrActiveStatistics`) | Rejects when (default) | Reason |
+|---|---|---|---|---|
+| 1 | Static pair | buffers and sequence numbers | identical bytes, or the same sequence number | `StaticPair` |
+| 2 | Response ratio | `face_response` = mean(lit − unlit) over the face box; `background_response` over the ring around it | `face_response < 20` or `face_response / max(background_response, 1) < 1.5` | `NoResponse` |
+| 3 | Saturation | `saturated_fraction` = lit face pixels ≥ 250 | `> 0.05` | `Saturated` |
+| 4 | Skin NIR reflectance band | `lit_face_mean` | outside `[50, 200]` | `ReflectanceOutOfBand` |
+| 5 | Inverse-square relief | `relief_ratio` = nose square / max(face-edge band pooled with the two eye corners, 1) | `< 1.2` | `FlatRelief` |
+| 6 | Corneal glint | `glint_pixels` per eye region (lit ≥ 240 and lit − unlit ≥ 120) | fewer than 1, or more than 25 % of the region | `NoGlint` |
+
+- **Veto only.** A pass is `IrActiveCuesClear`, whose only accessor is `statistics()`: it is never a
+  liveness decision, has no `is_live`, and a consumer must AND it with the IR gate and threshold of
+  §2.4.1. `ir_active_statistics` returns the same statistics without deciding, for calibration.
+- **Fail closed.** Before any cue, the pair must be two `Grey` frames from an `Infrared` sensor with
+  the same non-zero geometry (at most 4096 × 4096) and exact buffer lengths (`InvalidFrames`); the
+  box and every landmark must be finite, the clamped face window at least 16 px per side and at most
+  1024 × 1024, both eyes and the nose inside it, the eye distance at least 8 px, and every derived
+  region non-empty (`InvalidGeometry`); the ring (window grown by 50 % per side, minus the window)
+  must hold at least 64 px (`InsufficientBackground`). A swapped pair has a negative response
+  (`NoResponse`). Any non-finite statistic is `InvalidFrames`.
+- **Configuration.** `IrActiveConfig` holds every threshold above; `IrActiveConfig::default()` uses
+  the `IR_ACTIVE_*` constants and `validate()` names the first non-finite or out-of-range field
+  (`IrActiveConfigError`, value never echoed). The evaluation validates first and rejects an invalid
+  configuration (`InvalidConfig`). The lower bounds (response > 0, ratios ≥ 1, at least one glint
+  pixel) mean a valid configuration cannot switch off the response, relief or glint cue.
+- **Provisional and uncalibrated.** The defaults were chosen on the synthetic, non-biometric
+  `tests/fixtures` pairs (`ir_strobe::active_pair`: a Lambertian ellipsoid with two specular dots,
+  a flat print, a screen, no glint, saturated, unlit and a static injection), not measured on a real
+  IR module (matrix IRA36, IRA37 pending). No FAR, APCER or BPCER is claimed.
+- **Known limits.** A print of an IR capture carries the captured shading in its reflectance and can
+  pass the relief cue; an adaptive USB device that synthesizes lit and unlit frames is out of scope.
+  The challenge pattern of split item 4 and the physical protocol of split item 5 address and
+  measure these.
+- **Memory hygiene.** Only the face window of each frame is copied, into `Zeroizing<Vec<u8>>` with
+  exact capacity (wiped on drop, no reallocation); the background ring is summed in place. Results
+  carry aggregates only and rejection reasons carry no value.
+
 ### 2.5 Letterbox Padding & Coordinate Projection (`letterbox.rs`)
 
 Next-generation face detection (SCRFD) operates on uniform 640×640 square inputs. To accommodate arbitrary camera aspect ratios (e.g. 640×480, 1280×720, 1920×1080) without distortion or stretching:
@@ -331,3 +377,4 @@ evaluation of a lighter one.
 | **NGM14b** | Bounding box crop and resize with bilinear interpolation and out-of-bounds zero (black) padding | `crop_tests::test_crop_and_resize_known_image`, `crop_tests::test_crop_and_resize_out_of_bounds_padding`, `crop_tests::test_crop_and_resize_degenerate_bbox_returns_black`, `crop_tests::test_expand_bbox_for_pad_expansion_and_clamping` | ✅ Verified |
 | **MJB1–MJB6** | Bounded, header-checked MJPEG decoding (GitHub #190) | `mjpeg_bounds_tests::*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |
 | **PIR1–PIR5** | Format-aware PAD: `Grey` frames pass the fail-closed IR gate and the stricter IR threshold, colour path unchanged (GitHub #169) | `ir_pad_policy_tests::*`, `pipeline_integration_tests::test_169_*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |
+| **IRA29–IRA35** | Active-illumination lit/unlit cues: shaded head passes, each attack fixture rejected by its cue, fail-closed input and configuration, proptests, zero-I/O invariants (GitHub #431); IRA36–IRA37 calibration on a real IR module pending | `ir_active_cues_tests::*`, `soos-invariants::ir_active_contract::*` (see `AI/VERIFICATION_MATRIX.md`) | ✅ Verified |

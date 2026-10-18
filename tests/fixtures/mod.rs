@@ -675,6 +675,10 @@ pub mod readme_web {
 /// Every frame is `Grey`, stamped `SensorType::Infrared`, and draws a flat bright disc (the
 /// "lit scene") over a dim background with a small deterministic texture. Nothing here is
 /// derived from a face image.
+///
+/// The `active_*` items (GitHub #431, PR 2 of #353) add lit/unlit frame pairs with a face box
+/// and landmarks for the active-illumination cues of `soos_vision::ir_active`: a 3D-shaded
+/// head (bona fide) and six attack presentations, all synthetic.
 #[allow(
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
@@ -792,5 +796,248 @@ pub mod ir_strobe {
             move |i| i < steady_len || i % 2 == 0,
             |_| None,
         )
+    }
+
+    /// Width of the active-illumination lit/unlit fixture frames (GitHub #431, PR 2 of #353).
+    pub const ACTIVE_WIDTH: u32 = 160;
+    /// Height of the active-illumination lit/unlit fixture frames.
+    pub const ACTIVE_HEIGHT: u32 = 120;
+    /// Face box `[x1, y1, x2, y2]` of every active pair (pixel coordinates).
+    pub const ACTIVE_FACE_BOX: [f32; 4] = [50.0, 25.0, 110.0, 105.0];
+    /// Landmarks of every active pair, in `FaceLandmarks` order: left eye, right eye, nose,
+    /// left mouth corner, right mouth corner.
+    pub const ACTIVE_LANDMARKS: [[f32; 2]; 5] = [
+        [68.0, 50.0],
+        [92.0, 50.0],
+        [80.0, 68.0],
+        [70.0, 85.0],
+        [90.0, 85.0],
+    ];
+    /// Sequence number of the lit frame of an active pair.
+    pub const ACTIVE_LIT_SEQUENCE: u64 = 10;
+    /// Sequence number of the unlit frame of an active pair.
+    pub const ACTIVE_UNLIT_SEQUENCE: u64 = 11;
+    /// Ambient-only level of a surface close to the camera (unlit frame).
+    pub const ACTIVE_AMBIENT: u8 = 20;
+    /// Background level of a lit frame (distant scene, weak emitter response).
+    pub const ACTIVE_LIT_BACKGROUND: u8 = 40;
+    /// Background level of an unlit frame.
+    pub const ACTIVE_UNLIT_BACKGROUND: u8 = 10;
+    /// Peak emitter response of the shaded head (at the point facing the camera).
+    pub const ACTIVE_HEAD_GAIN: f32 = 170.0;
+    /// Emitter response of the flat print at the frame centre.
+    pub const ACTIVE_PRINT_GAIN: f32 = 120.0;
+
+    /// Synthetic presentation drawn by [`active_pair`]. Nothing here is derived from a face
+    /// image: the "head" is a Lambertian ellipsoid with two specular dots.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ActivePresentation {
+        /// 3D-shaded head with a corneal glint on each eye in the lit frame only (bona fide).
+        ShadedHead,
+        /// Flat sheet whose emitter response falls off uniformly, no relief, no glint.
+        FlatPrint,
+        /// Screen replay: almost no near-infrared response on the face.
+        Screen,
+        /// The shaded head without corneal glints.
+        NoGlint,
+        /// The shaded head saturated (255) in the lit frame.
+        Saturated,
+        /// Emitter absent: both frames ambient-only (different texture phase, not identical).
+        Unlit,
+        /// Static injection: the lit shaded-head frame delivered twice.
+        StaticInjection,
+    }
+
+    impl ActivePresentation {
+        /// Every presentation, the bona fide one first.
+        pub const ALL: [ActivePresentation; 7] = [
+            ActivePresentation::ShadedHead,
+            ActivePresentation::FlatPrint,
+            ActivePresentation::Screen,
+            ActivePresentation::NoGlint,
+            ActivePresentation::Saturated,
+            ActivePresentation::Unlit,
+            ActivePresentation::StaticInjection,
+        ];
+    }
+
+    /// A lit/unlit frame pair with its face geometry (plain arrays: this crate does not depend
+    /// on `soos-inference-ort`).
+    pub struct ActivePair {
+        /// Frame captured with the emitter on.
+        pub lit: Frame,
+        /// Frame captured with the emitter off.
+        pub unlit: Frame,
+        /// Face box `[x1, y1, x2, y2]`.
+        pub face_box: [f32; 4],
+        /// Landmarks in `FaceLandmarks` order.
+        pub landmarks: [[f32; 2]; 5],
+    }
+
+    /// +/-2 levels of deterministic texture; `phase` shifts the pattern.
+    fn active_texture(x: i64, y: i64, phase: i64) -> f32 {
+        ((x * 7 + y * 13 + phase) % 5) as f32 - 2.0
+    }
+
+    /// `1 - r^2` of the head ellipse (centre (80, 65), semi-axes 30 x 40); negative outside.
+    fn head_depth(x: i64, y: i64) -> f32 {
+        let nx = (x as f32 - 80.0) / 30.0;
+        let ny = (y as f32 - 65.0) / 40.0;
+        1.0 - (nx * nx + ny * ny)
+    }
+
+    /// True on the 2 x 2 corneal glint dots of both eyes.
+    fn on_glint(x: i64, y: i64) -> bool {
+        (y == 50 || y == 51) && (x == 68 || x == 69 || x == 92 || x == 93)
+    }
+
+    fn level(value: f32) -> u8 {
+        value.round().clamp(0.0, 255.0) as u8
+    }
+
+    fn active_frame(sequence: u64, pixel: impl Fn(i64, i64) -> u8) -> Frame {
+        let (w, h) = (i64::from(ACTIVE_WIDTH), i64::from(ACTIVE_HEIGHT));
+        let mut data = Vec::with_capacity((ACTIVE_WIDTH as usize) * (ACTIVE_HEIGHT as usize));
+        for y in 0..h {
+            for x in 0..w {
+                data.push(pixel(x, y));
+            }
+        }
+        Frame::new(
+            data,
+            ACTIVE_WIDTH,
+            ACTIVE_HEIGHT,
+            1_000_000u64.saturating_add(sequence.saturating_mul(33_333_333)),
+            PixelFormat::Grey,
+            sequence,
+        )
+        .with_sensor_type(SensorType::Infrared)
+    }
+
+    /// Ambient-only scene: head ellipse at the ambient level over the dim background.
+    fn ambient_pixel(x: i64, y: i64, phase: i64) -> u8 {
+        let base = if head_depth(x, y) > 0.0 {
+            f32::from(ACTIVE_AMBIENT)
+        } else {
+            f32::from(ACTIVE_UNLIT_BACKGROUND)
+        };
+        level(base + active_texture(x, y, phase))
+    }
+
+    /// Lit shaded head: Lambertian response `gain * sqrt(1 - r^2)` over the ambient level.
+    fn shaded_head_pixel(x: i64, y: i64, glint: bool, saturated: bool) -> u8 {
+        if glint && on_glint(x, y) {
+            return 255;
+        }
+        let depth = head_depth(x, y);
+        if depth > 0.0 {
+            if saturated {
+                return 255;
+            }
+            level(
+                f32::from(ACTIVE_AMBIENT)
+                    + ACTIVE_HEAD_GAIN * depth.sqrt()
+                    + active_texture(x, y, 0),
+            )
+        } else {
+            level(f32::from(ACTIVE_LIT_BACKGROUND) + active_texture(x, y, 0))
+        }
+    }
+
+    fn in_rect(x: i64, y: i64, x0: i64, y0: i64, x1: i64, y1: i64) -> bool {
+        x >= x0 && x < x1 && y >= y0 && y < y1
+    }
+
+    /// One synthetic lit/unlit pair (see [`ActivePresentation`]).
+    pub fn active_pair(presentation: ActivePresentation) -> ActivePair {
+        let unlit_head = |x: i64, y: i64| ambient_pixel(x, y, 0);
+        let (lit, unlit) = match presentation {
+            ActivePresentation::ShadedHead => (
+                active_frame(ACTIVE_LIT_SEQUENCE, |x, y| {
+                    shaded_head_pixel(x, y, true, false)
+                }),
+                active_frame(ACTIVE_UNLIT_SEQUENCE, unlit_head),
+            ),
+            ActivePresentation::NoGlint => (
+                active_frame(ACTIVE_LIT_SEQUENCE, |x, y| {
+                    shaded_head_pixel(x, y, false, false)
+                }),
+                active_frame(ACTIVE_UNLIT_SEQUENCE, unlit_head),
+            ),
+            ActivePresentation::Saturated => (
+                active_frame(ACTIVE_LIT_SEQUENCE, |x, y| {
+                    shaded_head_pixel(x, y, true, true)
+                }),
+                active_frame(ACTIVE_UNLIT_SEQUENCE, unlit_head),
+            ),
+            ActivePresentation::FlatPrint => {
+                // Sheet (40, 15)-(120, 115): response falls off by at most 10 % towards the
+                // corners, the same way for every point of the face (no relief).
+                let sheet = |x: i64, y: i64| in_rect(x, y, 40, 15, 120, 115);
+                let lit = active_frame(ACTIVE_LIT_SEQUENCE, |x, y| {
+                    if sheet(x, y) {
+                        let dx = x as f32 - 80.0;
+                        let dy = y as f32 - 60.0;
+                        let falloff = 1.0 - 0.1 * ((dx * dx + dy * dy) / 5000.0);
+                        level(
+                            f32::from(ACTIVE_AMBIENT)
+                                + ACTIVE_PRINT_GAIN * falloff
+                                + active_texture(x, y, 0),
+                        )
+                    } else {
+                        level(f32::from(ACTIVE_LIT_BACKGROUND) + active_texture(x, y, 0))
+                    }
+                });
+                let unlit = active_frame(ACTIVE_UNLIT_SEQUENCE, |x, y| {
+                    let base = if sheet(x, y) {
+                        ACTIVE_AMBIENT
+                    } else {
+                        ACTIVE_UNLIT_BACKGROUND
+                    };
+                    level(f32::from(base) + active_texture(x, y, 0))
+                });
+                (lit, unlit)
+            }
+            ActivePresentation::Screen => {
+                // Screen (35, 10)-(125, 115): emits almost no near-infrared light, so the lit
+                // frame is only 2 levels above the unlit one on the whole face.
+                let screen = |x: i64, y: i64| in_rect(x, y, 35, 10, 125, 115);
+                let lit = active_frame(ACTIVE_LIT_SEQUENCE, |x, y| {
+                    let base = if screen(x, y) {
+                        ACTIVE_AMBIENT.saturating_add(2)
+                    } else {
+                        ACTIVE_LIT_BACKGROUND
+                    };
+                    level(f32::from(base) + active_texture(x, y, 0))
+                });
+                let unlit = active_frame(ACTIVE_UNLIT_SEQUENCE, |x, y| {
+                    let base = if screen(x, y) {
+                        ACTIVE_AMBIENT
+                    } else {
+                        ACTIVE_UNLIT_BACKGROUND
+                    };
+                    level(f32::from(base) + active_texture(x, y, 0))
+                });
+                (lit, unlit)
+            }
+            ActivePresentation::Unlit => (
+                active_frame(ACTIVE_LIT_SEQUENCE, |x, y| ambient_pixel(x, y, 1)),
+                active_frame(ACTIVE_UNLIT_SEQUENCE, unlit_head),
+            ),
+            ActivePresentation::StaticInjection => (
+                active_frame(ACTIVE_LIT_SEQUENCE, |x, y| {
+                    shaded_head_pixel(x, y, true, false)
+                }),
+                active_frame(ACTIVE_UNLIT_SEQUENCE, |x, y| {
+                    shaded_head_pixel(x, y, true, false)
+                }),
+            ),
+        };
+        ActivePair {
+            lit,
+            unlit,
+            face_box: ACTIVE_FACE_BOX,
+            landmarks: ACTIVE_LANDMARKS,
+        }
     }
 }
