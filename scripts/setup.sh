@@ -171,9 +171,12 @@ Options:
 
 Phone companion (soos-remote; set up as the session owner after the system phase,
 only when setup is started as that user, never as root). Every feature below is on
-by default (owner decision) and can be turned off later in soos-gui (Features); a
-feature already turned off in a setup-managed remote.toml stays off unless its
-option says on:
+by default (owner decision). Funnel, remote unlock, push, offline alerts and the
+camera view can be turned off later in soos-gui (Features), which also turns off
+the features that need them. The failed-password alerts have no switch there: turn
+them off with --password-alerts off, or set password_alerts, push_notifications and
+offline_alerts to false in remote.toml. A feature already turned off in a
+setup-managed remote.toml stays off unless its option says on:
   --no-remote              Do not set up the phone companion
   --tailscale-login <LOGIN>
                            Your Tailscale login (allowed_logins); asked
@@ -2329,7 +2332,7 @@ print_companion_guide() {
         warn "  Camera view: $(daemon_preview_hint)"
     fi
     info "  Optional: 'loginctl enable-linger ${TARGET_USER}' keeps the companion answering while you are logged out (setup never enables it)."
-    info "  Every feature can be turned off later in soos-gui (Features); remove the companion with scripts/install_remote.sh --uninstall."
+    info "  Funnel, remote unlock, push, offline alerts and the camera view can be turned off later in soos-gui (Features); the failed-password alerts have no switch there: run setup again with --password-alerts off. Remove the companion with scripts/install_remote.sh --uninstall."
 }
 
 # --- packages (root; never removed by a rollback) ---

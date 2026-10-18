@@ -197,7 +197,7 @@ Configuration (`remote.toml`, then restart the unit):
 
 ```toml
 rp_id = "<pc>.<tailnet>.ts.net"   # the full node name, never the bare tailnet name
-allow_funnel = true               # opt-in; false (the default) keeps Funnel requests at 403
+allow_funnel = true               # code default false keeps Funnel requests at 403; scripts/setup.sh writes true
 allow_unlock = true               # optional, section 2a
 ```
 
