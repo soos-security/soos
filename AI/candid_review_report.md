@@ -1,104 +1,150 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `fix/presence-flag-path`
-- **Base (merge-base)**: `8f03eb7`
-- **Reviewed-Diff-Fingerprint**: `1509ecae0acd25be7b5f36c7b92a5804f24f5813f290103f316488a8e7928c84`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/243_presence_flag_path.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `scripts/setup.sh`, `tests/invariants/src/setup_contract.rs`
+- **Target Branch**: `fix/setup-read-paths`
+- **Base (merge-base)**: `4e0c02a`
+- **Reviewed-Diff-Fingerprint**: `5067a0853030615150e9ab8f5352a5a8755e00e8dd0defd0ec9179623081767c`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/244_setup_read_paths.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `scripts/setup.sh`, `tests/invariants/src/setup_user_phase_contract.rs`
 
 ## 1. Executive Summary
 
-GitHub #453: `scripts/setup.sh` wrote the presence kill switch at `<sysconfdir>/soos/presence.disable`
-and reported `[DONE]`, while soos-daemon (`crates/daemon/src/presence/mod.rs`
-`DEFAULT_KILL_SWITCH_DIR = "/etc/soos"`, `PRESENCE_DISABLE_FLAG`, watched by `main.rs:222` with no
-path option) and soos-gui (`feature_control.rs` `SOOS_ETC_DIR`) only read
-`/etc/soos/presence.disable`. The diff pins `readonly PRESENCE_READ_FLAG`, adds
-`presence_flag_elsewhere` / `presence_not_applied` / `presence_requested`, and turns every plan,
-phase and summary line into a "not applied" line with the exact `sudo touch` / `sudo rm -f`
-command when the two paths differ. The state file, journal, rollback and symlink refusal are
-unchanged. The change mirrors the merged lock-widget fix (#452) line for line. No daemon, PAM,
-GUI or protocol code is touched. `cargo test -p soos-invariants`: 832 passed, 0 failed (PFP1-PFP4
-included); `cargo fmt --check` clean; `bash -n scripts/setup.sh` clean (shellcheck not installed
-locally; CI runs it).
+The branch (GitHub #455) pins the rescue command of the `setup.sh` summary to the only kill switch
+`pam_soos.so` and soos-daemon read (`/etc/soos/disabled`), replaces the trailing-slash stripping of
+`absolute_dir` with a lexical normalisation (empty and `.` components dropped, `..` refused with
+exit 2) applied to every path option including the internal `--artifact-dir`, and resolves a
+post-build `TARGET_DIR` holding a `..` physically (`cd -P -- … && pwd -P`) so the root half never
+receives a value its own parser refuses. Ten new invariant tests (SRP1–SRP10) are add-only. The
+review found no CRITICAL, MAJOR or MINOR defect; two cosmetic test-comment staleness items are
+recorded as SUGGESTION.
+
+Validation run on the reviewed tree: `bash -n scripts/setup.sh` (OK) and
+`cargo test --locked -p soos-invariants -- --test-threads=3` (842 passed, 0 failed, SRP1–SRP10
+included).
 
 ## 2. Test Changes
 
 Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: `tests/invariants/src/setup_contract.rs` only (additions only, appended
-  after the last existing test).
-- Removed/changed assertions (`^-` with `assert|#[test]|...`): **none**.
-- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): **none**.
+- Test files touched: `tests/invariants/src/setup_user_phase_contract.rs` only.
+- Removed or changed `assert`/`#[test]`/`proptest!`/`#[should_panic]` lines: **none**. The only
+  removed lines of the whole patch are four lines of the old `absolute_dir` body and the old
+  `Rescue:` line of `scripts/setup.sh` (production code).
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
 - Inline `mod tests` changes: **none**.
+- The test file hunk is a single `@@ -1839,3 +1839,466 @@` addition after the last existing test
+  (`test_set_u24_root_preview_docker_job_wired_into_ci`); every SET*, LKI*, LWF*, PFP*, DCC*
+  assertion is untouched. New helpers carry an `srp_` prefix (no collision).
 
-New tests PFP1-PFP4 are additive. Each fails against the base code: PFP1 and PFP3 require the
-`readonly PRESENCE_READ_FLAG=...` line; PFP2 requires "not applied" and the command, which base
-code never prints; PFP4 requires the new docs/matrix/walkthrough. PFP3 patches the harness copy
-of the script only (`h.repo`), not the repository file. No existing test was weakened.
+No contract migration is needed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Scenario: `--sysconfdir <fakeroot>/etc --presence off` run twice, then plain, then `on`, then
-  plain (PFP2). Each branch of `phase_presence` (create, already present, remove, already absent,
-  report-only) has an `elsewhere` arm printing `[SKIP] ... not applied ...`; no `[DONE]` path is
-  reachable when `PRESENCE_FLAG != PRESENCE_READ_FLAG`. PASS.
-- Scenario: dry run with each `--presence` value: `PRESENCE_PLAN_NOTE` is built from
-  `presence_requested`, which mirrors the requested or recorded state, so the printed command
-  (`touch` for off, `rm -f` for on) matches the request. The `*` plan arm uses `presence_report`,
-  which carries its own note. PASS.
-- Scenario: default `/etc`: `presence_report` falls through to the unchanged `presence_state`
-  (kill-switch, flag, on) and every phase arm keeps the original `[DONE]` text (PFP3). PASS.
-- Scenario: `--sysconfdir /etc/` or `//etc`: string comparison reports "not applied" although
-  the daemon would read the file. Fails safe (under-reports, never over-reports), identical to
-  `DAEMON_READ_CONFIG` and `LOCK_WIDGET_READ_FLAG`, and documented in walkthrough 243. SUGGESTION
-  only.
-- In the elsewhere case `presence_report` no longer mentions `<sysconfdir>/soos/disabled`; that
-  file is also not read by the daemon in that case, so dropping it is accurate. PASS.
-- Single source of truth: PFP1 parses the daemon and GUI constants and checks `main.rs` uses
-  the constant directory, and scans `crates/*/src`, `packaging`, `scripts` for any new reader.
-  `git grep` confirms the only non-test, non-doc sources naming the flag are in the known list.
+
+- `absolute_dir` exercised directly with `/`, `//`, `/etc/`, `/etc//`, `//etc/./`, `/./`,
+  `/a/b/.`, `/a/..b/c`, `/a/...`, `/a/*/c`, `/a/ b`, `/a/../b`, `/..`: results `/`, `/`, `/etc`,
+  `/etc`, `/etc`, `/`, `/a/b`, `/a/..b/c`, `/a/...`, `/a/*/c`, `/a/ b`, exit 2, exit 2. Only an
+  exact `..` component is refused; glob characters are never used as patterns (the `case` subject
+  and expansions are quoted); the loop consumes at least one character per iteration. The
+  relative-path and newline validation runs first and is unchanged. `usage_error` inside the
+  command substitution exits the parent through `set -euo pipefail`, the same mechanism as the
+  pre-existing absolute-path refusal (SRP5, SRP9 confirm exit 2 with no change). PASS.
+- Every path option goes through the one
+  `--prefix|--sysconfdir|--localstatedir|--runstatedir|--pam-dir|--artifact-dir` branch of the
+  parser, so `..` is refused for all six, the internal `--artifact-dir` included (SRP9 runs the
+  root half directly). PASS.
+- Post-build resolution: the trigger `"/${TARGET_DIR}/" == */../*` matches only an exact `..`
+  component (same rule as `absolute_dir`). `TARGET_DIR` is always absolute
+  (`resolve_target_dir` prefixes `WORKSPACE_ROOT`, itself from `cd … && pwd`), so `CDPATH` cannot
+  redirect `cd` or print to stdout. The `printf 'x'` sentinel keeps a trailing newline in the name,
+  which the newline check then refuses. A failed `cd`, a non-absolute, newline-bearing or
+  `..`-bearing result, or a missing `release/` prints `[FAIL] build` and exits `EXIT_BUILD` (40)
+  before escalation. `TARGET_DIR` and `ARTIFACT_DIR` are both updated, so the later
+  `install_remote.sh` call and the `--system-phase` argument use the same physical directory. When
+  started as root, `run_system_phase` runs after this block, so it also sees the resolved value.
   PASS.
+- Previously working `CARGO_TARGET_DIR` values: unset, absolute without `..`, relative without
+  `..`, with trailing or repeated slashes or `.` components are all passed to the root half
+  unchanged and normalised there to an equivalent lexical path; `install.sh` already resolves
+  `--artifact-dir` with `cd … && pwd -P` (`scripts/install.sh` line 631), so the installed binaries
+  are identical. Values with `..` (relative `../shared-target`, absolute `/x/repo/../t`, and `..`
+  behind a link) still install (SRP7, SRP8, the link case asserting the kernel's directory and the
+  absence of the lexical one). No other script or workflow invokes `setup.sh` with a path option
+  (grep of `scripts`, `tests/docker`, `.github`, `packaging`). PASS.
+- Ownership/permission checks: `check_target_dir_owner` (`find -H` before the build) is unchanged
+  and inspects the lexical `TARGET_DIR`, which the kernel resolves to the same directory the
+  post-build `cd -P` lands on. Nothing is skipped and no check is weakened; handing root a
+  symlink-free physical path removes, rather than adds, a later link traversal. `install.sh`'s
+  own artifact checks are unchanged. PASS.
+- Rescue line: `KILL_SWITCH_READ_FLAG="/etc/soos/disabled"` matches `crates/pam/src/config.rs`
+  `DEFAULT_FLAG_DIR` + `disabled` and `crates/daemon/src/presence/mod.rs`
+  `DEFAULT_KILL_SWITCH_DIR` + `GLOBAL_DISABLE_FLAG` (pinned by SRP1, including the single
+  `flag_dir` assignment and the `PresenceSwitch::new(PathBuf::from(DEFAULT_KILL_SWITCH_DIR))` call
+  in `main.rs`). `KILL_SWITCH` stays for the state report only. Setup never writes either file
+  (SRP2). PASS.
+- Behaviour change: `--prefix` and the other options now refuse `..` where they previously
+  accepted it. This is the documented decision of the ADR (item 3) and the help text says so.
+  Accepted, not a finding.
 
 ### PAM Concurrency & Deadlines
-- No change under `crates/pam`. N/A, PASS.
+
+No change under `crates/pam` or in any PAM path; the only Rust change is test code. N/A, PASS.
 
 ### Panic Safety & Fail-Closed
-- No Rust production code changes. The script change only alters reporting; no path turns an
-  unapplied step into a success claim; the opposite direction (false "not applied") is the safe
-  one. PASS.
+
+No production Rust changed. In `setup.sh`, every new failure path exits non-zero before any system
+change (exit 2 at parse time, exit 40 before escalation); no path turns an error into success.
+`unwrap`/`expect`/`panic!` appear only in the new test helpers. PASS.
 
 ### Test Integrity & Anti-Weakening
-- See section 2. `unwrap`/`expect`/`panic!` in the new test helpers are test-only. The PFP1 scan
-  ignores unreadable directories with `continue` but asserts that the daemon file is seen, so an
-  empty scan cannot pass vacuously. PASS.
+
+- Section 2 listing: add-only. PASS.
+- Can the tests fail against plausible wrong implementations? SRP3 (third spelling) fails if `.`
+  or inner `//` are kept; SRP5 fails if `realpath`/`readlink -f` is used (a link to the read
+  directory would become "applied") or if `..` is accepted; SRP8 (link case) fails against a
+  lexical `..` resolution; SRP7/SRP8 fail against the first fix (root half exit 2); SRP9 fails if
+  the `..` refusal is dropped from `--artifact-dir`; SRP1/SRP2 fail if the rescue line uses
+  `${SYSCONFDIR}`/`${KILL_SWITCH}`. PASS.
+- `srp_point_read_paths_at_fake_root` asserts the presence of the `DAEMON_READ_CONFIG` and
+  `LOCK_WIDGET_READ_FLAG` lines but replaces `PRESENCE_READ_FLAG` without asserting it; the line
+  exists on this base (`scripts/setup.sh` line 553), so the substitution is effective today. See
+  SUGGESTION 2.
 
 ### Memory, Bounds & Secrets
-- Messages print only file paths and fixed commands; no credentials, frames or embeddings.
-  Flag creation still uses `set -C` (no-clobber) and the symlink refusal precedes the new code;
-  mode `0644` unchanged. PASS.
+
+No secret, frame or embedding involved. The normalisation loop is bounded by the argument length;
+error messages quote only the user-supplied path (with `%q` in the post-build error). PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/` or hook change. `scripts/setup.sh` gains no new external
-  command or `eval`; all expansions are quoted. PASS.
+
+`scripts/setup.sh` changed: no new external command (`cd`, `pwd` are builtins), no `eval`, no
+`realpath`/`readlink`, no network access, no new dependency, no workflow change. PASS.
 
 ### English-Only Policy
-- Code, comments, messages, ADR amendment, matrix rows and walkthrough 243 are in English. PASS.
+
+All code, comments, docs, matrix rows and the walkthrough are in English. PASS.
+
+### Documentation Consistency
+
+`Docs/PACKAGING_AND_PROVISIONING.md` ("Read paths (GitHub #455)"), `AI/DECISIONS.md`,
+`AI/VERIFICATION_MATRIX.md` (SRP1–SRP10) and walkthrough 244 agree with the code: normalisation
+rule, `..` refusal for every option including `--artifact-dir`, `cd -P`/`pwd -P` post-build
+resolution, exit 40 (`EXIT_BUILD=40`), unchanged ownership preflight, rescue path. #454 is
+described as merged (`4e0c02a`) everywhere; no text describes it as open. The walkthrough claim
+that #454 did not touch `setup_user_phase_contract.rs` is consistent with #454's own message
+(PFP1–PFP4 in `setup_contract.rs`). PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `scripts/setup.sh:1006-1008` — `presence_flag_elsewhere` is a plain string
-  comparison, so `--sysconfdir /etc/` (trailing slash) or `//etc` is reported "not applied" even
-  though the daemon reads that file. Fail-safe and consistent with `DAEMON_READ_CONFIG`
-  (`setup.sh:1336`) and `LOCK_WIDGET_READ_FLAG` (`setup.sh:1061`); a shared normalisation of
-  `SYSCONFDIR` (strip trailing and duplicate slashes) could be a follow-up for all three.
-- **[SUGGESTION]** `scripts/setup.sh:2389`, `2400`, `2406` — in the elsewhere case the plan status
-  column still says "already done" while the detail says "not applied". The detail is correct and
-  tested, and it matches the merged lock-widget precedent (`setup.sh:2415`, `2422`, `2426`), but a
-  status such as "manual (not applied)" (as used for the camera view at `setup.sh:1673`) would be
-  clearer. Changing it later must keep PFP2's "one `[PLAN] presence:` line" contract.
+- **[SUGGESTION]** `tests/invariants/src/setup_user_phase_contract.rs:1846` — the section banner
+  still says "rows SRP1-SRP6" while the section now holds SRP1–SRP10. Optional: update the comment
+  in a later change (comment only; no assertion involved).
+- **[SUGGESTION]** `tests/invariants/src/setup_user_phase_contract.rs:1890` — the comment "when this
+  checkout already has it" and the unasserted `PRESENCE_READ_FLAG` replacement are stale now that
+  #454 is on the base; asserting the line is present (as for the two other constants) would make
+  SRP3's coverage of the presence comparison explicit. Optional, add-only hardening.
 
-No CRITICAL, MAJOR or MINOR findings.
+No CRITICAL, MAJOR or MINOR finding.
 
 ## 5. Final Verdict
 

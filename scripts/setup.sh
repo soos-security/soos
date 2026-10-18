@@ -91,6 +91,12 @@ readonly DAEMON_READ_CONFIG="/etc/soos/daemon.toml"
 # file; otherwise setup still records the request there but reports it "not applied" and
 # prints the command for this file (GitHub #451, same rule as DAEMON_READ_CONFIG).
 readonly LOCK_WIDGET_READ_FLAG="/etc/soos/lockwidget.disable"
+# The only global kill switch pam_soos.so reads (crates/pam/src/config.rs DEFAULT_FLAG_DIR
+# joined with "disabled"; flag_dir takes no module argument) and soos-daemon reads
+# (crates/daemon/src/presence/mod.rs DEFAULT_KILL_SWITCH_DIR and GLOBAL_DISABLE_FLAG; main.rs
+# takes no path option for it). Setup never writes it; the summary's rescue command always
+# names this file, whatever --sysconfdir says (GitHub #455).
+readonly KILL_SWITCH_READ_FLAG="/etc/soos/disabled"
 readonly DAEMON_PREVIEW_MARKER="# Written by scripts/setup.sh (soos-setup): live camera view of the phone companion."
 # The boolean keys of remote.toml, in the order setup writes them (prerequisites first).
 readonly COMPANION_KEYS=(allow_funnel allow_unlock password_alerts push_notifications
@@ -198,6 +204,10 @@ Options:
   --localstatedir <DIR>    State directory (default: /var)
   --runstatedir <DIR>      Runtime directory (default: /run)
   --pam-dir <DIR>          PAM module directory (default: same rule as install.sh)
+                           Every <DIR> is absolute and normalised by text, never
+                           through a symbolic link: repeated and trailing slashes
+                           and "." components are dropped (/etc/ and /etc// are
+                           /etc); a ".." component is refused
 
 Phone companion (soos-remote; set up as the session owner after the system phase,
 only when setup is started as that user, never as root). Every feature below is on
@@ -279,15 +289,31 @@ require_value() {
     fi
 }
 
+# Validates a path option and prints it normalised once, lexically and without following any
+# symbolic link (GitHub #455): repeated and trailing slashes collapse, `.` components are
+# dropped and a `..` component is refused (resolving it by text could disagree with the
+# kernel behind a link). /etc/, /etc// and //etc/./ are then /etc for every read-path
+# comparison (DAEMON_READ_CONFIG, LOCK_WIDGET_READ_FLAG and the paths derived from SYSCONFDIR).
 absolute_dir() {
-    local opt="$1" value="$2"
+    local opt="$1" value="$2" rest part out=""
     if [[ "${value}" != /* || "${value}" == *$'\n'* ]]; then
         usage_error "${opt} needs an absolute path: '${value}'"
     fi
-    while [[ "${value}" == */ && "${value}" != "/" ]]; do
-        value="${value%/}"
+    rest="${value}"
+    while [[ -n "${rest}" ]]; do
+        part="${rest%%/*}"
+        if [[ "${rest}" == */* ]]; then
+            rest="${rest#*/}"
+        else
+            rest=""
+        fi
+        case "${part}" in
+            ""|.) ;;
+            ..) usage_error "${opt} must not contain a '..' component: '${value}'" ;;
+            *) out+="/${part}" ;;
+        esac
     done
-    printf '%s' "${value}"
+    printf '%s' "${out:-/}"
 }
 
 valid_user_name() {
@@ -2186,7 +2212,7 @@ print_summary() {
     if [[ -n "${COMPANION_SKIP}" ]]; then
         info "  Phone companion: skipped (${COMPANION_SKIP})."
     fi
-    info "  Rescue: sudo touch ${KILL_SWITCH}   Remove: sudo ./scripts/uninstall.sh --keep-data"
+    info "  Rescue: sudo touch ${KILL_SWITCH_READ_FLAG}   Remove: sudo ./scripts/uninstall.sh --keep-data"
 }
 
 finish_with_state() {
@@ -2829,6 +2855,25 @@ if ! (cd "${WORKSPACE_ROOT}" && as_build_user CARGO_TARGET_DIR="${TARGET_DIR}" S
     printf '[FAIL] build\n'
     error "The release build failed; nothing was installed."
     exit "${EXIT_BUILD}"
+fi
+# The root half refuses a `..` component in --artifact-dir as in every path option (GitHub
+# #455), but CARGO_TARGET_DIR may hold one (a relative value such as ../shared-target is
+# resolved against the checkout). The directory exists now, so a target directory with a `..`
+# component is resolved here as the kernel resolved it for cargo (cd -P, pwd -P: links
+# followed, `..` taken physically) before anything uses it again. This is not a read-path
+# comparison. A target directory without `..` is kept exactly as it is.
+if [[ "/${TARGET_DIR}/" == */../* ]]; then
+    resolved_target="$(cd -P -- "${TARGET_DIR}" && pwd -P && printf 'x')" || resolved_target=""
+    resolved_target="${resolved_target%x}"
+    resolved_target="${resolved_target%$'\n'}"
+    if [[ "${resolved_target}" != /* || "${resolved_target}" == *$'\n'* \
+            || "/${resolved_target}/" == */../* || ! -d "${resolved_target}/release" ]]; then
+        printf '[FAIL] build\n'
+        error "The cargo target directory $(printf '%q' "${TARGET_DIR}") could not be resolved to a path without '..'; nothing was installed. Set CARGO_TARGET_DIR to a path without '..'."
+        exit "${EXIT_BUILD}"
+    fi
+    TARGET_DIR="${resolved_target}"
+    ARTIFACT_DIR="${TARGET_DIR}/release"
 fi
 printf '[DONE] build: %s\n' "${ARTIFACT_DIR}"
 

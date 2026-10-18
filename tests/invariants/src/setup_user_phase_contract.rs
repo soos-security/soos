@@ -1839,3 +1839,466 @@ fn test_set_u24_root_preview_docker_job_wired_into_ci() {
         "the job is required, never advisory"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Read paths: the rescue kill switch and the normalised `--sysconfdir` (GitHub #455, part of
+// #362; follow-up of #402, #452 and #454; ADR 2026-10-18 "Setup Read Paths: the Rescue Kill
+// Switch and One Lexical Normalisation of the Path Options"; rows SRP1-SRP6)
+// ---------------------------------------------------------------------------
+
+/// The one global kill switch `pam_soos.so` and soos-daemon read.
+const KILL_SWITCH_READ_PATH: &str = "/etc/soos/disabled";
+
+/// Value of `pub const <name>: &str = "<value>";` in a Rust source.
+fn srp_str_const(source: &str, name: &str) -> String {
+    let needle = format!("pub const {name}: &str = \"");
+    let start = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("{name} not declared"))
+        + needle.len();
+    let end = source[start..].find('"').expect("closing quote");
+    source[start..start + end].to_string()
+}
+
+/// The lexical form `setup.sh` gives an absolute path: repeated and trailing slashes collapsed,
+/// `.` components dropped (the harness paths never hold `..`).
+fn srp_lexical(path: &Path) -> String {
+    let raw = path.display().to_string();
+    assert!(raw.starts_with('/'), "absolute harness path: {raw}");
+    let parts: Vec<&str> = raw
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    assert!(!parts.contains(&".."), "harness path without ..: {raw}");
+    format!("/{}", parts.join("/"))
+}
+
+/// The read-path constants of the harness copy of `setup.sh` pointed at the fake root (as LWF3
+/// does for the lock-widget flag), so that `<root>/etc` plays the role of `/etc`.
+fn srp_point_read_paths_at_fake_root(h: &Harness) -> String {
+    let etc = srp_lexical(&h.root.join("etc"));
+    let path = h.repo.join(SETUP);
+    let mut script = fs::read_to_string(&path).unwrap();
+    for (name, rel) in [
+        ("DAEMON_READ_CONFIG", "daemon.toml"),
+        ("LOCK_WIDGET_READ_FLAG", "lockwidget.disable"),
+    ] {
+        let original = format!("readonly {name}=\"/etc/soos/{rel}\"");
+        assert!(script.contains(&original), "{name} line present");
+        script = script.replace(&original, &format!("readonly {name}=\"{etc}/soos/{rel}\""));
+    }
+    // The presence read path of GitHub #453 (PR #454), when this checkout already has it.
+    let presence = "readonly PRESENCE_READ_FLAG=\"/etc/soos/presence.disable\"";
+    script = script.replace(
+        presence,
+        &format!("readonly PRESENCE_READ_FLAG=\"{etc}/soos/presence.disable\""),
+    );
+    fs::write(&path, script).unwrap();
+    etc
+}
+
+fn srp_line<'a>(t: &'a str, prefix: &str) -> &'a str {
+    let found: Vec<&str> = t.lines().filter(|l| l.starts_with(prefix)).collect();
+    assert_eq!(found.len(), 1, "one `{prefix}` line:\n{t}");
+    found[0]
+}
+
+/// SRP1: the rescue command is pinned on every side: `setup.sh` names
+/// `KILL_SWITCH_READ_FLAG="/etc/soos/disabled"`, equal to the global flag `pam_soos.so` reads
+/// (`DEFAULT_FLAG_DIR` joined with `disabled`, `flag_dir` never set from a module argument) and
+/// to the one soos-daemon reads (`DEFAULT_KILL_SWITCH_DIR` joined with `GLOBAL_DISABLE_FLAG`,
+/// watched by `main.rs` with no path option); the only `Rescue:` line of `setup.sh` prints it.
+#[test]
+fn test_srp1_rescue_kill_switch_matches_pam_and_daemon() {
+    let script = read_repo(SETUP);
+    assert!(
+        script
+            .lines()
+            .any(|l| l == format!("readonly KILL_SWITCH_READ_FLAG=\"{KILL_SWITCH_READ_PATH}\"")),
+        "setup.sh pins the kill-switch read path"
+    );
+    let rescue: Vec<&str> = script.lines().filter(|l| l.contains("Rescue:")).collect();
+    assert_eq!(rescue.len(), 1, "one rescue line: {rescue:?}");
+    assert!(
+        rescue[0].contains("Rescue: sudo touch ${KILL_SWITCH_READ_FLAG} "),
+        "the rescue command names the read path: {}",
+        rescue[0]
+    );
+    assert!(
+        !rescue[0].contains("${KILL_SWITCH}") && !rescue[0].contains("${SYSCONFDIR}"),
+        "the rescue command never names <sysconfdir>: {}",
+        rescue[0]
+    );
+
+    let pam = read_repo("crates/pam/src/config.rs");
+    assert_eq!(
+        format!("{}/disabled", srp_str_const(&pam, "DEFAULT_FLAG_DIR")),
+        KILL_SWITCH_READ_PATH,
+        "setup.sh and pam_soos.so agree"
+    );
+    assert!(
+        pam.contains("self.flag_dir.join(\"disabled\").exists()"),
+        "pam_soos.so checks <flag_dir>/disabled"
+    );
+    let mut assignments = Vec::new();
+    for entry in fs::read_dir(workspace_root().join("crates/pam/src"))
+        .unwrap()
+        .flatten()
+    {
+        let body = fs::read_to_string(entry.path()).unwrap_or_default();
+        for line in body.lines() {
+            let t = line.trim();
+            if t.contains("flag_dir =") || t.starts_with("flag_dir:") {
+                assignments.push(t.to_string());
+            }
+        }
+    }
+    assert_eq!(
+        assignments,
+        vec!["flag_dir: PathBuf::from(DEFAULT_FLAG_DIR),".to_string()],
+        "pam_soos.so sets flag_dir only from DEFAULT_FLAG_DIR"
+    );
+
+    let presence = read_repo("crates/daemon/src/presence/mod.rs");
+    assert_eq!(
+        format!(
+            "{}/{}",
+            srp_str_const(&presence, "DEFAULT_KILL_SWITCH_DIR"),
+            srp_str_const(&presence, "GLOBAL_DISABLE_FLAG")
+        ),
+        KILL_SWITCH_READ_PATH,
+        "setup.sh and soos-daemon agree"
+    );
+    assert!(
+        read_repo("crates/daemon/src/main.rs")
+            .contains("PresenceSwitch::new(PathBuf::from(DEFAULT_KILL_SWITCH_DIR))"),
+        "soos-daemon watches the constant directory, never a configurable one"
+    );
+}
+
+/// SRP2: with a `--sysconfdir` other than `/etc` (the harness's fake root), the summary's rescue
+/// command names `/etc/soos/disabled`, never `<sysconfdir>/soos/disabled`, and setup still
+/// never creates a kill switch.
+#[test]
+fn test_srp2_summary_rescue_names_the_read_kill_switch() {
+    let h = Harness::new("srp_rescue");
+    let out = h.run(&["--yes", "--no-remote"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    let rescue: Vec<&str> = t.lines().filter(|l| l.contains("Rescue: ")).collect();
+    assert_eq!(rescue.len(), 1, "one rescue line:\n{t}");
+    assert!(
+        rescue[0].contains(&format!("Rescue: sudo touch {KILL_SWITCH_READ_PATH} ")),
+        "{}",
+        rescue[0]
+    );
+    let elsewhere = h.root.join("etc/soos/disabled").display().to_string();
+    assert!(
+        !t.contains(&format!("sudo touch {elsewhere}")),
+        "no rescue command names <sysconfdir>:\n{t}"
+    );
+    assert!(!h.root.join("etc/soos/disabled").exists());
+}
+
+/// SRP3: `--sysconfdir` spelt `<etc>/`, `<etc>//` or `<etc-parent>//etc/./` is the read
+/// directory for every read-path comparison: with the read paths pointed at the fake root, the
+/// dry-run plan creates `daemon.toml` and `lockwidget.disable` there and never says
+/// "not applied", and every printed path is the normalised one.
+#[test]
+fn test_srp3_slash_spellings_of_the_read_directory_are_applied() {
+    let h = Harness::new("srp_spellings");
+    let etc = srp_point_read_paths_at_fake_root(&h);
+    let parent = srp_lexical(&h.root);
+    let before = h.snapshot();
+    for spelling in [
+        format!("{etc}/"),
+        format!("{etc}//"),
+        format!("{parent}//etc/./"),
+    ] {
+        let out = h.run(&[
+            "--dry-run",
+            "--tailscale-login",
+            LOGIN,
+            "--rp-id",
+            RP_ID,
+            "--lock-widget",
+            "off",
+            "--sysconfdir",
+            &spelling,
+        ]);
+        assert_eq!(code(&out), 0, "{spelling}: {}", text(&out));
+        let t = text(&out);
+        let daemon = srp_line(&t, "[PLAN] camera view (daemon): ");
+        assert!(
+            daemon.contains(&format!("will run - create {etc}/soos/daemon.toml ")),
+            "{spelling}: {daemon}"
+        );
+        let widget = srp_line(&t, "[PLAN] lock widget: ");
+        assert!(
+            widget.contains(&format!("{etc}/soos/lockwidget.disable")),
+            "{spelling}: {widget}"
+        );
+        assert!(
+            !t.contains("not applied"),
+            "{spelling}: the read directory is never reported elsewhere:\n{t}"
+        );
+        for raw in [
+            format!("{etc}//"),
+            format!("{etc}/./"),
+            format!("{parent}//"),
+        ] {
+            assert!(
+                !t.contains(&raw),
+                "{spelling}: no unnormalised path `{raw}`:\n{t}"
+            );
+        }
+    }
+    assert_eq!(before, h.snapshot(), "dry runs write nothing");
+}
+
+/// SRP4: a real run with `--sysconfdir <etc>//` and the read paths pointed at the fake root
+/// reports the lock-widget flag `[DONE]` at the normalised path, never "not applied".
+#[test]
+fn test_srp4_double_slash_sysconfdir_run_reports_the_flag_done() {
+    let h = Harness::new("srp_run");
+    let etc = srp_point_read_paths_at_fake_root(&h);
+    let spelling = format!("{etc}//");
+    let out = h.run(&[
+        "--yes",
+        "--no-remote",
+        "--lock-widget",
+        "off",
+        "--sysconfdir",
+        &spelling,
+    ]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!(
+            "[DONE] lock widget: turned off ({etc}/soos/lockwidget.disable)"
+        )),
+        "{t}"
+    );
+    assert!(!t.contains("not applied: the GNOME extension reads"), "{t}");
+    assert!(h.root.join("etc/soos/lockwidget.disable").is_file());
+}
+
+/// SRP5: the comparison is lexical and never follows a symbolic link: a `--sysconfdir` that is a
+/// link to the read directory is still reported "not applied"; a `..` component is refused
+/// with exit 2 before any change, for `--sysconfdir` and the other path options.
+#[test]
+fn test_srp5_links_are_not_followed_and_dot_dot_is_refused() {
+    let h = Harness::new("srp_link");
+    let etc = srp_point_read_paths_at_fake_root(&h);
+    let link = h.dir.join("etc-link");
+    std::os::unix::fs::symlink(h.root.join("etc"), &link).unwrap();
+    let link = srp_lexical(&link);
+    let out = h.run(&[
+        "--dry-run",
+        "--tailscale-login",
+        LOGIN,
+        "--rp-id",
+        RP_ID,
+        "--sysconfdir",
+        &link,
+    ]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        srp_line(&t, "[PLAN] camera view (daemon): ").contains("manual (not applied)"),
+        "a link to the read directory is not the read directory:\n{t}"
+    );
+
+    let before = h.snapshot();
+    for args in [
+        vec!["--sysconfdir".to_string(), format!("{etc}/../etc")],
+        vec!["--sysconfdir".to_string(), format!("{etc}/..")],
+        vec!["--sysconfdir".to_string(), "/../etc".to_string()],
+        vec![
+            "--prefix".to_string(),
+            format!("{}/../usr", srp_lexical(&h.root.join("usr"))),
+        ],
+    ] {
+        let mut full: Vec<&str> = args.iter().map(String::as_str).collect();
+        full.push("--yes");
+        let out = h.run(&full);
+        assert_eq!(code(&out), 2, "{args:?} must exit 2: {}", text(&out));
+        assert!(text(&out).contains(".."), "{args:?}: {}", text(&out));
+        let lines = h.log_lines();
+        assert!(
+            lines.iter().all(|l| is_read_only_call(l)),
+            "{args:?} must change nothing: {lines:?}"
+        );
+    }
+    assert_eq!(before, h.snapshot(), "refused runs write nothing");
+}
+
+/// SRP6: the documentation and the traceability agree with the code: the setup section of
+/// `Docs/PACKAGING_AND_PROVISIONING.md` names the rescue read path and the normalisation, the
+/// ADR records the fix, the matrix carries SRP1-SRP6 and walkthrough 244 exists.
+#[test]
+fn test_srp6_documentation_and_traceability() {
+    let pkg = read_repo("Docs/PACKAGING_AND_PROVISIONING.md");
+    let flat: String = pkg.split_whitespace().collect::<Vec<_>>().join(" ");
+    let para = flat
+        .split("**Read paths (GitHub #455).**")
+        .nth(1)
+        .expect("read-paths paragraph");
+    let para = &para[..para.find(" | ").unwrap_or(para.len())];
+    for needle in [
+        KILL_SWITCH_READ_PATH,
+        "Rescue:",
+        "`..`",
+        "symbolic link",
+        "`/etc/`",
+        "`/etc//`",
+    ] {
+        assert!(para.contains(needle), "read-paths paragraph: {needle}");
+    }
+    assert!(
+        read_repo("AI/DECISIONS.md").contains("GitHub #455"),
+        "the ADR records the fix"
+    );
+    let matrix = read_repo("AI/VERIFICATION_MATRIX.md");
+    for row in 1..=6 {
+        assert!(
+            matrix.contains(&format!("| SRP{row} |")),
+            "matrix row SRP{row}"
+        );
+    }
+    assert!(workspace_root()
+        .join("AI/walkthroughs/244_setup_read_paths.md")
+        .is_file());
+}
+
+/// Runs a real `--yes --no-remote` setup with `CARGO_TARGET_DIR=<value>` and checks that the
+/// root half received, and `install.sh` installed from, `<expected>` (a path without `..`),
+/// the directory the fake cargo really wrote.
+fn srp_run_with_target_dir(h: &mut Harness, value: &str, expected: &Path) {
+    h.set_env("CARGO_TARGET_DIR", value);
+    let out = h.run(&["--yes", "--no-remote"]);
+    let t = text(&out);
+    assert_eq!(code(&out), 0, "CARGO_TARGET_DIR={value}: {t}");
+    let expected = expected.display().to_string();
+    assert!(!expected.contains("/../"), "{expected}");
+    assert!(
+        Path::new(&expected).join("soos-daemon").is_file(),
+        "the fake cargo wrote {expected}"
+    );
+    assert!(
+        t.contains(&format!("[DONE] build: {expected}\n")),
+        "CARGO_TARGET_DIR={value}: the build reports {expected}:\n{t}"
+    );
+    let lines = h.log_lines();
+    let escalate = &lines[find_line(&lines, &["uid=1000 sudo", "--system-phase"])];
+    assert!(
+        escalate.contains(&format!(" --artifact-dir {expected} ")),
+        "CARGO_TARGET_DIR={value}: the root half gets {expected}: {escalate}"
+    );
+    assert!(
+        !escalate.contains("/../"),
+        "CARGO_TARGET_DIR={value}: no `..` reaches the root half: {escalate}"
+    );
+    let install = &lines[find_line(&lines, &["uid=0 install.sh", "--artifact-dir"])];
+    assert!(
+        install.contains(&format!(" --artifact-dir {expected} ")),
+        "CARGO_TARGET_DIR={value}: install.sh installs from {expected}: {install}"
+    );
+    assert!(
+        !t.contains("must not contain a '..' component"),
+        "CARGO_TARGET_DIR={value}: {t}"
+    );
+}
+
+/// SRP7: a relative `CARGO_TARGET_DIR` with a `..` component (`../shared-target`, documented as
+/// resolved against the checkout) still installs: after the build the user half passes the root
+/// half a `..`-free `--artifact-dir`, the directory cargo wrote.
+#[test]
+fn test_srp7_relative_target_dir_with_dot_dot_reaches_the_system_phase() {
+    let mut h = Harness::new("srp_rel_target");
+    let expected = fs::canonicalize(&h.dir)
+        .unwrap()
+        .join("shared-target/release");
+    srp_run_with_target_dir(&mut h, "../shared-target", &expected);
+}
+
+/// SRP8: an absolute `CARGO_TARGET_DIR` with a `..` component still installs, and the `..` is
+/// taken as the kernel takes it for cargo (through a symbolic link, never by text): the root half
+/// gets the directory cargo really wrote, never the lexical one.
+#[test]
+fn test_srp8_absolute_target_dir_with_dot_dot_reaches_the_system_phase() {
+    let mut h = Harness::new("srp_abs_target");
+    let base = fs::canonicalize(&h.dir).unwrap();
+    let value = format!("{}/repo/../plain-target", base.display());
+    srp_run_with_target_dir(&mut h, &value, &base.join("plain-target/release"));
+
+    let mut h = Harness::new("srp_link_target");
+    let base = fs::canonicalize(&h.dir).unwrap();
+    fs::create_dir_all(base.join("deep/sub")).unwrap();
+    std::os::unix::fs::symlink(base.join("deep/sub"), base.join("link")).unwrap();
+    let value = format!("{}/link/../linked-target", base.display());
+    srp_run_with_target_dir(&mut h, &value, &base.join("deep/linked-target/release"));
+    assert!(
+        !base.join("linked-target").exists(),
+        "the lexical resolution of the `..` is never used"
+    );
+}
+
+/// SRP9: the root half invoked directly still refuses an `--artifact-dir` with a `..`
+/// component, with exit 2 and before any change.
+#[test]
+fn test_srp9_system_phase_refuses_a_dot_dot_artifact_dir() {
+    let mut h = Harness::new("srp_root_dot_dot");
+    h.set_env("STUB_AS_ROOT", "1");
+    let raw = format!("{}/target/../target/release", srp_lexical(&h.repo));
+    let before = h.snapshot();
+    let out = h.run(&[
+        "--system-phase",
+        "--yes",
+        "--user",
+        "alice",
+        "--artifact-dir",
+        &raw,
+        "--local-seat",
+        "no",
+        "--distro",
+        "arch",
+    ]);
+    let t = text(&out);
+    assert_eq!(code(&out), 2, "{t}");
+    assert!(
+        t.contains("--artifact-dir must not contain a '..' component"),
+        "{t}"
+    );
+    let lines = h.log_lines();
+    assert!(
+        lines.iter().all(|l| is_read_only_call(l)),
+        "a refused root half changes nothing: {lines:?}"
+    );
+    assert_eq!(before, h.snapshot(), "a refused root half writes nothing");
+}
+
+/// SRP10: the documentation and the traceability record the resolution of a `CARGO_TARGET_DIR`
+/// with `..` and the refusal kept for a direct `--artifact-dir`.
+#[test]
+fn test_srp10_artifact_dir_resolution_documented() {
+    let pkg = read_repo("Docs/PACKAGING_AND_PROVISIONING.md");
+    let flat: String = pkg.split_whitespace().collect::<Vec<_>>().join(" ");
+    let para = flat
+        .split("**Read paths (GitHub #455).**")
+        .nth(1)
+        .expect("read-paths paragraph");
+    let para = &para[..para.find(" | ").unwrap_or(para.len())];
+    for needle in ["`CARGO_TARGET_DIR`", "`pwd -P`", "`--artifact-dir`"] {
+        assert!(para.contains(needle), "read-paths paragraph: {needle}");
+    }
+    let matrix = read_repo("AI/VERIFICATION_MATRIX.md");
+    for row in 7..=10 {
+        assert!(
+            matrix.contains(&format!("| SRP{row} |")),
+            "matrix row SRP{row}"
+        );
+    }
+    let walkthrough = read_repo("AI/walkthroughs/244_setup_read_paths.md");
+    assert!(walkthrough.contains("CARGO_TARGET_DIR"), "walkthrough 244");
+}
