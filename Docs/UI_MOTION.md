@@ -189,6 +189,18 @@ function withViewTransition(apply) {
 An exit caused by the view ending (`endCameraView`, an error, a stall) applies the classes directly,
 without a transition.
 
+**Implementation** (`feat/remote-motion`, GitHub #433; spec `AI/architect_spec_remote_motion.md`;
+invariants `tests/invariants/src/remote_motion_contract.rs`, matrix RMO1–RMO13). W1 uses one keyframe
+per state class (`soos-state-locked` … `soos-state-unknown`, a single `from` step, so the muted states
+end at their own 0.7 opacity). W2 and the tile star share `soos-pending-turn`; `app.js` sets
+`is-pending` through one helper, `syncPending()`, called after every write of `lockRequestedAt` /
+`unlockRequestedAt`. W4, W5, W7 and the tour card share the single `@starting-style` block; the revealed
+cards declare no rest `transform`, which would make them the containing block of the fixed full-screen
+camera stage. W6 delays items 2–5 by 1–4 × `--t-stagger` and the sixth onwards by 5 ×. W8:
+`applyCameraFull()` writes the classes from the current flag; the tap, the close button and Escape
+animate the overlay exit (`exitCameraFullscreen(true)`), the view ending and the browser's own
+fullscreen exit do not.
+
 The camera snapshot a View Transition takes is the browser's own rendering of the already visible
 page, unreadable by script and discarded after the transition: no frame is captured, blurred, cached,
 stored or logged for an effect. The battery is a text line (there is no level bar to animate) and the
@@ -233,6 +245,9 @@ Reduced motion is mandatory on both surfaces (WCAG 2.2 SC 2.3.3; Apple HIG "make
   duration allowed outside `:root` is `0s` inside that block.
 - `@starting-style` entries keep only the opacity fade; the star sits at its final angle; the pending
   loop does not run; `startViewTransition` is skipped (`withViewTransition`).
+- As implemented (`feat/remote-motion`), the universal rule of that block is `transition: none
+  !important; animation: none !important;`: no fade remains at all, the strict end of the `--t-fast`
+  ceiling above (the feature-tour invariant PTR-S8 pins `transition: none !important`).
 
 **GUI** — owner decision 4 (2026-10-13). `MotionPrefs { reduced: bool }` is resolved in this order:
 

@@ -82,11 +82,41 @@
   --band-h: 56px;
   --strip-h: 44px;
   --touch: 48px;
+  /*
+   * Motion tokens (Docs/UI_MOTION.md section 2, mirrored by name and value by the GUI theme):
+   * durations, exits at 0.7 x the entry, the stagger step and the pending quarter turn, three
+   * easings, the press scale and the entry distances, and the signature star turn.
+   */
   --t-fast: 120ms;
-  /* Motion tokens of Docs/UI_MOTION.md section 2 used by the feature tour (W4 card entry). */
+  --t-short: 180ms;
   --t-medium: 260ms;
+  --t-long: 380ms;
+  --t-spring: 400ms;
+  --t-short-exit: 126ms;
+  --t-medium-exit: 182ms;
+  --t-long-exit: 266ms;
+  --t-stagger: 30ms;
+  --t-pending: 1200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --press-scale: 0.98;
   --rise: 6px;
+  --slide: 8px;
+  --star-turn: 45deg;
+  /* The spring (section 3): this fallback, replaced by linear() where the engine has it. */
+  --ease-spring: cubic-bezier(0.37, 0.73, 0.1, 1.15);
+}
+
+/*
+ * The spring sampled over --t-spring (overshoot at most 4 %). A custom property is not checked
+ * where it is declared: without this gate an engine that lacks linear() would drop every
+ * transition that uses the token, with it that engine keeps the fallback above.
+ */
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --ease-spring: linear(0, 0.0063 1.5%, 0.0263 3%, 0.0595 4.8%, 0.1065 6.6%, 0.1522 8.2%, 0.2104 10%, 0.4504 16.9%, 0.5562 20.1%, 0.6552 23.4%, 0.7391 26.6%, 0.8083 29.6%, 0.8658 32.8%, 0.9136 35.9%, 0.9524 39.3%, 0.9829 42.9%, 1.0052 46.8%, 1.0197 51%, 1.0271 55.9%, 1.0269 63.8%, 1.0085 84.4%, 1);
+  }
 }
 
 /*
@@ -345,6 +375,20 @@ main.page {
   text-align: left;
 }
 
+/*
+ * W4: the sections revealed from [hidden] (sign-in, alerts, notifications, enrollment, camera)
+ * rise in with a fade; their entry state is in the @starting-style block at the end. No rest
+ * transform: it would make the card the containing block of the full-screen camera stage.
+ * Hiding is instant (display: none, no discrete transition).
+ */
+.card.login,
+.card.alerts,
+.card.push,
+.card.enroll,
+.card.camera {
+  transition: opacity var(--t-medium) var(--ease-enter), transform var(--t-medium) var(--ease-enter);
+}
+
 .card h2 {
   color: var(--text);
   font-size: var(--f-title);
@@ -399,6 +443,7 @@ main.page {
   height: 10px;
   border-radius: var(--r-pill);
   background: var(--dot-idle);
+  transition: background-color var(--t-medium) var(--ease-standard), box-shadow var(--t-medium) var(--ease-standard);
 }
 
 .stat-tile:has(.state-locked) .stat-dot {
@@ -435,6 +480,78 @@ main.page {
   opacity: 0.7;
 }
 
+/*
+ * W1: the state word re-enters when its state class changes. One keyframe name per class:
+ * render() rewrites the class every second, and an identical class keeps the same animation,
+ * so a poll replays nothing. Each keyframe only sets the start; the end is the element's own
+ * opacity (1, or 0.7 for the two muted states).
+ */
+.state-locked {
+  animation: soos-state-locked var(--t-medium) var(--ease-enter);
+}
+
+.state-unlocked {
+  animation: soos-state-unlocked var(--t-medium) var(--ease-enter);
+}
+
+.state-no_session {
+  animation: soos-state-no-session var(--t-medium) var(--ease-enter);
+}
+
+.state-unavailable {
+  animation: soos-state-unavailable var(--t-medium) var(--ease-enter);
+}
+
+.state-unreachable {
+  animation: soos-state-unreachable var(--t-medium) var(--ease-enter);
+}
+
+.state-unknown {
+  animation: soos-state-unknown var(--t-medium) var(--ease-enter);
+}
+
+@keyframes soos-state-locked {
+  from {
+    opacity: 0.4;
+    translate: 0 4px;
+  }
+}
+
+@keyframes soos-state-unlocked {
+  from {
+    opacity: 0.4;
+    translate: 0 4px;
+  }
+}
+
+@keyframes soos-state-no-session {
+  from {
+    opacity: 0.4;
+    translate: 0 4px;
+  }
+}
+
+@keyframes soos-state-unavailable {
+  from {
+    opacity: 0.4;
+    translate: 0 4px;
+  }
+}
+
+@keyframes soos-state-unreachable {
+  from {
+    opacity: 0.4;
+    translate: 0 4px;
+  }
+}
+
+@keyframes soos-state-unknown {
+  from {
+    opacity: 0.4;
+    translate: 0 4px;
+  }
+}
+
 .stat-tile .detail {
   padding: 0 92px 0 20px;
   color: var(--on-tile);
@@ -458,6 +575,32 @@ main.page {
   width: 60px;
   height: 60px;
   fill: var(--star);
+  transform-origin: center;
+  transition: rotate var(--t-spring) var(--ease-spring);
+}
+
+/*
+ * The signature move (Docs/UI_MOTION.md section 5): the star turns 45 degrees, on the spring,
+ * only in the confirmed state that lowers protection. The angle uses `rotate` and the pending
+ * loop `transform`, so the two compose.
+ */
+.stat-tile[data-state="unlocked"] .stat-star {
+  rotate: var(--star-turn);
+}
+
+/* While a lock or unlock request waits for its answer: a calm quarter turn per --t-pending. */
+.stat-tile.is-pending .stat-star {
+  animation: soos-pending-turn var(--t-pending) var(--ease-standard) infinite;
+}
+
+@keyframes soos-pending-turn {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(90deg);
+  }
 }
 
 /* Buttons: blue pill primary, outline secondary, danger outline for Unlock now. */
@@ -477,12 +620,36 @@ button {
   line-height: 1.2;
   cursor: pointer;
   touch-action: manipulation;
-  transition: background-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
+  transition: background-color var(--t-fast) var(--ease-standard), color var(--t-fast) var(--ease-standard), box-shadow var(--t-fast) var(--ease-standard), transform var(--t-spring) var(--ease-spring);
 }
 
+/* W2: press-in in --t-fast (this rule's transition), release on the spring (the base rule's). */
 button:active:not(:disabled) {
   background: var(--primary-pressed);
-  transform: scale(0.98);
+  transform: scale(var(--press-scale));
+  transition: background-color var(--t-fast) var(--ease-standard), transform var(--t-fast) var(--ease-standard);
+}
+
+/*
+ * The pending star after the label of Lock now / Unlock now: the star mark scaled to 16 px,
+ * drawn in the text colour and placed at the right padding edge, so the centred label never
+ * moves. It turns only while the request is pending (at most the 5 s confirmation window).
+ */
+button.is-pending {
+  position: relative;
+}
+
+button.is-pending::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 20px;
+  width: 16px;
+  height: 16px;
+  margin-top: -8px;
+  background: currentColor;
+  clip-path: path("M8 0C8 4.418 11.582 8 16 8L8 8ZM0 8C4.418 8 8 11.582 8 16V8H0Z");
+  animation: soos-pending-turn var(--t-pending) var(--ease-standard) infinite;
 }
 
 button.secondary {
@@ -557,6 +724,7 @@ button.secondary.danger:disabled {
   font-size: var(--f-section);
   font-weight: 600;
   line-height: 1.35;
+  transition: background-color var(--t-medium) var(--ease-standard), border-color var(--t-medium) var(--ease-standard), color var(--t-medium) var(--ease-standard), opacity var(--t-short) var(--ease-enter), transform var(--t-short) var(--ease-enter);
 }
 
 .banner::before {
@@ -576,6 +744,7 @@ button.secondary.danger:disabled {
   font-size: var(--f-small);
   font-weight: 700;
   line-height: 1;
+  transition: background-color var(--t-medium) var(--ease-standard), color var(--t-medium) var(--ease-standard);
 }
 
 .alerts-summary {
@@ -587,6 +756,18 @@ button.secondary.danger:disabled {
   border-color: var(--banner-danger-border);
   background: var(--banner-danger-bg);
   color: var(--banner-danger-fg);
+  animation: soos-nudge var(--t-medium) var(--ease-standard) 2;
+}
+
+/* W5: when attempts wait for acknowledgement, the summary nudges twice (never in a loop). */
+@keyframes soos-nudge {
+  25% {
+    translate: -3px 0;
+  }
+
+  75% {
+    translate: 3px 0;
+  }
 }
 
 .alerts-attention .alerts-summary::before {
@@ -647,6 +828,47 @@ button.secondary.danger:disabled {
   border-bottom: 0;
 }
 
+/*
+ * W6: on the first render after its card appears (app.js sets stagger-once for that render
+ * only), a list fades up item by item, --t-stagger apart; the stagger stops at the sixth item
+ * and later items enter with it (at most 150 ms of delay).
+ */
+.stagger-once li {
+  animation: soos-rise-in var(--t-medium) var(--ease-enter) backwards;
+}
+
+.stagger-once li:nth-child(2) {
+  animation-delay: var(--t-stagger);
+}
+
+.stagger-once li:nth-child(3) {
+  animation-delay: calc(var(--t-stagger) * 2);
+}
+
+.stagger-once li:nth-child(4) {
+  animation-delay: calc(var(--t-stagger) * 3);
+}
+
+.stagger-once li:nth-child(5) {
+  animation-delay: calc(var(--t-stagger) * 4);
+}
+
+.stagger-once li:nth-child(n+6) {
+  animation-delay: calc(var(--t-stagger) * 5);
+}
+
+@keyframes soos-rise-in {
+  from {
+    opacity: 0;
+    translate: 0 var(--rise);
+  }
+}
+
+/* W7: a notification button that appears (Enable, Send test, Disable) fades in; no switch. */
+.push button {
+  transition: background-color var(--t-fast) var(--ease-standard), color var(--t-fast) var(--ease-standard), box-shadow var(--t-fast) var(--ease-standard), transform var(--t-spring) var(--ease-spring), opacity var(--t-short) var(--ease-enter);
+}
+
 /* Enrollment code input. */
 #enroll-code {
   display: block;
@@ -664,6 +886,8 @@ button.secondary.danger:disabled {
   letter-spacing: 0.12em;
   text-align: center;
   text-transform: uppercase;
+  /* W9: the border colour eases; the focus ring (outline) appears at once. */
+  transition: border-color var(--t-fast) var(--ease-standard);
 }
 
 #enroll-code::placeholder {
@@ -760,11 +984,17 @@ input:focus-visible,
   outline: none;
 }
 
+/*
+ * Reduced motion (Docs/UI_MOTION.md section 8): every animation and transition is removed, so
+ * entries, the star angle, the pending star, the nudge and the stagger resolve at once; app.js
+ * skips the View Transition too.
+ */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     transition: none !important;
+    animation: none !important;
   }
 
   button:active:not(:disabled) {
@@ -790,6 +1020,7 @@ input:focus-visible,
   overflow: hidden;
   border-radius: var(--r-table);
   container-type: size;
+  view-transition-name: camera-stage;
 }
 
 .camera-stage.camera-portrait {
@@ -858,6 +1089,25 @@ html.camera-lock body {
 }
 
 /*
+ * W8: where the full screen is the CSS overlay only (no element fullscreen, e.g. iPhone), app.js
+ * runs the class change in a View Transition: the stage grows over --t-long and shrinks back
+ * over --t-long-exit. The snapshot is the browser's own rendering, unreadable by script.
+ */
+::view-transition-group(camera-stage) {
+  animation-duration: var(--t-long);
+  animation-timing-function: var(--ease-standard);
+}
+
+html:not(.camera-lock)::view-transition-group(camera-stage) {
+  animation-duration: var(--t-long-exit);
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: var(--t-medium);
+}
+
+/*
  * Browser fallbacks (ADR 2026-10-13 "Browser Support Policy for the soos-remote Web App").
  * Engines without :has(): the same visual states, keyed on hooks app.js sets (data-state on
  * the stat tile, feedback-last on the action card's feedback line while Sign out is hidden).
@@ -915,10 +1165,32 @@ html.camera-lock body {
   transition: opacity var(--t-medium) var(--ease-enter), transform var(--t-medium) var(--ease-enter);
 }
 
+/*
+ * Entry states (W4, W5, W7 and the tour card) for engines with @starting-style; elsewhere the
+ * elements appear at once. One block for the whole sheet.
+ */
 @starting-style {
   .tour {
     opacity: 0;
     transform: translateY(var(--rise));
+  }
+
+  .card.login,
+  .card.alerts,
+  .card.push,
+  .card.enroll,
+  .card.camera {
+    opacity: 0;
+    transform: translateY(var(--rise));
+  }
+
+  .banner {
+    opacity: 0;
+    transform: translateY(calc(-1 * var(--slide)));
+  }
+
+  .push button {
+    opacity: 0;
   }
 }
 
