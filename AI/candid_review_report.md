@@ -1,141 +1,148 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `feat/gui-motion`
-- **Base (merge-base)**: `3f76090`
-- **Reviewed-Diff-Fingerprint**: `0b57aff928278602583af70e64b752b7146c8eb43259a5c99a0b569abaefbc15`
-- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_gui_motion.md`, `AI/auditor_constraints_gui_motion.md`, `AI/tester_contract_gui_motion.md`, `AI/walkthroughs/234_gui_motion.md`, `Cargo.lock`, `Docs/GUI_APPLICATION.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `Docs/UI_MOTION.md`, `crates/gui/Cargo.toml`, `crates/gui/src/app.rs`, `crates/gui/src/app/capture.rs`, `crates/gui/src/args.rs`, `crates/gui/src/brand.rs`, `crates/gui/src/camera_status.rs`, `crates/gui/src/header.rs`, `crates/gui/src/lib.rs`, `crates/gui/src/main.rs`, `crates/gui/src/motion.rs`, `crates/gui/src/motion/portal.rs`, `crates/gui/src/overlay.rs`, `crates/gui/src/theme.rs`, `crates/gui/src/widgets.rs`, `crates/gui/tests/motion_tests.rs`, `tests/invariants/src/gui_motion_contract.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/presence_unlock_contract.rs`
+- **Target Branch**: `feat/gui-motion` (GitHub #438, PR 3 of #358)
+- **Base (merge-base)**: `1043be6`
+- **Reviewed-Diff-Fingerprint**: `059e624df30a6aaf77163717b5901d042018816b78241aa7208b23ea24ef2a0f`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_gui_motion.md`,
+  `AI/auditor_constraints_gui_motion.md`, `AI/tester_contract_gui_motion.md`, `AI/walkthroughs/234_gui_motion.md`,
+  `Cargo.lock`, `Docs/GUI_APPLICATION.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `Docs/UI_MOTION.md`,
+  `crates/gui/Cargo.toml`, `crates/gui/src/app.rs`, `crates/gui/src/app/capture.rs`, `crates/gui/src/args.rs`,
+  `crates/gui/src/brand.rs`, `crates/gui/src/camera_status.rs`, `crates/gui/src/header.rs`, `crates/gui/src/lib.rs`,
+  `crates/gui/src/main.rs`, `crates/gui/src/motion.rs`, `crates/gui/src/motion/portal.rs`, `crates/gui/src/overlay.rs`,
+  `crates/gui/src/theme.rs`, `crates/gui/src/widgets.rs`, `crates/gui/tests/motion_tests.rs`,
+  `tests/invariants/src/gui_motion_contract.rs`, `tests/invariants/src/lib.rs`,
+  `tests/invariants/src/presence_unlock_contract.rs`
 
 ## 1. Executive Summary
 
-The branch adds the `soos-gui` motion system (GitHub #438 = PR 3 of #358): motion tokens in `theme.rs`, a
-pure `motion.rs` (closed-form spring, cubic-bezier, tween, entrances, pending star, reduced-motion resolution)
-with egui glue, a read-only XDG portal reader `motion/portal.rs` (zbus + current-thread Tokio on one background
-thread, 200 ms deadline), animated widgets, and the face overlay moved verbatim into `overlay.rs`. The code is
-sound: no panic path, no blocking on the UI thread, bounded state, the overlay is not interpolated, and no
-security-relevant state depends on animation. Re-run here: `cargo test --locked -p soos-gui -p soos-invariants`
-(793 invariants passed), `cargo test --locked -p soos-gui --all-features` (motion_tests 33, readme_snapshots 9,
-responsiveness_tests 11, all green), `cargo clippy --locked -p soos-gui -p soos-invariants --all-targets
---all-features -- -D warnings` clean, `cargo fmt --all -- --check` clean (all with the scoped environment and
-`--test-threads=3`).
+The diff adds the `soos-gui` motion system (`motion.rs` pure helpers and egui glue, `motion/portal.rs`
+one-time XDG portal reader), animates the header switch, tabs, column entrances, banners, progress bar,
+camera status card and star tiles, extracts the face overlay into `overlay.rs` unchanged in behaviour, and
+replaces both `egui::Spinner` uses with the pending star. zbus usage is a single read-only session-bus
+connection on one named background thread with its own current-thread Tokio runtime, calling only
+`org.freedesktop.portal.Settings.ReadOne` (fallback `Read`) under a 200 ms overall deadline enforced both on
+the reader (`tokio::time::timeout` plus `method_timeout`) and on the UI side (`poll_at` deadline). No object
+server, no system bus, no name request, no match rule. The only pre-existing test assertion change is the
+owner-approved PAU17 `ALLOWED` migration. Tests, clippy and fmt are green. No CRITICAL or MAJOR finding; two
+MINOR findings and one merge-precondition note.
 
-However, the diff **changes a pre-existing assertion on `origin/main`**:
-`presence_unlock_contract::test_pau_zbus_is_used_only_by_the_daemon` (PAU17) widens its `ALLOWED` list from two
-to three manifests. This is the Planned Contract Migration B.2a already recorded on `origin/main` (ADR
-2026-10-13 "Motion System for soos-gui and soos-remote" item (6) and `AI/tester_contract_motion.md` §B.2a, both
-from #384), so it is justified under the skill rules, but the standing rule of this run states that any changed
-pre-existing assertion yields `CHANGES_REQUESTED`. The verdict is therefore CHANGES_REQUESTED for that process
-reason; no code defect of MAJOR or CRITICAL severity was found.
+Gate results (from the worktree, the mandated env):
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo test --locked -p soos-gui -p soos-invariants --all-features -- --test-threads=3`: exit 0, 1123 passed,
+  0 failed, 0 ignored.
+- `cargo clippy --locked -p soos-gui -p soos-invariants --all-features --all-targets -- -D warnings`: exit 0.
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+## 2. Test Changes
 
-- `grep '^-[^-].*(assert|#[test]|...)'` on the frozen patch: **no removed line**.
-- `grep '^+.*(#[ignore|should_panic|tolerance|epsilon)'`: one hit, a comment in the new
-  `crates/gui/tests/motion_tests.rs` ("the epsilon is relative to the span"); no escape hatch.
-- `grep '^[-+].*mod tests'`: none.
-- Test files touched:
-  - `crates/gui/tests/motion_tests.rs` (new, 33 tests, GMO1–GMO14).
-  - `tests/invariants/src/gui_motion_contract.rs` (new, GMO15–GMO19 plus a helper self-test).
-  - `tests/invariants/src/lib.rs`: module registration only.
-  - `tests/invariants/src/presence_unlock_contract.rs`: **pre-existing test changed**. In
-    `test_pau_zbus_is_used_only_by_the_daemon`, `const ALLOWED: [&str; 2] = ["crates/daemon/Cargo.toml",
-    "crates/remote/Cargo.toml"]` becomes `[&str; 3]` with `"crates/gui/Cargo.toml"` added. Every `assert!` /
-    `assert_eq!` line and the test name are textually unchanged, but the set they check is widened
-    (`crates/gui/Cargo.toml` is now required to declare zbus once instead of being forbidden to name it).
-    Justification found on `origin/main`: ADR 2026-10-13 item (6) ("The later `feat/gui-motion` PR applies a
-    planned Contract Migration of ... PAU17") and `AI/tester_contract_motion.md` §B.2a (commit `3d9879a`, #384).
-    The change matches that table exactly.
-- `git diff $(git merge-base origin/main HEAD) HEAD -- tests 'crates/*/tests' android/app/src/test`: the same
-  four files; no other pre-existing assertion touched; `android/app/src/test` untouched.
+Mechanical listing from `target/candid_diff.patch`:
+
+- Test files touched: `crates/gui/tests/motion_tests.rs` (new), `tests/invariants/src/gui_motion_contract.rs`
+  (new), `tests/invariants/src/lib.rs` (adds `mod gui_motion_contract;` only),
+  `tests/invariants/src/presence_unlock_contract.rs` (modified).
+- Removed or changed `assert` / `#[test]` / `proptest!` / `#[should_panic]` lines: **none** (the grep for
+  removed check lines is empty).
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance): none; the only match is a
+  comment in `motion_tests.rs` explaining that the spring settle epsilon is relative to the span.
+- Inline `mod tests` changes: none.
+- `presence_unlock_contract.rs` (`test_pau_zbus_is_used_only_by_the_daemon`, PAU17): the `ALLOWED` constant
+  goes from `[&str; 2]` to `[&str; 3]`, gaining `"crates/gui/Cargo.toml"`; test name and every assertion are
+  unchanged, and the loop still asserts each listed manifest contains exactly the workspace zbus line. This is
+  Planned Contract Migration B.2a of `AI/tester_contract_motion.md`, approved by the owner on 2026-10-18 and
+  recorded in `AI/DECISIONS.md` (ADR 2026-10-18 "Owner-Approved Contract Migration of PAU17..."). Approved,
+  not a finding.
+- `responsiveness_tests.rs`, `theme_tests.rs`, `brand_layout_tests.rs`: not touched (B.2.1, B.2.7).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- Resolution order (`resolve_motion_prefs`, `MotionControl::from_sources`): `--reduce-motion` → env exactly
-  `1`/`0` (≤ 8 bytes, byte compare via `as_encoded_bytes`) → portal (`Pending` counts as reduced) → full. Tried:
-  env `"1\n"`, `"10"`, 9 bytes, non-UTF-8 → ignored, portal consulted. PASS. The portal is never spawned when the
-  switch or the variable decides. PASS.
-- `PortalReader::poll_at`: a `Pending` answer from the thread, a disconnected channel and a missing receiver all
-  map to `Unavailable`; `Empty` after the deadline → `Unavailable`, cached; a late answer is discarded because the
-  receiver is dropped. PASS.
-- `ZbusPortalBus`: a `ReadOne` reply `v` deserializes to the inner value; a `Read` reply `v(v)` is unwrapped by
-  `setting_value(.., 1)`; deeper nesting or another type → `Other` → fallback or `Unavailable`. UnknownMethod is
-  recognised both as `Error::FDO(UnknownMethod)` and as `MethodError("org.freedesktop.DBus.Error.UnknownMethod")`.
-  The whole read is under `tokio::time::timeout(deadline, ..)` plus `method_timeout(deadline)`. PASS.
-- `SpringState`: closed form with ζ = 0.75 (wd > 0), dt clamped to [0, 0.05], non-finite target ignored,
-  non-finite intermediate snaps, 1.6 s termination guard, settle test relative to the span. Tried NaN/±inf dt,
-  10 s dt, an infinite span (snaps). PASS.
-- `cubic_bezier`: clamped Newton, bisection fallback, exact endpoints, NaN → 0. PASS.
-- `pending_star_angle`: in [0, π); an f32 result rounding to exactly π falls back to 0, the same mark (half-turn
-  symmetry). PASS.
-- Star turn follows `DaemonState::Inactive` only (confirmed state), never a pending action. PASS.
-- `banner`: hashed slots (`% 1024`); a collision inside one pass draws at rest; identical texts share a slot
-  harmlessly. `banner_slot` copies the text only when it changes. PASS.
-- Opacity push/restore pairs in the three tab renderers: no early `return` between push and restore (checked by
-  line listing). PASS.
-- Overlay moved with identical behaviour (same order, colour from `pad_live` only). PASS.
-- `Docs/UI_MOTION.md` G4 and G7 are reworded by this implementation branch → MINOR finding 2.
+- Preference resolution (`motion.rs:459`): CLI > `SOOS_REDUCE_MOTION` (exact `1`/`0`, > 8 bytes ignored) >
+  portal (`Reduce`/`Pending` reduced, `NoPreference`/`Unavailable` full). Tried: `SOOS_REDUCE_MOTION=0` with the
+  portal saying reduce → full (spec §8 item 2); `"1 "`, `"true"`, 9-byte value → ignored. PASS.
+- `MotionControl::from_sources` spawns the portal reader only when neither override decides (`motion.rs:731`);
+  the app installs `REDUCED` before the first frame (`app.rs:251`) so a reduced-motion user never sees a first
+  animation. PASS.
+- Portal interpretation (`portal.rs:77`): `reduced-motion` u32 1/0 decides; u32 2, a bool, a string or an
+  error fall back to GNOME `enable-animations`; anything else is `Unavailable` (full motion). `Read` wraps one
+  extra variant, unwrapped at depth 1 only. A v1 portal answering `UnknownMethod` on `ReadOne` falls back to
+  `Read` (both the `FDO` and the raw `MethodError` forms are classified). PASS.
+- `PortalReader::poll_at` (`portal.rs:157`): a late answer after the deadline never overrides (`result`
+  cached, `rx` dropped); a panicking reader drops `tx` → `Disconnected` → `Unavailable`; a `Pending` sent by
+  the thread is mapped to `Unavailable`. PASS.
+- Spring (`motion.rs:135`): closed-form damped oscillator (k=400, c=30, m=1, zeta 0.75, underdamped), relative
+  settle epsilon, hard snap after `4 * T_SPRING`, non-finite intermediates snap. Tried dt = NaN, ±inf, 10 s,
+  target NaN, zero span. PASS (GMO2 tests).
+- `cubic_bezier`: Newton with bisection fallback, exact endpoints, NaN → 0. PASS.
+- Tab pill (`header.rs:567`): slides only when the active index changes; on a resize it follows at once.
+  Entrance (`motion.rs:589`): replays only when the element was not drawn in the previous pass; ids are per
+  tab, so a tab change replays the new tab's column. Opacity push/restore pairs in `app.rs` (962/1000,
+  1002/1004, 1006/1175, 1404/1430, 1432/1434, 1436/1683, 1704/1713, 1719/1725, 1730/1843) have no early
+  `return` between them. PASS.
+- Camera status card (`camera_status.rs:150`): the new state's text is drawn on the frame it arrives (G7 as
+  amended, the amendment justified in the plan evaluation P-1 and walkthrough 234); opacity starts at 0 and
+  reaches 1 within `T_SHORT`. Face overlay (`overlay.rs`) is a verbatim extraction with no interpolation
+  (G9). PASS.
+- Stat tile value fade (`widgets.rs:307`): see MINOR finding 1.
 
 ### PAM Concurrency & Deadlines
 
-- `crates/pam` untouched; zbus/Tokio not added to it (PAU17 PAM assertion still runs and passes). The new Tokio
-  runtime lives only on the GUI's `soos-motion-portal` thread (GMO16). PASS.
+- `crates/pam` is not touched. The GUI's only new blocking work happens on the `soos-motion-portal` thread;
+  the UI thread only calls `try_recv`. The reader is bounded by `tokio::time::timeout(deadline, …)` plus
+  zbus `method_timeout(deadline)`; the UI deadline is independent of the reader. Tried: a bus that never
+  answers → `Unavailable` at the deadline (GMO5). PASS.
 
 ### Panic Safety & Fail-Closed
 
-- `motion.rs` denies `indexing_slicing`, `unwrap_used`, `expect_used`, `panic`; `portal.rs` has no unwrap/expect
-  (`NonZeroUsize` const via `match`); a runtime build or connection failure returns default readings; a panic in
-  the reader thread drops the sender → `Unavailable`. No PAM or authorization path is reachable from this code;
-  its only output is a cosmetic boolean. PASS.
+- `motion.rs` denies `indexing_slicing`, `unwrap_used`, `expect_used`, `panic`; `portal.rs` uses `let … else`
+  and `unwrap_or_default` only; the `MAX_QUEUED_MESSAGES` const avoids `unwrap`. No `unwrap`/`expect` in the
+  new production paths of `widgets.rs`, `header.rs`, `camera_status.rs`, `overlay.rs`, `brand.rs`. Thread spawn
+  failure → `Unavailable`. A panic on the reader thread is contained (disconnected channel). Motion is purely
+  cosmetic and has no path to any authorization decision. PASS.
 
 ### Test Integrity & Anti-Weakening
 
-- See §2. The PAU17 change is the one pre-existing test modification; ADR-mandated, but still a changed assertion
-  set → finding 1.
-- New tests can fail against plausible wrong implementations (overshoot band 1–4 %, deadline lower bound "never
-  before it", disconnected-channel case, `FACE_SPOOF` on the flip frame, reduced motion with no repaint). The
-  wall-clock check is an upper bound with a 2 s CI margin, not a tight bound. PASS.
+- See section 2. New tests can fail against plausible wrong implementations (overshoot bounds 1–4 %, late
+  answer override, spinner presence, overlay colour on the same frame, idle repaint budget). GMO15–GMO19 pin
+  the zbus/Tokio confinement statically. PASS.
 
 ### Memory, Bounds & Secrets
 
-- Connection `max_queued(8)`; one `sync_channel(1)`; at most four method calls; banner state at most 1024 slots
-  plus one `banner_slot` string. The preference value is never logged (no logging macro in `portal.rs`, GMO18).
-  No frames, embeddings or credentials are touched. The session bus address comes from the environment, as the
-  ADR and the guideline state; a hostile session bus can only choose a cosmetic preference. PASS.
+- `SOOS_REDUCE_MOTION` length bounded (8 bytes); zbus queue bounded (`max_queued(8)`); banner motion state
+  hashed into at most 1024 slots; `banner_slot` copies the text only when it changes. No frame, embedding or
+  credential is involved; the portal value is never logged (GMO18). No `unsafe` (`#![forbid(unsafe_code)]` in
+  both new modules). PASS.
 
 ### Supply Chain & Automation
 
-- `Cargo.lock`: only the `soos-gui` dependency list gains `tokio` and `zbus`; no new package. Both are
-  `{ workspace = true }` (workspace zbus 6 `default-features = false, features = ["tokio"]`). No `.github/`,
-  `deny.toml` or script change. PASS.
+- `soos-gui` adds `tokio` and `zbus` as `workspace = true` dependencies; `Cargo.lock` gains only two
+  dependency-edge lines, no new package. The session bus address is environment-derived (documented in the
+  security guideline as the exception, unlike the pinned system-bus address of the daemon and remote). No CI,
+  script or hook change. PASS.
 
 ### English-Only Policy
 
-- All code, comments and docs in the diff are English. PASS.
+- Code, comments, docs and walkthrough are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MAJOR]** `tests/invariants/src/presence_unlock_contract.rs:202` — a pre-existing test on `origin/main`
-  (PAU17 `test_pau_zbus_is_used_only_by_the_daemon`) has its checked set changed (`ALLOWED` 2 → 3 entries, adding
-  `crates/gui/Cargo.toml`). It exactly matches the Planned Contract Migration B.2a already recorded on
-  `origin/main` (ADR 2026-10-13 item (6), `AI/tester_contract_motion.md` §B.2a), and no `assert` line or the test
-  name changed, but the standing rule of this run forbids modifying an existing test assertion and requires
-  `CHANGES_REQUESTED` for any such change. Required action: not a code fix. The owner (or the orchestrator on the
-  owner's documented behalf) must explicitly accept this ADR-mandated migration for this PR; otherwise the portal
-  reader must be replaced by a design that does not need zbus in `soos-gui`.
-- **[MINOR]** `Docs/UI_MOTION.md` G4/G7 — the normative spec is amended inside the implementation PR (G7 drops the
-  old-out/new-in cross-fade; G4 limits stat fades to caption/presence changes). Both changes are safer, but the
-  owner's prototype approval (UIM7) refers to this spec; the PR description should flag the rewording.
-- **[MINOR]** `crates/gui/src/camera_status.rs:150`, `Docs/UI_MOTION.md` G7, `Docs/GUI_APPLICATION.md` — "a new
-  banner state is drawn on the frame it arrives" / "drawn at once": with full motion `fade_in_on_change` returns
-  opacity `cubic_bezier(EASE_ENTER, 0) = 0` on that first frame, so the new text is painted but invisible on its
-  first frame and becomes legible over the following frames (180 ms). The security point (the old text is never
-  kept) holds; the wording overstates it. Suggest "replaces the previous text on the frame it arrives and fades
-  in".
-- **[SUGGESTION]** `crates/gui/src/widgets.rs` `banner_slot` — the retained text is cloned once per frame during
-  the 126 ms exit; borrowing it inside the `data_mut` scope or storing an `Arc<str>` would avoid that.
+- **[MINOR]** `crates/gui/src/widgets.rs:307` — the stat tile fade key is `(caption, value.is_some(),
+  sub.is_some())`. On the Live tab the caption switches between "Match score" and "Liveness (PAD)" whenever
+  `live_score` appears or disappears (`app.rs:964`), which can happen at camera rate when the face is lost
+  intermittently; each switch restarts the fade at opacity 0, so the value can stay faint and keep requesting
+  repaints while detection flickers. Suggested follow-up: skip or shorten the fade when the previous change is
+  younger than `T_SHORT`. Cosmetic only.
+- **[MINOR]** `crates/gui/src/camera_status.rs:448` — a new camera status (for example an Error) is drawn at
+  opacity 0 on its first frame and reaches full opacity after `T_SHORT` (180 ms); the text is never stale, as
+  the amended G7 requires, but it is briefly low-contrast. Acceptable under the spec; consider an opacity floor
+  for Error severity.
+- **[SUGGESTION / merge precondition]** `AI/VERIFICATION_MATRIX.md` UIM7 is still "Pending (owner approval of
+  the prototype)", and `AI/tester_contract_motion.md` B.3 says `feat/gui-motion` must not merge before the
+  owner approves `Docs/prototypes/ui_motion_prototype.html`; no approval is recorded on #358. This is not a
+  defect of the diff, but the PR should not be auto-merged until UIM7 is recorded.
 
 ## 5. Final Verdict
 
-**VERDICT: CHANGES_REQUESTED**
+No CRITICAL or MAJOR finding. The single pre-existing test change is the owner-approved PAU17 migration.
+
+**VERDICT: APPROVED**
