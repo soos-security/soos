@@ -53,6 +53,40 @@ data class AlertsView(
     val history: List<AlertRecord>,
 )
 
+/** `GET /api/battery` (`crates/remote/src/battery.rs` `BatteryView`). */
+data class BatteryView(
+    /** In [ApiJson.BATTERY_STATES]. */
+    val state: String,
+    /** `null` or `0..`[ApiJson.MAX_BATTERY_PERCENT], only with `present`. */
+    val percent: Int?,
+    /** In [ApiJson.CHARGE_STATUSES] with `present`, else `null`. */
+    val charge: String?,
+    /** `null`, or whether mains power is connected, only with `present`. */
+    val externalPower: Boolean?,
+)
+
+/** One offline interval of `GET /api/offline` (reason and times only). */
+data class OfflineInterval(
+    /** In [ApiJson.OFFLINE_REASONS]. */
+    val reason: String,
+    val startUnixMs: Long,
+    /** Never before [startUnixMs]. */
+    val endUnixMs: Long,
+    val durationMs: Long,
+)
+
+/** `GET /api/offline` (`crates/remote/src/offline.rs` `OfflineView`). */
+data class OfflineView(
+    /** In [ApiJson.OFFLINE_STATES]. */
+    val state: String,
+    /** In [ApiJson.OFFLINE_UNAVAILABLE_REASONS] iff `unavailable`, else `null`. */
+    val reason: String?,
+    /** In [ApiJson.NETWORK_MONITORS]; `unknown` unless `active`. */
+    val networkMonitor: String,
+    /** Newest first, at most [ApiJson.MAX_OFFLINE_INTERVALS], empty unless `active`. */
+    val intervals: List<OfflineInterval>,
+)
+
 /**
  * Pure parsers of the `soos-remote` JSON answers. Every value is type-checked explicitly
  * (no `opt*` coercion: `org.json` differs between the JVM and Android there); anything
@@ -89,6 +123,33 @@ object ApiJson {
 
     /** Equals `UrlConnectionTransport.MAX_RESPONSE_BYTES` (a char is at least one byte). */
     const val MAX_ALERTS_BODY_CHARS = 16384
+
+    /** `BatteryState` of `crates/remote/src/battery.rs`. */
+    val BATTERY_STATES = setOf("disabled", "unavailable", "no_battery", "present")
+
+    /** `ChargeStatus` of `crates/remote/src/battery.rs`. */
+    val CHARGE_STATUSES = setOf("charging", "discharging", "full", "not_charging", "unknown")
+
+    /** The server percent is at most 100 (`parse_capacity`). */
+    const val MAX_BATTERY_PERCENT = 100
+
+    /** `OfflineState` of `crates/remote/src/offline.rs`. */
+    val OFFLINE_STATES = setOf("disabled", "active", "unavailable")
+
+    /** `OfflineUnavailableReason` of `crates/remote/src/offline.rs`. */
+    val OFFLINE_UNAVAILABLE_REASONS = setOf("store_failed")
+
+    /** `NetworkMonitor` of `crates/remote/src/offline.rs`. */
+    val NETWORK_MONITORS = setOf("unknown", "active", "unavailable")
+
+    /** `OfflineReason` of `crates/remote/src/offline.rs`. */
+    val OFFLINE_REASONS = setOf("network_lost", "wifi_disabled", "sleep", "shutdown_or_crash")
+
+    /** Equals `MAX_OFFLINE_INTERVALS` of `crates/remote/src/lib.rs`. */
+    const val MAX_OFFLINE_INTERVALS = 32
+
+    /** Equals `UrlConnectionTransport.MAX_RESPONSE_BYTES` (a char is at least one byte). */
+    const val MAX_VIEW_BODY_CHARS = 16384
 
     fun parseAuthState(body: String): AuthStateView? {
         val json = objectOf(body) ?: return null
@@ -163,6 +224,73 @@ object ApiJson {
         }
     }
 
+    /**
+     * Strict, bounded parser of the battery view: an unknown state or charge status, a wrong
+     * type, a percent outside `0..`[MAX_BATTERY_PERCENT], a value without `present`, `present`
+     * without a charge status, or a body over [MAX_VIEW_BODY_CHARS] makes the whole view `null`.
+     * Unknown extra members are ignored; an absent nullable member reads as `null`.
+     */
+    fun parseBattery(body: String): BatteryView? {
+        if (body.length > MAX_VIEW_BODY_CHARS) return null
+        val json = objectOf(body) ?: return null
+        return try {
+            val state = string(json, "state")?.takeIf { it in BATTERY_STATES } ?: return null
+            val percent = nullableNonNegative(json, "percent")
+                ?.also { if (it > MAX_BATTERY_PERCENT) throw Malformed() }
+                ?.toInt()
+            val charge = nullableMember(json, "charge", CHARGE_STATUSES)
+            val externalPower = nullableBool(json, "external_power")
+            val present = state == "present"
+            if (present && charge == null) return null
+            if (!present && (percent != null || charge != null || externalPower != null)) return null
+            BatteryView(state, percent, charge, externalPower)
+        } catch (ignored: Malformed) {
+            null
+        } catch (ignored: JSONException) {
+            null
+        }
+    }
+
+    /**
+     * Strict, bounded parser of the offline history: an unknown state, reason, monitor or
+     * interval reason, a wrong type, a negative time or duration, an interval ending before it
+     * starts, more than [MAX_OFFLINE_INTERVALS] intervals, a view that breaks the server's rules
+     * (a reason iff `unavailable`; monitor `unknown` and no interval unless `active`) or a body
+     * over [MAX_VIEW_BODY_CHARS] makes the whole view `null`. Unknown extra members are ignored.
+     */
+    fun parseOffline(body: String): OfflineView? {
+        if (body.length > MAX_VIEW_BODY_CHARS) return null
+        val json = objectOf(body) ?: return null
+        return try {
+            val state = string(json, "state")?.takeIf { it in OFFLINE_STATES } ?: return null
+            val reason = nullableMember(json, "reason", OFFLINE_UNAVAILABLE_REASONS)
+            val monitor = string(json, "network_monitor")?.takeIf { it in NETWORK_MONITORS } ?: return null
+            val intervals = array(json, "intervals") ?: return null
+            if (intervals.length() > MAX_OFFLINE_INTERVALS) return null
+            val active = state == "active"
+            if ((state == "unavailable") != (reason != null)) return null
+            if (!active && (monitor != "unknown" || intervals.length() != 0)) return null
+            val parsed = ArrayList<OfflineInterval>(intervals.length())
+            for (index in 0 until intervals.length()) {
+                val entry = intervals.get(index) as? JSONObject ?: return null
+                parsed += parseOfflineInterval(entry) ?: return null
+            }
+            OfflineView(state, reason, monitor, parsed)
+        } catch (ignored: Malformed) {
+            null
+        } catch (ignored: JSONException) {
+            null
+        }
+    }
+
+    private fun parseOfflineInterval(json: JSONObject): OfflineInterval? {
+        val reason = string(json, "reason")?.takeIf { it in OFFLINE_REASONS } ?: return null
+        val start = long(json, "start_unix_ms")?.takeIf { it >= 0 } ?: return null
+        val end = long(json, "end_unix_ms")?.takeIf { it >= start } ?: return null
+        val duration = long(json, "duration_ms")?.takeIf { it >= 0 } ?: return null
+        return OfflineInterval(reason, start, end, duration)
+    }
+
     private fun parseAlertRecord(json: JSONObject): AlertRecord? {
         val id = long(json, "id")?.takeIf { it >= 0 } ?: return null
         val first = long(json, "first_unix_ms")?.takeIf { it >= 0 } ?: return null
@@ -174,7 +302,7 @@ object ApiJson {
         return AlertRecord(id, first, last, source, account, kind, count)
     }
 
-    /** A wrong type or value inside [parseAlerts] (never escapes it). */
+    /** A wrong type or value inside [parseAlerts], [parseBattery] or [parseOffline] (never escapes). */
     private class Malformed : Exception()
 
     /** An integer in `min..MAX_ALERT_COUNT`, else `null`. */
@@ -190,6 +318,12 @@ object ApiJson {
     /** Like [nullableString], and the value must be in [allowed]. */
     private fun nullableMember(json: JSONObject, key: String, allowed: Set<String>): String? =
         nullableString(json, key)?.also { if (it !in allowed) throw Malformed() }
+
+    /** Absent or JSON `null` → `null`; a boolean → it; anything else → [Malformed]. */
+    private fun nullableBool(json: JSONObject, key: String): Boolean? {
+        if (!json.has(key) || json.isNull(key)) return null
+        return json.get(key) as? Boolean ?: throw Malformed()
+    }
 
     /** Absent or JSON `null` → `null`; an integer ≥ 0 → it; anything else → [Malformed]. */
     private fun nullableNonNegative(json: JSONObject, key: String): Long? {

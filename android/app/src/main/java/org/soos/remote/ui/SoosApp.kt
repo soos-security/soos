@@ -68,6 +68,8 @@ import org.soos.remote.net.AlertRecord
 import org.soos.remote.net.AlertsView
 import org.soos.remote.net.ApiResult
 import org.soos.remote.net.AuthStateView
+import org.soos.remote.net.BatteryView
+import org.soos.remote.net.OfflineView
 import org.soos.remote.net.SharedApi
 import org.soos.remote.net.StatusView
 import org.soos.remote.tour.TourController
@@ -327,11 +329,33 @@ private fun HomeScreen(
     var alerts by remember { mutableStateOf<AlertsView?>(null) }
     var alertsFailed by remember { mutableStateOf(false) }
     var ackFeedback by remember { mutableStateOf<AckFeedback?>(null) }
+    var battery by remember { mutableStateOf<BatteryView?>(null) }
+    var batteryFailed by remember { mutableStateOf(false) }
+    var offline by remember { mutableStateOf<OfflineView?>(null) }
+    var offlineFailed by remember { mutableStateOf(false) }
 
     fun clearAlerts() {
         alerts = null
         alertsFailed = false
         ackFeedback = null
+    }
+
+    /** Hides the battery and offline-history cards (nothing loaded yet, or signed out). */
+    fun clearCards() {
+        battery = null
+        batteryFailed = false
+        offline = null
+        offlineFailed = false
+    }
+
+    /** Reloads the read-only battery and offline-history cards (GitHub #439). */
+    suspend fun loadCards() {
+        val batteryResult = withContext(Dispatchers.IO) { api.battery() }
+        battery = (batteryResult as? ApiResult.Ok)?.value
+        batteryFailed = battery == null
+        val offlineResult = withContext(Dispatchers.IO) { api.offline() }
+        offline = (offlineResult as? ApiResult.Ok)?.value
+        offlineFailed = offline == null
     }
 
     suspend fun loadAlerts() {
@@ -348,10 +372,10 @@ private fun HomeScreen(
     }
 
     /**
-     * Reloads the auth state, the status and the alerts. Every refresh drops the previous
-     * acknowledgement feedback first, so it never outlives the view it was about; [carried] is
-     * the refusal of the acknowledgement that asked for this refresh, shown again under the
-     * fresh view ([AlertsFeedback.afterRefresh]).
+     * Reloads the auth state, the status, the alerts and the battery and offline cards. Every
+     * refresh drops the previous acknowledgement feedback first, so it never outlives the view it
+     * was about; [carried] is the refusal of the acknowledgement that asked for this refresh,
+     * shown again under the fresh view ([AlertsFeedback.afterRefresh]).
      */
     suspend fun refresh(carried: AckFeedback? = null) {
         ackFeedback = null
@@ -362,6 +386,7 @@ private fun HomeScreen(
         val outcome = if (authResult is ApiResult.Unreachable) {
             status = null
             clearAlerts()
+            clearCards()
             message = "The PC is unreachable. Check Tailscale or Funnel."
             RefreshOutcome.UNREACHABLE
         } else if (current != null && current.authenticated) {
@@ -380,10 +405,12 @@ private fun HomeScreen(
                 }
             }
             loadAlerts()
+            loadCards()
             RefreshOutcome.AUTHENTICATED
         } else {
             status = null
             clearAlerts()
+            clearCards()
             RefreshOutcome.SIGNED_OUT
         }
         val shown = AlertsFeedback.afterRefresh(carried, outcome)
@@ -549,6 +576,8 @@ private fun HomeScreen(
                         scope.launch { acknowledge(view) }
                     },
                 )
+                BatteryCard(view = battery, failed = batteryFailed)
+                OfflineCard(view = offline, failed = offlineFailed)
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -614,8 +643,11 @@ private fun alertAccountText(account: String): Int = when (account) {
     else -> R.string.alerts_account_other
 }
 
-/** A journal time in the phone's time zone and locale, or `null` when it cannot be shown. */
-private fun alertTime(unixMs: Long): String? =
+/**
+ * A server time (journal, offline history) in the phone's time zone and locale, or `null` when
+ * it cannot be shown.
+ */
+internal fun alertTime(unixMs: Long): String? =
     try {
         DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
             .withZone(ZoneId.systemDefault())
@@ -625,7 +657,7 @@ private fun alertTime(unixMs: Long): String? =
     }
 
 @Composable
-private fun timeText(unixMs: Long): String =
+internal fun timeText(unixMs: Long): String =
     alertTime(unixMs) ?: stringResource(R.string.alerts_time_unknown)
 
 /** `count` with the `_one` text for exactly one, the `_other` text otherwise. */

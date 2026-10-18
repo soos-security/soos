@@ -1139,3 +1139,329 @@ fn test_ana_s13_permission_check_covers_the_sdk_23_form() {
         assert!(stderr.contains(message), "case {case}: {stderr}");
     }
 }
+
+// --- Battery and offline-history cards (GitHub #439, part of #357; matrix ANA22–ANA26) -------
+
+const REMOTE_BATTERY: &str = "crates/remote/src/battery.rs";
+const REMOTE_OFFLINE: &str = "crates/remote/src/offline.rs";
+const PC_CARDS: &str = "android/app/src/main/java/org/soos/remote/ui/PcCards.kt";
+const CARD_MODEL: &str = "android/app/src/main/java/org/soos/remote/cards/CardModel.kt";
+const CARD_MODEL_TEST: &str = "android/app/src/test/java/org/soos/remote/CardModelTest.kt";
+const CARDS_WALKTHROUGH: &str = "AI/walkthroughs/236_android_battery_offline_cards.md";
+const CARDS_ADR_TITLE: &str =
+    "[2026-10-18] Battery and Offline-History Cards in the Native Android App";
+const MATRIX: &str = "AI/VERIFICATION_MATRIX.md";
+
+/// The `serde` names of the unit variants of `pub enum name` in `src` (comments stripped),
+/// which must be serialized with `rename_all = "snake_case"`.
+fn rust_snake_variants(src: &str, name: &str) -> std::collections::BTreeSet<String> {
+    let head = format!("pub enum {name} {{");
+    let at = src
+        .find(&head)
+        .unwrap_or_else(|| panic!("pub enum {name} not found"));
+    let before = &src[..at];
+    let from = before.rfind(['}', ';']).map_or(0, |i| i + 1);
+    assert!(
+        before[from..].contains("#[serde(rename_all = \"snake_case\")]"),
+        "{name} is serialized in snake_case"
+    );
+    let body_start = at + head.len();
+    let body = &src[body_start..body_start + src[body_start..].find('}').unwrap()];
+    let variants: std::collections::BTreeSet<String> = body
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|variant| {
+            assert!(
+                variant.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{name}::{variant} is a unit variant"
+            );
+            let mut snake = String::new();
+            for (i, c) in variant.chars().enumerate() {
+                if c.is_ascii_uppercase() {
+                    if i > 0 {
+                        snake.push('_');
+                    }
+                    snake.push(c.to_ascii_lowercase());
+                } else {
+                    snake.push(c);
+                }
+            }
+            snake
+        })
+        .collect();
+    assert!(!variants.is_empty(), "{name} has variants");
+    variants
+}
+
+/// The members of `val name = setOf("a", "b")` in Kotlin `src`.
+fn kotlin_string_set(src: &str, name: &str) -> std::collections::BTreeSet<String> {
+    let head = format!("val {name} = setOf(");
+    let at = src
+        .find(&head)
+        .unwrap_or_else(|| panic!("{name} not found"))
+        + head.len();
+    let body = &src[at..at + src[at..].find(')').unwrap()];
+    let members: Vec<String> = body
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| {
+            assert!(
+                m.len() >= 2 && m.starts_with('"') && m.ends_with('"'),
+                "{name}: {m}"
+            );
+            m[1..m.len() - 1].to_string()
+        })
+        .collect();
+    let set: std::collections::BTreeSet<String> = members.iter().cloned().collect();
+    assert_eq!(set.len(), members.len(), "{name} has no duplicate");
+    set
+}
+
+/// The names `R.string.<prefix>…` referenced in `src`.
+fn string_refs(src: &str, prefix: &str) -> std::collections::BTreeSet<String> {
+    let needle = format!("R.string.{prefix}");
+    src.match_indices(&needle)
+        .map(|(at, _)| {
+            src[at + "R.string.".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect()
+        })
+        .collect()
+}
+
+/// The `<string name="<prefix>…">` resources of `strings.xml`.
+fn string_names(strings: &str, prefix: &str) -> std::collections::BTreeSet<String> {
+    let needle = format!("<string name=\"{prefix}");
+    strings
+        .match_indices(&needle)
+        .map(|(at, _)| {
+            let start = at + "<string name=\"".len();
+            strings[start..start + strings[start..].find('"').unwrap()].to_string()
+        })
+        .collect()
+}
+
+/// ANA25: the battery and offline-history cards are pinned to the server (paths, enums, the
+/// interval bound), read-only, bounded, built from fixed `strings.xml` texts and theme colours,
+/// wired into every refresh, and documented (ADR, §2j, matrix, walkthrough 236).
+#[test]
+fn test_ana_s15_battery_and_offline_cards_contract() {
+    // Wire contract equals the server.
+    let api = read(SOOS_API);
+    let routes = strip_comments(production_part(&read(REMOTE_ROUTES)));
+    for name in ["BATTERY_PATH", "OFFLINE_PATH"] {
+        assert_eq!(
+            kotlin_str_const(&api, name),
+            rust_str_const(&routes, name),
+            "{name} equals routes.rs"
+        );
+    }
+    for needle in [
+        "fun battery(): ApiResult<BatteryView> = get(BATTERY_PATH) { ApiJson.parseBattery(it) }",
+        "fun offline(): ApiResult<OfflineView> = get(OFFLINE_PATH) { ApiJson.parseOffline(it) }",
+    ] {
+        assert!(api.contains(needle), "SoosApi.kt needs {needle}");
+    }
+    let api_json = read(API_JSON);
+    let battery = strip_comments(production_part(&read(REMOTE_BATTERY)));
+    let offline = strip_comments(production_part(&read(REMOTE_OFFLINE)));
+    for (kotlin, rust, src) in [
+        ("BATTERY_STATES", "BatteryState", &battery),
+        ("CHARGE_STATUSES", "ChargeStatus", &battery),
+        ("OFFLINE_STATES", "OfflineState", &offline),
+        (
+            "OFFLINE_UNAVAILABLE_REASONS",
+            "OfflineUnavailableReason",
+            &offline,
+        ),
+        ("NETWORK_MONITORS", "NetworkMonitor", &offline),
+        ("OFFLINE_REASONS", "OfflineReason", &offline),
+    ] {
+        assert_eq!(
+            kotlin_string_set(&api_json, kotlin),
+            rust_snake_variants(src, rust),
+            "ApiJson.{kotlin} equals the serde names of {rust}"
+        );
+    }
+    let lib = strip_comments(production_part(&read(REMOTE_LIB)));
+    assert_eq!(
+        kotlin_int_const(&api_json, "MAX_OFFLINE_INTERVALS"),
+        rust_usize_const(&lib, "MAX_OFFLINE_INTERVALS"),
+        "MAX_OFFLINE_INTERVALS equals lib.rs"
+    );
+    assert_eq!(
+        kotlin_int_const(&api_json, "MAX_VIEW_BODY_CHARS"),
+        kotlin_int_const(&read(TRANSPORT), "MAX_RESPONSE_BYTES"),
+        "the card parsers keep the 16 KiB transport bound"
+    );
+    assert_eq!(kotlin_int_const(&api_json, "MAX_BATTERY_PERCENT"), 100);
+    assert!(
+        battery.contains("pub percent: Option<u8>,"),
+        "the server percent is a u8"
+    );
+    for parser in [
+        "fun parseBattery(body: String)",
+        "fun parseOffline(body: String)",
+    ] {
+        let at = api_json
+            .find(parser)
+            .unwrap_or_else(|| panic!("ApiJson.kt needs {parser}"));
+        let head = api_json[at..]
+            .lines()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            head.contains("if (body.length > MAX_VIEW_BODY_CHARS) return null"),
+            "{parser} checks the body bound first"
+        );
+    }
+    assert!(api_json.contains("if (intervals.length() > MAX_OFFLINE_INTERVALS) return null"));
+    // No "other" fallback: a member outside a set refuses the view.
+    assert!(!api_json.contains("?: \"other\""));
+
+    // Pure model, JVM-tested.
+    let model = read(CARD_MODEL);
+    assert!(
+        !model.contains("import android") && !model.contains("import androidx"),
+        "the card model is pure Kotlin"
+    );
+    assert!(exists(CARD_MODEL_TEST), "{CARD_MODEL_TEST}");
+
+    // Read-only cards: fixed texts, theme colours, no request, no server or exception text.
+    let cards = read(PC_CARDS);
+    let strings = read(STRINGS);
+    for prefix in ["battery_", "offline_"] {
+        let used = string_refs(&cards, prefix);
+        let defined = string_names(&strings, prefix);
+        assert!(
+            used.len() >= 6,
+            "the {prefix} card uses strings.xml ({used:?})"
+        );
+        assert_eq!(used, defined, "every {prefix} resource is defined and used");
+    }
+    for needle in [
+        "fun BatteryCard(view: BatteryView?, failed: Boolean)",
+        "fun OfflineCard(view: OfflineView?, failed: Boolean)",
+        "MaterialTheme.colorScheme.",
+        "CardModel.batteryLine(",
+        "CardModel.batteryPower(",
+        "CardModel.offlineDuration(",
+        "timeText(",
+    ] {
+        assert!(cards.contains(needle), "PcCards.kt needs {needle}");
+    }
+    for forbidden in [
+        "Text(\"",
+        "text = \"",
+        "colorResource",
+        "Color(",
+        "Color.",
+        "#FF",
+        ".message",
+        "localizedMessage",
+        "toString()",
+        "api.",
+        "SoosApi",
+        "SharedApi",
+        "Dispatchers",
+        "launch",
+        "Button(",
+        "onClick",
+    ] {
+        assert!(
+            !cards.contains(forbidden),
+            "PcCards.kt contains {forbidden}"
+        );
+    }
+    // Times: java.time in the phone's zone (the shared formatter of SoosApp.kt).
+    let app = read(SOOS_APP);
+    assert!(app.contains("internal fun alertTime(unixMs: Long): String?"));
+    assert!(app.contains(".withZone(ZoneId.systemDefault())"));
+    let squashed: String = app.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needle in [
+        "var battery by remember { mutableStateOf<BatteryView?>(null) }",
+        "var offline by remember { mutableStateOf<OfflineView?>(null) }",
+        "withContext(Dispatchers.IO) { api.battery() }",
+        "withContext(Dispatchers.IO) { api.offline() }",
+        "loadAlerts() loadCards() RefreshOutcome.AUTHENTICATED",
+        "BatteryCard(view = battery, failed = batteryFailed)",
+        "OfflineCard(view = offline, failed = offlineFailed)",
+    ] {
+        assert!(squashed.contains(needle), "SoosApp.kt needs {needle}");
+    }
+    assert!(
+        squashed.matches("clearCards()").count() >= 3,
+        "the cards are cleared when unreachable and signed out"
+    );
+
+    // The battery tour step names the new card (the shared text stays equal to app.js).
+    let where_battery = {
+        let needle = "<string name=\"tour_battery_where\">";
+        let at = strings.find(needle).expect("tour_battery_where") + needle.len();
+        &strings[at..at + strings[at..].find("</string>").unwrap()]
+    };
+    assert!(
+        where_battery.contains("Battery card") && !where_battery.contains("does not show"),
+        "tour_battery_where names the Battery card: {where_battery}"
+    );
+
+    // ADR, operator documentation, matrix and walkthrough.
+    let decisions = read(DECISIONS);
+    let adr = decisions
+        .lines()
+        .find(|l| l.contains(CARDS_ADR_TITLE))
+        .expect("cards ADR recorded");
+    for needle in [
+        "#439",
+        "#357",
+        "/api/battery",
+        "/api/offline",
+        "no server change",
+        "verification-metadata.xml",
+        "strings.xml",
+        "tour_battery_text",
+        "ANA22",
+    ] {
+        assert!(adr.contains(needle), "cards ADR must mention {needle}");
+    }
+    let doc = read(DOC);
+    let start = doc.find("## 2j. Native Android app").expect("section 2j");
+    let end = start + doc[start..].find("\n## 2k. ").unwrap();
+    let section = &doc[start..end];
+    for needle in [
+        "GET /api/battery",
+        "GET /api/offline",
+        "Battery",
+        "Offline history",
+        "ZoneId.systemDefault()",
+        "ANA26",
+    ] {
+        assert!(section.contains(needle), "§2j must mention {needle}");
+    }
+    assert!(
+        !section.contains("the battery level and the offline history stay"),
+        "§2j no longer says the app lacks these cards"
+    );
+    let matrix = read(MATRIX);
+    for row in 22..=26 {
+        let line = matrix
+            .lines()
+            .find(|l| l.starts_with(&format!("| ANA{row} |")))
+            .unwrap_or_else(|| panic!("matrix row ANA{row}"));
+        if row == 26 {
+            assert!(line.contains("Pending owner verification"), "ANA26: {line}");
+        }
+    }
+    assert!(exists(CARDS_WALKTHROUGH), "{CARDS_WALKTHROUGH}");
+    let walkthrough = read(CARDS_WALKTHROUGH);
+    for needle in ["#439", "#357", "/api/battery", "/api/offline", "ANA22"] {
+        assert!(
+            walkthrough.contains(needle),
+            "walkthrough 236 mentions {needle}"
+        );
+    }
+}
