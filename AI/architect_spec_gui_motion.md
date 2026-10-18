@@ -14,7 +14,7 @@
 |---|---|
 | `#![forbid(unsafe_code)]` in `soos-gui` | kept in every new module (`motion.rs`, `motion/portal.rs`, `overlay.rs`) |
 | No `unwrap`/`expect`/indexing in motion code | `motion.rs` carries `#![deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used, clippy::panic)]` |
-| zbus confined (PAU17) | Planned Contract Migration B.2a: `ALLOWED` gains `crates/gui/Cargo.toml` (exactly `zbus = { workspace = true }`, named once) |
+| zbus confined (PAU17) | Planned Contract Migration B.2a: `ALLOWED` gains `crates/gui/Cargo.toml` (exactly `zbus = { workspace = true }`, named once); owner-approved contract migration of 2026-10-18 (ADR 2026-10-18 "Owner-Approved Contract Migration of PAU17 for the `soos-gui` Portal Reader") |
 | No Tokio in `pam_soos.so` | untouched: Tokio enters `soos-gui` only, confined to the portal reader thread |
 | UI thread never blocks, spawns no process (`responsiveness_tests.rs`) | the UI thread only calls `try_recv`; no `Command::new` anywhere in the motion code |
 | README capture determinism (RAC1/RAC2) | the capture scene runs with reduced motion and every widget at rest paints exactly what it painted before |

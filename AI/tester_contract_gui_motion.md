@@ -3,7 +3,8 @@
 - **Date**: 2026-10-18
 - **Contract source**: `AI/tester_contract_motion.md` Part B.2 (items 1–10) and B.2a; spec `AI/architect_spec_gui_motion.md`.
 - **Files**: `crates/gui/tests/motion_tests.rs` (GMO1–GMO14), `tests/invariants/src/gui_motion_contract.rs` (GMO15–GMO19,
-  registered in `tests/invariants/src/lib.rs`), migrated `tests/invariants/src/presence_unlock_contract.rs` (PAU17).
+  registered in `tests/invariants/src/lib.rs`), migrated `tests/invariants/src/presence_unlock_contract.rs` (PAU17; owner-approved contract migration of 2026-10-18,
+  `ALLOWED` list only, ADR 2026-10-18 "Owner-Approved Contract Migration of PAU17 for the `soos-gui` Portal Reader").
 
 | Test (path::name) | Acceptance line / matrix ID | Red evidence (failure message) |
 |---|---|---|
