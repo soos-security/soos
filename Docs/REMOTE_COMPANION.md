@@ -1362,7 +1362,7 @@ A short tour explains every feature of the phone page, what it exposes and where
   shows the tour again. When the browser blocks site data (some private windows, "block all
   cookies"), the tour simply opens on every visit and closes as usual, without an error.
 - **Native Android app.** The native Android app has the same tour with its own off paths
-  (section 2j, "Feature tour in the app", GitHub #427).
+  (section 2j "Native Android app", subsection "Feature tour in the app", GitHub #427).
 
 Matrix rows PTR1–PTR11; invariant `remote_tour_contract`.
 
@@ -1564,9 +1564,9 @@ the PC is unreachable (off, asleep, or Tailscale disconnected).
 | `camera_fps` | no | `5` | 1..=10; frames per second sent to the phone |
 | `camera_width` | no | `640` | `640` (source size, at most 640x480) or `320` (2x downscale); any other value → refused |
 | `camera_quality` | no | `70` | 50..=85; JPEG quality |
-| `offline_alerts` | no | `false` | TOML boolean; `true` records offline intervals and sends a back-online notification (section 2j); requires `push_notifications = true` (exit 78 otherwise) |
+| `offline_alerts` | no | `false` | TOML boolean; `true` records offline intervals and sends a back-online notification (section 2j "Offline history"); requires `push_notifications = true` (exit 78 otherwise) |
 | `battery_status` | no | `true` | TOML boolean; false disables every sysfs read (no battery line, `GET /api/battery` answers `disabled`, section 2g); any other type → refused |
-| `[android]` | no | absent (no binding) | table at the end of the file: `package` (Android application id, at most 128 bytes) and `sha256_cert_fingerprints` (1 or 2 upper-case `AA:BB:..` SHA-256 digests); requires `rp_id` and `allow_funnel = true`; serves `/.well-known/assetlinks.json` and accepts the app origin for the login ceremony (section 2j) |
+| `[android]` | no | absent (no binding) | table at the end of the file: `package` (Android application id, at most 128 bytes) and `sha256_cert_fingerprints` (1 or 2 upper-case `AA:BB:..` SHA-256 digests); requires `rp_id` and `allow_funnel = true`; serves `/.well-known/assetlinks.json` and accepts the app origin for the login ceremony (section 2j "Native Android app") |
 | `socket_path` | no | `$XDG_RUNTIME_DIR/soos-remote/remote.sock` | absolute, at most 107 bytes; `XDG_RUNTIME_DIR` unset or relative without `socket_path` → refused (no `/tmp` fallback) |
 
 A missing file, an unknown key or an invalid value exits with status 78 (`EX_CONFIG`), which the
@@ -1605,8 +1605,8 @@ nothing is written.
 | `GET /api/alerts` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200` the alerts view (section 2c); `{"state":"disabled",…}` while `password_alerts` is off |
 | `POST /api/alerts/ack` | no body; `X-Soos-Action: alerts-ack`, `X-Soos-Alerts-Epoch`, `X-Soos-Alerts-Through`: `200` the new view, `403 forbidden` (CSRF), `403 alerts_disabled`, `400 bad_request` (headers, or a `through` beyond the newest attempt), `429 rate_limited` (one per second), `409 stale_view`, `503 unavailable` |
 | `GET /api/battery` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, percent, charge, external_power}` (section 2g); `{"state":"disabled",…}` while `battery_status` is `false`; a reading at most 5 s old, or one bounded read |
-| `GET /api/offline` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, reason, network_monitor, intervals}` (section 2j); `state` is `disabled`, `active` or `unavailable` (`reason` `store_failed`), `network_monitor` is `unknown`, `active` or `unavailable`, `intervals` newest first as `{reason, start_unix_ms, end_unix_ms, duration_ms}` |
-| `GET /.well-known/assetlinks.json` | public (also anonymous over Funnel): `404` exactly like an unknown path unless `[android]` is configured; then `200 application/json` with one Digital Asset Links statement (`delegate_permission/common.get_login_creds`, the package and its certificate digests), `HEAD` the same head, `405` for other methods (section 2j) |
+| `GET /api/offline` | tailnet, or Funnel with a session (`403 login_required` otherwise): `200 application/json` `{state, reason, network_monitor, intervals}` (section 2j "Offline history"); `state` is `disabled`, `active` or `unavailable` (`reason` `store_failed`), `network_monitor` is `unknown`, `active` or `unavailable`, `intervals` newest first as `{reason, start_unix_ms, end_unix_ms, duration_ms}` |
+| `GET /.well-known/assetlinks.json` | public (also anonymous over Funnel): `404` exactly like an unknown path unless `[android]` is configured; then `200 application/json` with one Digital Asset Links statement (`delegate_permission/common.get_login_creds`, the package and its certificate digests), `HEAD` the same head, `405` for other methods (section 2j "Native Android app") |
 | `GET /sw.js` | the service worker (public asset, `text/javascript`); it shows notifications and, on `pushsubscriptionchange` only, re-sends the renewed subscription once to `POST /api/push/subscribe`; the worker makes no request on push |
 | `GET /api/push` | tailnet, or Funnel with a session: `{state, reason, public_key, subscriptions, devices, last_delivery, sender}`; `{"state":"disabled",…}` while `push_notifications` is off |
 | `POST /api/push/subscribe` | `X-Soos-Action: push-subscribe`, the browser's subscription JSON (at most 2 KiB): `200 subscribed`, `400 bad_request` / `unsupported_push_service`, `403 forbidden` / `push_disabled`, `409 too_many_subscriptions`, `413 body_too_large`, `429 rate_limited` (one per second, shared with unsubscribe), `503 unavailable` / `store_unavailable` |
@@ -1783,7 +1783,7 @@ reason classes.
   stage is capped by `max-height: 70vh`; in full screen the box ignores the safe-area padding and `100vh` is the
   large viewport on mobile); pre-Baseline engines (Firefox ESR 115 included) are best effort; there is no
   automated cross-engine run yet (hardware rows RXB12–RXB20).
-- Offline history (section 2j): the notification comes after the fact; a PC kept offline is never
+- Offline history (section 2j "Offline history"): the notification comes after the fact; a PC kept offline is never
   reported in real time (tiers 2 and 3). An outage shorter than 30 s, or one that starts and ends
   between two 5 s readings, is not recorded. Wall times are as good as the PC's clock. After a
   crash or a power loss, a `shutdown_or_crash` interval starts at the last heartbeat (up to 60 s
@@ -1797,12 +1797,12 @@ reason classes.
 - The `bind` → `chmod 0600` window of the socket is closed by the `0700` parent directory and
   the unit's `UMask=0077`; the service must therefore be started through the unit (or with the
   same umask).
-- Native Android app (section 2j): the listed signing key is a login trust anchor (accepted
+- Native Android app (section 2j "Native Android app"): the listed signing key is a login trust anchor (accepted
   risk); the session cookie lives in the app process only; the first Gradle verification
   metadata is trusted on first use; the debug APK is debuggable; Credential Manager providers
   other than Google Password Manager are best effort; the Digital Asset Links check needs the
   public Funnel host.
-- PC offline alerts of the Android app (section 2j): the heartbeat is best effort. Doze and App
+- PC offline alerts of the Android app (section 2j "Native Android app"): the heartbeat is best effort. Doze and App
   Standby defer its checks, so an alert can come well after 30 minutes; a force stop cancels it
   until the app is opened again; with the phone's Tailscale VPN off, without any network
   outside airplane mode, or with Battery Saver, Data Saver or the restricted battery setting
@@ -1819,18 +1819,18 @@ reason classes.
 - Any other public exposure path (Cloudflare Tunnel, Cloudflare Access, a custom domain, a
   reverse proxy): explored separately; it needs its own ADR before it may reach this socket.
 - **Lock/unlock-state notifications**, camera view notifications (removed 2026-10-07),
-  real-time "monitoring lost" notifications (section 2j covers only the after-the-fact back-online
-  notification and the opt-in PC offline alerts of the Android app; the watchdog needs its own
+  real-time "monitoring lost" notifications (section 2j "Offline history" covers only the after-the-fact back-online
+  notification, and section 2j "Native Android app" the opt-in PC offline alerts of the Android app; the watchdog needs its own
   ADR), a "network changed"
   notification, notification actions, and push hosts other than Apple,
   Google and Mozilla (section 2d covers failed-password alerts and the test notification, section
-  2j the back-online notification).
+  2j "Offline history" the back-online notification).
 - Any recording, snapshot or still image of the **live camera** view (section 2f), audio,
   H.264/WebRTC or any other live camera transport, an on-screen indicator, any image decoder
   inside `soos-remote` (the daemon converts frames for it), and any embedding or evidence access.
 - Battery time-to-empty or time-to-full, battery health or cycle count, peripheral batteries
   (`scope=Device`), low-battery notifications, any write to sysfs, UPower.
-- Features of the native Android app beyond its first version (section 2j: unlock, camera, push, Keystore device key and release signing are later PRs under the ADR of 2026-10-13; the first version is no longer out of scope), FCM direct API keys, Edge desktop push (`*.notify.windows.com`; the page says so,
+- Features of the native Android app beyond its first version (section 2j "Native Android app": unlock, camera, push, Keystore device key and release signing are later PRs under the ADR of 2026-10-13; the first version is no longer out of scope), FCM direct API keys, Edge desktop push (`*.notify.windows.com`; the page says so,
   section 2i), Android Shortcuts/Tasker integration (pointer in section 2h only).
 - System-wide packaging (`install.sh`, deb/rpm/Arch): deferred until the owner approves the
   merge; `scripts/install_remote.sh` is the only installer.
