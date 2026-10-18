@@ -74,6 +74,17 @@ All screenshots are generated from synthetic data by `scripts/capture_readme_ass
 The live diagnostic is shown at the top of this page. The values in every screenshot come from mock models on a
 drawn face, not from the real models.
 
+The phone companion web app, captured by `scripts/capture_readme_web.sh` in a headless browser from a loopback
+fixture server with canned, identity-free data (no login, host name or address; clock times in UTC):
+
+| Unlocked (light) | Locked, two failed `sudo` passwords (light) |
+|---|---|
+| ![soos-remote phone web app, light theme: the PC is unlocked, no failed password, one synthetic offline period](Docs/assets/screenshots/web-unlocked-light.png) | ![soos-remote phone web app, light theme: the PC is locked and idle, two synthetic failed sudo passwords to acknowledge](Docs/assets/screenshots/web-locked-alerts-light.png) |
+
+| Unlocked (dark) | Locked, two failed `sudo` passwords (dark) |
+|---|---|
+| ![soos-remote phone web app, dark theme: the PC is unlocked, no failed password, one synthetic offline period](Docs/assets/screenshots/web-unlocked-dark.png) | ![soos-remote phone web app, dark theme: the PC is locked and idle, two synthetic failed sudo passwords to acknowledge](Docs/assets/screenshots/web-locked-alerts-dark.png) |
+
 ---
 
 ## Quick Start

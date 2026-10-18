@@ -327,6 +327,22 @@ pub mod readme_web {
         "sw.js",
     ];
 
+    /// Fixture-only page that marks the web app's feature tour as seen in the capture browser,
+    /// then loads `/` (GitHub #448). The first-run tour (ADR 2026-10-17, GitHub #414) opens on
+    /// a fresh browser profile and would cover the captured page; the capture script opens
+    /// this path first. `soos-remote` itself gains no flag, route or mode.
+    pub const TOUR_SEEN_PATH: &str = "/readme/tour-seen";
+    /// The tour flag of `crates/remote/assets/app.js` (`TOUR_STORAGE_KEY` = `TOUR_STORAGE_SEEN`).
+    pub const TOUR_STORAGE_KEY: &str = "soos-remote-tour-v1";
+    /// The only value of [`TOUR_STORAGE_KEY`].
+    pub const TOUR_STORAGE_SEEN: &str = "seen";
+    /// Body of [`TOUR_SEEN_PATH`]: sets the tour flag (a blocked storage is ignored) and
+    /// replaces itself with `/`. Static text, no identity, no remote reference.
+    pub const TOUR_SEEN_PAGE: &str = "<!doctype html><html lang=\"en\"><head>\
+         <meta charset=\"utf-8\"><title>soos README capture</title></head><body><script>\
+         try { window.localStorage.setItem(\"soos-remote-tour-v1\", \"seen\"); } catch (e) {}\
+         window.location.replace(\"/\");</script></body></html>";
+
     /// A canned state of the phone companion.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum WebScene {
@@ -366,6 +382,8 @@ pub mod readme_web {
             /// Body.
             body: String,
         },
+        /// A fixed, fixture-only HTML page ([`TOUR_SEEN_PAGE`]).
+        Page(&'static str),
         /// A complete server-sent events prelude (status, alerts and battery events).
         EventStream(String),
         /// Anything else.
@@ -475,6 +493,7 @@ pub mod readme_web {
         }
         match path {
             "/" => FixtureResponse::Asset("index.html"),
+            TOUR_SEEN_PATH => FixtureResponse::Page(TOUR_SEEN_PAGE),
             "/api/auth/state" => json(AUTH_STATE_BODY.to_string()),
             "/api/status" => json(status_body(scene, now_unix_ms)),
             "/api/alerts" => json(alerts_body(scene, now_unix_ms)),
@@ -561,6 +580,12 @@ pub mod readme_web {
             FixtureResponse::Json { body, .. } => {
                 write_response(&mut stream, "200 OK", "application/json", body.as_bytes())
             }
+            FixtureResponse::Page(page) => write_response(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                page.as_bytes(),
+            ),
             FixtureResponse::EventStream(prelude) => {
                 let sent = write!(
                     stream,

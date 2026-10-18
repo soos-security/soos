@@ -11,6 +11,8 @@
 # Chrome/Chromium with a throw-away profile, and writes
 # Docs/assets/screenshots/web-<scene>-<light|dark>.png at 390x844 CSS pixels,
 # device scale factor 2, with every PNG metadata chunk stripped.
+# The browser first opens the fixture page /readme/tour-seen, which marks the
+# web app's first-run feature tour as seen and loads / (GitHub #448).
 #
 # Optional and never a CI requirement: nothing is installed or downloaded.
 # The browser binary is taken from $CHROME or found on PATH. Run
@@ -86,7 +88,10 @@ for scene in "${SCENES[@]}"; do
         else
             flags+=(--blink-settings=preferredColorScheme=1)
         fi
-        "$browser" "${flags[@]}" "http://127.0.0.1:$port/" > /dev/null 2>&1
+        # The fixture page marks the first-run feature tour as seen in this throw-away
+        # profile, then loads / (GitHub #448), so the tour never covers the capture.
+        # TZ=UTC keeps the capture host's time zone out of the clock times shown.
+        TZ=UTC "$browser" "${flags[@]}" "http://127.0.0.1:$port/readme/tour-seen" > /dev/null 2>&1
         cargo run --locked -q -p soos-test-fixtures --example readme_web_fixture_server -- \
             --strip-png "$raw" "$OUT/web-$scene-$variant.png"
         echo "==> $OUT/web-$scene-$variant.png"
