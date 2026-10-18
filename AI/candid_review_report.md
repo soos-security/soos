@@ -1,139 +1,74 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `feat/gui-android-safe-keys`
-- **Base (merge-base)**: `4671888` (origin/main after #422, #424 and #428)
-- **Reviewed-Diff-Fingerprint**: `f457a30fa1e780ad637e8a79f016afa1a049047e638de75612f50f12656bfd50`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/231_gui_android_safe_keys.md`, `Docs/GUI_APPLICATION.md`, `Docs/REMOTE_COMPANION.md`, `crates/gui/src/feature_control.rs`, `crates/gui/src/onboarding.rs`, `crates/gui/tests/remote_android_edit_tests.rs`
+- **Target Branch**: `feat/daemon-check-config`
+- **Base (merge-base)**: `3f76090`
+- **Reviewed-Diff-Fingerprint**: `f16a70df61b4de1216a2cb7067590028ab9e0ed2ad73a20a2068938e060c6bfe`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_daemon_check_config.md`, `AI/auditor_constraints_daemon_check_config.md`, `AI/walkthroughs/240_daemon_check_config.md`, `Docs/DAEMON.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `crates/daemon/src/check_config.rs`, `crates/daemon/src/config.rs`, `crates/daemon/src/lib.rs`, `crates/daemon/src/main.rs`, `crates/daemon/tests/check_config_tests.rs`, `scripts/setup.sh`, `tests/docker/setup_root_preview_test.sh`, `tests/fixtures/setup/daemon.toml`, `tests/invariants/src/daemon_check_config_contract.rs`, `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
 
-Independent re-review after the rebase onto `origin/main` `4671888`. The raw diff against the new
-merge base (778 lines, 8 files) was read in full; it contains only the #429 change, no hunk of
-#422, #424 or #428 leaks into it.
-
-`feature_control::disable_remote_keys` used to refuse any `remote.toml` with a line starting with
-`[`. It now accepts exactly one `[android]` header (optionally indented, spaced inside the
-brackets, followed by a `#` comment): top-level `key = true` lines above it are rewritten to
-`key = false`, the table lines are copied byte for byte, and a second header, any other header, or
-a key of the switch inside the table is `UnsupportedLayout`. A new
-`RemoteEditError::FunnelRequiredByAndroid` refuses the Internet access switch whenever the parsed
-file has an `android` key, before any edit, write or restart. `onboarding::toggle_route` appends a
-fixed note to the shown Internet access "off" command. The existing TOML verification (target keys
-`false` or absent, every other top-level key equal, `android` included, no key added) is unchanged
-and runs on every result.
-
-On this tree: `cargo test --locked -p soos-gui -p soos-invariants -- --test-threads=4` passes
-(1070 tests, 0 failed, including `companion_wording_contract` CWD1–CWD5, `readme_contract`,
-`test_rmc_s4_remote_is_a_leaf_crate`, the OBT and GAK suites); `cargo clippy --locked -p soos-gui
--p soos-invariants --all-targets -- -D warnings` and `cargo fmt --all -- --check` pass. No CRITICAL
-or MAJOR finding. No documentation fix was needed after the rebase.
+The change adds `soos-daemon --check-config [--config <FILE>]` (GitHub #441) and makes the setup
+root half validate the `daemon.toml` it has just created with the installed daemon before the
+restart. The start path `load_or_default_with_system_path` now delegates to the new
+`DaemonConfig::load_classified`, and the refactor is behavior-preserving: an explicit path is read
+with the same bounded reader and `config_read_error` text as the old `load_from_path`, and only a
+`NotFound` at the system path (without `--config`) yields the runtime defaults, as before. The check
+returns from `main()` before the Tokio runtime, logging, the panic hook, `mlockall`, the pipeline and
+the socket. No pre-existing test assertion was removed or changed. Scoped tests, clippy and fmt are
+green. Only MINOR / SUGGESTION findings remain.
 
 ## 2. Test Changes
 
-Mechanical listing on `target/candid_diff.patch`:
+Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: one new file, `crates/gui/tests/remote_android_edit_tests.rs` (GAK1–GAK6).
-- Removed or changed assertions (`^-` with `assert`, `#[test]`, `proptest!`, `should_panic`): **none**.
+- Test files touched: `crates/daemon/tests/check_config_tests.rs` (new), `tests/invariants/src/daemon_check_config_contract.rs` (new), `tests/invariants/src/lib.rs` (one `mod` declaration appended, no test touched), `tests/fixtures/setup/daemon.toml` (new fixture), `tests/docker/setup_root_preview_test.sh` (modified).
+- Removed or changed `assert` / `#[test]` / `proptest!` / `#[should_panic]` lines: **none**.
 - New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
-- Inline `mod tests` added or removed: **none**.
-
-`crates/gui/tests/feature_control_tests.rs` is not in the diff:
-`test_obt_disable_refuses_unsupported_layouts` (an `[extra]` table, a quoted `"true"`, invalid TOML)
-is byte-identical to main and passes, because `[extra]` is not `[android]`. The OBT9 matrix row is
-not modified; the new component section states that OBT9 still holds for every table other than one
-`[android]` table, which matches the code and the ADR amendment.
+- Inline `mod tests` changes: none.
+- `tests/docker/setup_root_preview_test.sh`: the only removed lines are `readonly ALL_CASES=(A1 A2 B C1 C2 D E1 E2)` (extended with `F1 F2`, no case dropped) and `sed -n '2,65p'` in `usage()` (header grew to line 74, verified). The stand-in daemon gains a `--check-config` branch that records the call and never starts or binds; this is a test-double change required so the existing creation cases do not block on the socket. No existing `case_*` assertion is altered. Setup-only, justified by the ADR item (6).
+- `git diff $(git merge-base origin/main HEAD) HEAD -- tests 'crates/*/tests' android/app/src/test`: additions only, as listed above.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-Scenarios attempted:
-
-- **Funnel under `[android]`** (on, already off, absent): refused with `FunnelRequiredByAndroid`
-  before the line walk, so nothing is written and `try-restart` is never called (GAK3, GAK5). This
-  matches the `soos-remote` error "[android] requires allow_funnel" (`crates/remote/src/config.rs`).
-  A top-level dotted key `android.package = ...` also creates the `android` key, so the pre-check
-  still refuses Funnel there. PASS.
-- **Safe switches never produce a file `soos-remote` refuses**: the only cross-key rules a disable
-  can violate run from dependent to prerequisite. `Push` clears `offline_alerts` ("offline_alerts
-  requires push_notifications"); `CameraView` clears `camera_view_funnel` ("requires camera_view");
-  `Unlock` and `OfflineAlerts` are not prerequisites of anything; `[android]` needs `rp_id` and
-  `allow_funnel`, neither of which a safe switch touches. `password_alerts` is never touched. GAK2
-  re-checks each result with the mirrored rule checker. PASS.
-- **Line preservation**: non-target lines are pushed unchanged (`out.push_str(line)`), the
-  `[android]` header and every table line included; GAK2 asserts line-by-line equality and that the
-  output ends with the original table text. PASS.
-- **Header spoofing**: `[android]x`, `[android]]`, `[android.extra]`, `[[android]]`, `["android"]`,
-  `[extra]` before or after `[android]`, and a second `[android]` all reach `UnsupportedLayout`
-  (the `in_table` guard rejects any header after the first). `[android] # c ]` is accepted and is
-  valid TOML. PASS.
-- **Multi-line string hiding a header or a key**: a `"""` string containing `[android]` turns on
-  table mode, so a later target line is refused; a string containing `allow_unlock = true` at top
-  level would be rewritten, but the verification parse then sees the string value changed and
-  returns `VerifyFailed` (pre-existing OBT9 guard, unchanged). PASS.
-- **Verification covers the table**: `android` is a top-level key of the parsed table, so the
-  "every other key equal" check proves the table was not altered. PASS.
+- Old vs new loader: `path_opt = Some(p)` previously called `load_from_path(p)` = `read_daemon_config_text(p).map_err(config_read_error(p, ..))` then `from_toml_str`; new code is identical (DCC1 asserts identical error text for every class). `path_opt = None`: `NotFound` → runtime default, any other read error → error naming the system path, as before. PASS.
+- Classification: `NotFound | NotARegularFile | Unreadable` → 66; `TooLarge | Malformed` → 78; parse/validation → 78. Matches `Docs/DAEMON.md` §1.9 table and the ADR. PASS.
+- `--mock-camera` only flips `use_mock_camera` after validation, so the conflict does not hide a validation difference; config-level acceptance is exactly the start's. PASS.
+- `setup.sh`: the check sits between `JOURNAL+=(daemon_toml_created)` and the restart; on failure the file is removed and the last journal entry (that very entry) is popped, so `fail_and_rollback` does not `try-restart`; `/etc/soos` created by the run is still rolled back via `soos_conf_dir_created` (DCC8 asserts `rc=1 journal=soos_conf_dir_created`). `DAEMON_BIN="${PREFIX}/libexec/soos/soos-daemon"` matches `install.sh` (`TARGET_LIBEXEC_DIR`) and the unit's `ExecStart`. Stale-binary scenario: `phase_system` skips install only when installed files equal the build, so the checked binary is the freshly built one. PASS.
 
 ### PAM Concurrency & Deadlines
-
-No change under `crates/pam`, no daemon or IPC change. N/A — PASS.
+- No change in `crates/pam`. The setup call is bounded by `run_bounded "${QUERY_TIMEOUT_S}"` (10 s). PASS.
 
 ### Panic Safety & Fail-Closed
-
-`is_android_header` uses `strip_prefix`, `find`, `get` and `saturating_add` only; no `unwrap`,
-`expect`, indexing or unchecked arithmetic in the new production code. Every refusal returns an
-error before `write_user_file_atomically`. No path turns an error into a success. PASS.
+- `check_config.rs` has `#![forbid(unsafe_code)]`, no `unwrap/expect/panic/indexing` (only `unwrap_or_default`, `saturating_*`). Write failures are ignored; the exit code still carries the result. Any non-zero (including a timeout or a missing binary) removes the file: fail-closed toward "no new config". PASS.
 
 ### Test Integrity & Anti-Weakening
-
-No pre-existing assertion changed (section 2). The new tests can fail against plausible wrong
-implementations: accepting any table (GAK4 fails), editing inside `[android]` (GAK4), letting
-Funnel through (GAK3/GAK5), dropping the `offline_alerts` cascade (GAK2 rule checker), mangling
-the table (GAK2 suffix and parsed-table equality). GAK1 proves the rule checker rejects the broken
-variants, so it is not vacuous. The checker mirrors `soos-remote` rules instead of calling
-`parse_config_with_android`, because RMC-S4 forbids depending on `soos-remote`; this is documented
-and the mirrored rules match `config.rs`. PASS.
+- No pre-existing assertion touched (section 2). New tests would fail on plausible wrong implementations: wrong class for directory/FIFO (DCC1/DCC6), falling back to defaults for a directory at the system path (DCC1), quoting the TOML source line (canary in DCC6), socket directory creation (DCC4), check after restart or twice (DCC8). The invariant harness now aborts (exit 99) unless the `systemctl` stub is first in `PATH`, closing the host-`systemctl` reach described in the walkthrough. PASS.
 
 ### Memory, Bounds & Secrets
-
-The output buffer is bounded by the input length plus at most one byte per rewritten line
-(`false` vs `true`); the input is still read through the existing bounded reader. Error messages
-are fixed strings and carry no file content; nothing is logged. The write is still the atomic
-0600, symlink-refusing `write_user_file_atomically` (GAK5 checks mode 0600). PASS.
+- Input bounded by the existing 1 MiB reader (`MAX_DAEMON_CONFIG_BYTES = 1024 * 1024`, verified). Output bounded to 512 bytes, first line only, control characters replaced, cut on a char boundary (DCC3). No frames, embeddings or credentials involved. PASS.
 
 ### Supply Chain & Automation
-
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. N/A — PASS.
+- No `Cargo.*`, `deny.toml`, `.github/` or hook change. Docker harness logic not executed locally (CI job `setup-root-preview`); reviewed by reading: stand-in writes `CHECK_LOG` under `TEST_DIR=/var/lib/soos-setup-test`, matching the test's `readonly CHECK_LOG`; mode `check-refuses` is set after the healthy start in `reset_case`, and an unknown mode in the start branch serves `healthy`. PASS (CI pending).
 
 ### English-Only Policy
+- Code, comments, docs, commit message in English; no French tokens found in added lines. PASS.
 
-All code, comments, messages and docs in the diff are English. PASS.
+### Doc factual accuracy
+- `Docs/PACKAGING_AND_PROVISIONING.md` §3.0 exists; `Docs/DAEMON.md` §1.1–§1.7 are the validated tables and §1.9 is new after §1.8; walkthrough 240 is unique; DCC1–DCC11 rows exist; "bounded by 10 s" equals `QUERY_TIMEOUT_S=10`. PASS (see MINOR 2).
 
-### Consistency With #424 And #428 (After The Rebase)
-
-- `README.md` (from #424) says Funnel, remote unlock, the camera view, push and offline alerts each
-  have an off switch in `soos-gui`, and that an `[android]` table needs `allow_funnel`. Both stay
-  true: the switch exists and refuses with a specific message when `[android]` is configured. No
-  #424 text claims that the GUI cannot change a file with `[android]`, so nothing had to be updated.
-- `Docs/REMOTE_COMPANION.md` §5 (this branch) now lists `offline_alerts` and the `[android]`
-  behaviour, consistent with #424's §2k wording and with #428's native tour text, which both say
-  `allow_funnel = false` goes with `camera_view_funnel = false` and no `[android]` table
-  (`crates/remote/assets/app.js`, `android/app/src/main/res/values/strings.xml`).
-- `Docs/GUI_APPLICATION.md` §1e row and paragraph match the code; `AI/ARCHITECTURE.md` and
-  `scripts/setup.sh` say nothing about the GUI and tables.
-- `companion_wording_contract` (CWD1–CWD5) and `readme_contract` pass on this tree. PASS.
+### Commands re-run (scoped, `CARGO_TARGET_DIR=~/.cache/soos-targets/daemon-check-config`, `--test-threads=3`)
+- `cargo test -p soos-daemon --test check_config_tests`: 7 passed.
+- `cargo test -p soos-daemon` config suites (`config_tests`, `config_validation_tests`, `evidence_global_cap_config_tests`, `inference_threads_config_tests`, `ir_emitter_daemon_config_tests`, `presence_config_tests`, `threshold_config_tests`): all passed.
+- `cargo test -p soos-invariants`: 792 passed.
+- `cargo clippy -p soos-daemon -p soos-invariants --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean. `bash -n` on both scripts: clean.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:2726` — the OBT9 criterion text still reads "refuses
-  tables". It is qualified by the new `gui-android-safe-keys` section ("OBT9 still holds for every
-  table other than one `[android]` table") and the test it cites is unchanged, so this is not
-  wrong; a later matrix pass could add "other than one `[android]` table" to the OBT9 cell.
-- **[SUGGESTION]** `README.md:56` — "all but the failed-password alerts can be turned off in
-  soos-gui" does not mention that Internet access needs the `[android]` table removed first. The
-  security section (line 303) states the `[android]` requirement, so the README is not
-  contradicted; an owner may want the short sentence to say it too.
+- **[MINOR]** `scripts/setup.sh:1658` — the `[FAIL]` line says `--check-config refused` for any non-zero status, including a 10 s timeout or a missing/unexecutable binary (exit 124/126/127). Behavior is correct (fail-closed); the wording can mislead an operator. Optional: include the exit status in the message.
+- **[MINOR]** `scripts/setup.sh:488` (pre-existing helper) — `run_bounded` runs the command unbounded when `timeout` is absent, so "bounded by 10 s" in `Docs/PACKAGING_AND_PROVISIONING.md` and the ADR holds only where coreutils `timeout` exists (always true on supported distributions). No change required.
+- **[SUGGESTION]** `tests/invariants/src/daemon_check_config_contract.rs` `run_phase_preview` — the per-run directory under `std::env::temp_dir()` is removed before use but not after; a `tempfile::TempDir` would avoid leftovers.
 
 ## 5. Final Verdict
 
