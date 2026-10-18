@@ -8,7 +8,10 @@ import org.soos.remote.net.AlertRecord
 import org.soos.remote.net.AlertsView
 import org.soos.remote.net.ApiJson
 import org.soos.remote.net.AuthStateView
+import org.soos.remote.net.BatteryView
 import org.soos.remote.net.LoginOptions
+import org.soos.remote.net.OfflineInterval
+import org.soos.remote.net.OfflineView
 import org.soos.remote.net.StatusView
 
 class ApiJsonTest {
@@ -230,5 +233,218 @@ class ApiJsonTest {
         assertEquals(16384, atLimit.length)
         assertNotNull(ApiJson.parseAlerts(atLimit))
         assertNull(ApiJson.parseAlerts(prefix + "a".repeat(padding + 1) + suffix))
+    }
+
+    // --- battery level (GitHub #439, matrix ANA22) ------------------------------------------
+
+    private fun battery(
+        state: String = "\"present\"",
+        percent: String = "81",
+        charge: String = "\"discharging\"",
+        externalPower: String = "false",
+    ) = """{"state":$state,"percent":$percent,"charge":$charge,"external_power":$externalPower}"""
+
+    @Test
+    fun batteryPresentViewIsParsedExactly() {
+        assertEquals(BatteryView("present", 81, "discharging", false), ApiJson.parseBattery(battery()))
+        assertEquals(
+            BatteryView("present", null, "unknown", null),
+            ApiJson.parseBattery(battery(percent = "null", charge = "\"unknown\"", externalPower = "null")),
+        )
+        assertEquals(0, ApiJson.parseBattery(battery(percent = "0"))?.percent)
+        assertEquals(100, ApiJson.parseBattery(battery(percent = "100"))?.percent)
+        for (charge in listOf("charging", "discharging", "full", "not_charging", "unknown")) {
+            assertEquals(charge, ApiJson.parseBattery(battery(charge = "\"$charge\""))?.charge)
+        }
+        assertEquals(true, ApiJson.parseBattery(battery(externalPower = "true"))?.externalPower)
+        // Unknown extra members are ignored; an absent nullable member reads as null.
+        assertEquals(
+            BatteryView("present", null, "full", null),
+            ApiJson.parseBattery("""{"state":"present","charge":"full","future":1}"""),
+        )
+    }
+
+    @Test
+    fun batteryEveryStateWithoutValues() {
+        for (state in listOf("disabled", "unavailable", "no_battery")) {
+            assertEquals(
+                BatteryView(state, null, null, null),
+                ApiJson.parseBattery(battery(state = "\"$state\"", percent = "null", charge = "null", externalPower = "null")),
+            )
+            assertEquals(BatteryView(state, null, null, null), ApiJson.parseBattery("""{"state":"$state"}"""))
+            // Values are only ever sent with `present` (battery.rs `without_values`).
+            assertNull(ApiJson.parseBattery(battery(state = "\"$state\"", percent = "50", charge = "null", externalPower = "null")))
+            assertNull(ApiJson.parseBattery(battery(state = "\"$state\"", percent = "null", charge = "\"full\"", externalPower = "null")))
+            assertNull(ApiJson.parseBattery(battery(state = "\"$state\"", percent = "null", charge = "null", externalPower = "true")))
+        }
+        // `charge` is set whenever a battery is present.
+        assertNull(ApiJson.parseBattery(battery(charge = "null")))
+        assertNull(ApiJson.parseBattery("""{"state":"present","percent":5}"""))
+    }
+
+    @Test
+    fun batteryUnknownOrMalformedValuesAreRefused() {
+        assertNull(ApiJson.parseBattery("not json"))
+        assertNull(ApiJson.parseBattery("[]"))
+        assertNull(ApiJson.parseBattery(""))
+        assertNull(ApiJson.parseBattery("""{"percent":5}"""))
+        assertNull(ApiJson.parseBattery(battery(state = "\"Present\"")))
+        assertNull(ApiJson.parseBattery(battery(state = "\"charging\"")))
+        assertNull(ApiJson.parseBattery(battery(state = "null")))
+        assertNull(ApiJson.parseBattery(battery(state = "1")))
+        assertNull(ApiJson.parseBattery(battery(charge = "\"Charging\"")))
+        assertNull(ApiJson.parseBattery(battery(charge = "\"other\"")))
+        assertNull(ApiJson.parseBattery(battery(charge = "1")))
+        assertNull(ApiJson.parseBattery(battery(percent = "-1")))
+        assertNull(ApiJson.parseBattery(battery(percent = "101")))
+        assertNull(ApiJson.parseBattery(battery(percent = "50.5")))
+        assertNull(ApiJson.parseBattery(battery(percent = "\"50\"")))
+        assertNull(ApiJson.parseBattery(battery(percent = "4294967296")))
+        assertNull(ApiJson.parseBattery(battery(externalPower = "\"true\"")))
+        assertNull(ApiJson.parseBattery(battery(externalPower = "1")))
+    }
+
+    @Test
+    fun batteryOversizedInputIsRefused() {
+        assertEquals(16384, ApiJson.MAX_VIEW_BODY_CHARS)
+        val prefix = battery().dropLast(1) + ",\"pad\":\""
+        val suffix = "\"}"
+        val padding = ApiJson.MAX_VIEW_BODY_CHARS - prefix.length - suffix.length
+        val atLimit = prefix + "a".repeat(padding) + suffix
+        assertEquals(16384, atLimit.length)
+        assertNotNull(ApiJson.parseBattery(atLimit))
+        assertNull(ApiJson.parseBattery(prefix + "a".repeat(padding + 1) + suffix))
+    }
+
+    // --- offline history (GitHub #439, matrix ANA23) ----------------------------------------
+
+    private fun interval(
+        reason: String = "\"network_lost\"",
+        start: String = "1700000000000",
+        end: String = "1700000600000",
+        duration: String = "600000",
+    ) = """{"reason":$reason,"start_unix_ms":$start,"end_unix_ms":$end,"duration_ms":$duration}"""
+
+    private fun offline(
+        state: String = "\"active\"",
+        reason: String = "null",
+        monitor: String = "\"active\"",
+        intervals: String = "[${interval()}]",
+    ) = """{"state":$state,"reason":$reason,"network_monitor":$monitor,"intervals":$intervals}"""
+
+    @Test
+    fun offlineActiveViewIsParsedExactly() {
+        val sleep = interval(reason = "\"sleep\"", start = "1690000000000", end = "1690003600000", duration = "3500000")
+        assertEquals(
+            OfflineView(
+                state = "active",
+                reason = null,
+                networkMonitor = "active",
+                intervals = listOf(
+                    OfflineInterval("network_lost", 1700000000000, 1700000600000, 600000),
+                    OfflineInterval("sleep", 1690000000000, 1690003600000, 3500000),
+                ),
+            ),
+            ApiJson.parseOffline(offline(intervals = "[${interval()},$sleep]")),
+        )
+        for (reason in listOf("network_lost", "wifi_disabled", "sleep", "shutdown_or_crash")) {
+            assertEquals(
+                reason,
+                ApiJson.parseOffline(offline(intervals = "[${interval(reason = "\"$reason\"")}]"))?.intervals?.single()?.reason,
+            )
+        }
+        for (monitor in listOf("unknown", "active", "unavailable")) {
+            assertEquals(monitor, ApiJson.parseOffline(offline(monitor = "\"$monitor\""))?.networkMonitor)
+        }
+        assertEquals(
+            OfflineView("active", null, "unknown", emptyList()),
+            ApiJson.parseOffline(offline(monitor = "\"unknown\"", intervals = "[]")),
+        )
+        // An empty wall span is valid (start == end); extra members are ignored.
+        assertEquals(
+            OfflineInterval("sleep", 5, 5, 0),
+            ApiJson.parseOffline(
+                offline(intervals = """[{"reason":"sleep","start_unix_ms":5,"end_unix_ms":5,"duration_ms":0,"x":1}]"""),
+            )?.intervals?.single(),
+        )
+        assertEquals(
+            OfflineView("active", null, "active", emptyList()),
+            ApiJson.parseOffline("""{"state":"active","network_monitor":"active","intervals":[],"future":true}"""),
+        )
+    }
+
+    @Test
+    fun offlineDisabledAndUnavailableViews() {
+        assertEquals(
+            OfflineView("disabled", null, "unknown", emptyList()),
+            ApiJson.parseOffline(offline(state = "\"disabled\"", monitor = "\"unknown\"", intervals = "[]")),
+        )
+        assertEquals(
+            OfflineView("unavailable", "store_failed", "unknown", emptyList()),
+            ApiJson.parseOffline(
+                offline(state = "\"unavailable\"", reason = "\"store_failed\"", monitor = "\"unknown\"", intervals = "[]"),
+            ),
+        )
+        // `reason` is set iff unavailable; the monitor is unknown and the list empty unless active.
+        assertNull(ApiJson.parseOffline(offline(state = "\"unavailable\"", monitor = "\"unknown\"", intervals = "[]")))
+        assertNull(ApiJson.parseOffline(offline(reason = "\"store_failed\"")))
+        assertNull(
+            ApiJson.parseOffline(offline(state = "\"disabled\"", reason = "\"store_failed\"", monitor = "\"unknown\"", intervals = "[]")),
+        )
+        assertNull(ApiJson.parseOffline(offline(state = "\"disabled\"", monitor = "\"active\"", intervals = "[]")))
+        assertNull(ApiJson.parseOffline(offline(state = "\"disabled\"", monitor = "\"unknown\"")))
+        assertNull(
+            ApiJson.parseOffline(offline(state = "\"unavailable\"", reason = "\"store_failed\"", monitor = "\"unavailable\"", intervals = "[]")),
+        )
+        assertNull(
+            ApiJson.parseOffline(offline(state = "\"unavailable\"", reason = "\"store_failed\"", monitor = "\"unknown\"")),
+        )
+    }
+
+    @Test
+    fun offlineUnknownOrMalformedValuesAreRefused() {
+        assertNull(ApiJson.parseOffline("not json"))
+        assertNull(ApiJson.parseOffline("[]"))
+        assertNull(ApiJson.parseOffline(""))
+        assertNull(ApiJson.parseOffline(offline(state = "\"Active\"")))
+        assertNull(ApiJson.parseOffline(offline(state = "\"starting\"")))
+        assertNull(ApiJson.parseOffline(offline(state = "null")))
+        assertNull(ApiJson.parseOffline(offline(state = "\"unavailable\"", reason = "\"disk_full\"", monitor = "\"unknown\"", intervals = "[]")))
+        assertNull(ApiJson.parseOffline(offline(state = "\"unavailable\"", reason = "7", monitor = "\"unknown\"", intervals = "[]")))
+        assertNull(ApiJson.parseOffline(offline(monitor = "\"other\"")))
+        assertNull(ApiJson.parseOffline(offline(monitor = "null")))
+        assertNull(ApiJson.parseOffline("""{"state":"active","intervals":[]}"""))
+        assertNull(ApiJson.parseOffline("""{"state":"active","network_monitor":"active"}"""))
+        assertNull(ApiJson.parseOffline(offline(intervals = "null")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "{}")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[1]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(reason = "\"other\"")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(reason = "null")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(start = "-1")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(end = "-1")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(duration = "-1")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(duration = "1.5")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(start = "\"1\"")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(duration = "null")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(start = "18446744073709551615")}]")))
+        // The wall span is never inverted (offline.rs `OfflineInterval::new`, store loader).
+        assertNull(ApiJson.parseOffline(offline(intervals = "[${interval(start = "10", end = "9")}]")))
+        assertNull(ApiJson.parseOffline(offline(intervals = """[{"reason":"sleep"}]""")))
+    }
+
+    @Test
+    fun offlineOversizedInputIsRefused() {
+        assertEquals(32, ApiJson.MAX_OFFLINE_INTERVALS)
+        val full = (1..ApiJson.MAX_OFFLINE_INTERVALS).joinToString(",", "[", "]") { interval() }
+        assertEquals(32, ApiJson.parseOffline(offline(intervals = full))?.intervals?.size)
+        val tooMany = (1..ApiJson.MAX_OFFLINE_INTERVALS + 1).joinToString(",", "[", "]") { interval() }
+        assertNull(ApiJson.parseOffline(offline(intervals = tooMany)))
+        val prefix = offline().dropLast(1) + ",\"pad\":\""
+        val suffix = "\"}"
+        val padding = ApiJson.MAX_VIEW_BODY_CHARS - prefix.length - suffix.length
+        val atLimit = prefix + "a".repeat(padding) + suffix
+        assertEquals(16384, atLimit.length)
+        assertNotNull(ApiJson.parseOffline(atLimit))
+        assertNull(ApiJson.parseOffline(prefix + "a".repeat(padding + 1) + suffix))
     }
 }

@@ -15,9 +15,9 @@ sealed interface ApiResult<out T> {
 
 /**
  * Client of the `soos-remote` HTTP surface for the native app: status, lock, the
- * failed-password alerts and the Funnel passkey login. Every POST carries `Origin: <origin>`
- * and the route's exact `X-Soos-Action`; the web session cookie is kept in memory only and
- * dropped on sign-out or `login_required`.
+ * failed-password alerts, the battery level, the offline history and the Funnel passkey login.
+ * Every POST carries `Origin: <origin>` and the route's exact `X-Soos-Action`; the web session
+ * cookie is kept in memory only and dropped on sign-out or `login_required`.
  */
 class SoosApi(private val origin: String, private val transport: HttpTransport) {
     @Volatile
@@ -35,6 +35,12 @@ class SoosApi(private val origin: String, private val transport: HttpTransport) 
 
     /** `GET /api/alerts` (tailnet identity or web session). */
     fun alerts(): ApiResult<AlertsView> = get(ALERTS_PATH) { ApiJson.parseAlerts(it) }
+
+    /** `GET /api/battery` (tailnet identity or web session; read-only). */
+    fun battery(): ApiResult<BatteryView> = get(BATTERY_PATH) { ApiJson.parseBattery(it) }
+
+    /** `GET /api/offline` (tailnet identity or web session; read-only). */
+    fun offline(): ApiResult<OfflineView> = get(OFFLINE_PATH) { ApiJson.parseOffline(it) }
 
     /**
      * `POST /api/alerts/ack` of the displayed view: no body, `X-Soos-Action: alerts-ack` and
@@ -156,6 +162,10 @@ class SoosApi(private val origin: String, private val transport: HttpTransport) 
         const val ALERTS_ACK_PATH = "/api/alerts/ack"
         const val ALERTS_EPOCH_HEADER = "X-Soos-Alerts-Epoch"
         const val ALERTS_THROUGH_HEADER = "X-Soos-Alerts-Through"
+
+        /** Equal `BATTERY_PATH` and `OFFLINE_PATH` of `crates/remote/src/routes.rs`. */
+        const val BATTERY_PATH = "/api/battery"
+        const val OFFLINE_PATH = "/api/offline"
 
         /** Status of a snapshot refused locally (never sent). */
         private const val BAD_REQUEST = 400

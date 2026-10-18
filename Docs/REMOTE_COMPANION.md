@@ -1068,9 +1068,10 @@ Compose)", GitHub #382, first PR of #357) is an alternative to the web app: each
 This first version shows the PC status, locks the PC, signs in over Funnel with a passkey and,
 when turned on, alerts you when the PC stops answering (PC offline alerts, below); the second
 (GitHub #404, PR 2 of #357) adds the failed-password alerts with acknowledgement, and a
-first-run feature tour (GitHub #427, below) explains each feature and where to turn it off.
-Unlock, the live camera view, push notifications, the battery level and the offline history stay
-in the web app for now. The app is sideloaded only (no store) and its application id is
+first-run feature tour (GitHub #427, below) explains each feature and where to turn it off, and
+read-only *Battery* and *Offline history* cards (GitHub #439, below) show the battery level and
+the offline periods of the PC. Unlock, the live camera view and push notifications stay in the
+web app for now. The app is sideloaded only (no store) and its application id is
 `org.soos.remote` (owner to confirm).
 
 **What the app does.**
@@ -1104,6 +1105,22 @@ in the web app for now. The app is sideloaded only (no store) and its applicatio
   the view has an epoch, whatever the state (a `starting` or `unavailable` state still
   acknowledges; without any data the view has no epoch and no count). The decision is the pure
   helper `alerts/AlertsFeedback.kt`, covered by JVM unit tests (matrix AAF1–AAF4).
+- **Battery and offline history** (sections 2g and 2j; GitHub #439, same server, no server
+  change). While signed in, the home screen shows two read-only cards under the alerts card,
+  loaded with them when the screen opens, on *Refresh*, on pull to refresh and after every other
+  refresh. *Battery* reads `GET /api/battery`: the level ("Battery 81%"), the charge state
+  (charging, on battery, full, plugged in and not charging, or plugged in) or one fixed sentence
+  for `disabled` (`battery_status = false`), `unavailable` and `no_battery`. *Offline history*
+  reads `GET /api/offline`: the number of recorded periods and one line per period, newest
+  first, with its start, end, duration and reason (network lost, Wi-Fi turned off, sleep,
+  shutdown or crash), a note when NetworkManager is not monitored, or one fixed sentence for
+  `disabled` (`offline_alerts = false`) and `unavailable` (`store_failed`). Times are rendered
+  with `java.time` in the phone's time zone and locale (`ZoneId.systemDefault()`). Both parsers
+  are strict and bounded like the alerts parser: an unknown state, reason or class, a wrong type,
+  a negative or out-of-range number, more than 32 periods or a body over 16 KiB is treated as
+  unreadable ("could not be loaded"). The cards have no action; every text is a fixed string of
+  the app, and no server or exception text is ever displayed. The app makes no event-stream
+  request, so the battery card changes on a refresh, not live like the web page.
 - **Sign-in over Funnel.** The app uses Android Credential Manager (Android 14 or later, no
   Google Play services library in the app). It runs the existing login ceremony: login options,
   then the passkey prompt with user verification, then login verify. The server still uses the
@@ -1258,6 +1275,21 @@ password at the lock screen or in `sudo`, then:
    expires (or restart `soos-remote`), and tap *Acknowledge*: the alerts card disappears and the
    screen says "Your session ended. Sign in again."
 
+**Owner hardware check of the battery and offline-history cards (matrix ANA26).** On a phone, in
+light and in dark mode:
+
+1. Over the tailnet, open the app: the *Battery* card shows the level and charge state the web
+   page shows; plug and unplug the charger, then pull down to refresh: the card follows.
+2. With `battery_status = false` (then `systemctl --user restart soos-remote.service`), the card
+   says the battery level is off on the PC.
+3. With `offline_alerts = true`, disconnect the PC from the network for more than a minute,
+   reconnect it and refresh: the *Offline history* card lists the period with the times of your
+   phone's time zone, its duration and "network lost". With `offline_alerts = false` the card
+   says the offline history is off.
+4. Repeat steps 1 and 3 over Funnel after a passkey sign-in; sign out: both cards disappear.
+5. The status, *Lock PC*, the alerts card, the feature tour and the PC offline alerts switch still
+   work.
+
 ### Feature tour in the app
 
 ADR 2026-10-18 "Phone Onboarding Tour in the Native Android App" (GitHub #427, PR 3 of #363; the
@@ -1272,8 +1304,9 @@ web app tour is section 2k, the `soos-gui` tour `Docs/GUI_APPLICATION.md`).
   Internet access, Failed-password history, Push alerts, Live camera view, Offline alerts (the
   eight steps of the web tour, with its exact titles, explanations and "Off:" lines from
   `crates/remote/assets/app.js`), and **PC offline alerts**, the app's own opt-in check, turned
-  off with its switch in Settings. The app does not show the battery level, unlock, push alerts
-  or the camera view itself: those steps say that the web app on the phone does. Every manual
+  off with its switch in Settings. The app does not show unlock, push alerts or the camera view
+  itself: those steps say that the web app on the phone does. The battery step names the
+  app's Battery card and the offline alerts step its Offline history card (GitHub #439). Every manual
   off path names the same `remote.toml` keys as the web tour, dependants included (for example
   `allow_funnel = false` with `camera_view_funnel = false` and no `[android]` table), so
   `soos-remote` never refuses the edited file (exit 78).

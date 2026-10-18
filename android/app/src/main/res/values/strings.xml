@@ -47,6 +47,39 @@
     <string name="alerts_load_failed">Alerts could not be loaded.</string>
     <string name="alerts_time_unknown">unknown time</string>
 
+    <!-- Battery and offline-history cards (GitHub #439, part of #357), read-only. Fixed texts
+         only: server values select one of them and are never shown themselves. -->
+    <string name="battery_title">Battery</string>
+    <string name="battery_disabled">The battery level is off on the PC (battery_status in remote.toml).</string>
+    <string name="battery_unavailable">Battery level unavailable.</string>
+    <string name="battery_no_battery">This PC has no battery.</string>
+    <string name="battery_level">Battery %1$d%%</string>
+    <string name="battery_level_unknown">Battery level unknown</string>
+    <string name="battery_charging">Charging</string>
+    <string name="battery_on_battery">On battery</string>
+    <string name="battery_full">Full</string>
+    <string name="battery_plugged_in_not_charging">Plugged in, not charging</string>
+    <string name="battery_plugged_in">Plugged in</string>
+    <string name="battery_load_failed">The battery level could not be loaded.</string>
+    <string name="offline_title">Offline history</string>
+    <string name="offline_disabled">The offline history is off on the PC (offline_alerts in remote.toml).</string>
+    <string name="offline_unavailable">Offline history unavailable: the history file on the PC was refused.</string>
+    <string name="offline_none">No offline period recorded.</string>
+    <string name="offline_count_one">%d offline period recorded</string>
+    <string name="offline_count_other">%d offline periods recorded</string>
+    <string name="offline_not_monitored">Network changes are not monitored on this PC (NetworkManager not found); sleep and shutdown are.</string>
+    <string name="offline_row">%1$s to %2$s, %3$s: %4$s</string>
+    <string name="offline_reason_network_lost">network lost</string>
+    <string name="offline_reason_wifi_disabled">Wi-Fi turned off</string>
+    <string name="offline_reason_sleep">sleep</string>
+    <string name="offline_reason_shutdown_or_crash">shutdown or crash</string>
+    <string name="offline_duration_under_minute">less than a minute</string>
+    <string name="offline_duration_minutes">%d min</string>
+    <string name="offline_duration_hours">%d h</string>
+    <string name="offline_duration_hours_minutes">%1$d h %2$d min</string>
+    <string name="offline_duration_days">%d days</string>
+    <string name="offline_load_failed">The offline history could not be loaded.</string>
+
     <!-- First-run feature tour (GitHub #427, PR 3 of #363). Fixed English texts only. For the
          eight steps shared with the web tour, title, text and off are byte-equal to TOUR_STEPS
          of crates/remote/assets/app.js; each where line names the same remote.toml keys
@@ -61,7 +94,7 @@
     <string name="tour_battery_title">Battery level</string>
     <string name="tour_battery_text">The status card shows the battery level of the PC, whether it is charging and whether it is plugged in. The PC reads it from its power supply information; nothing else about the hardware is sent.</string>
     <string name="tour_battery_off">Off: the PC stops reading its battery and the line disappears from this page.</string>
-    <string name="tour_battery_where">This app does not show the battery level yet; the web app on this phone does. On the PC: set battery_status = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service</string>
+    <string name="tour_battery_where">In this app the battery level is the Battery card of the home screen; the web app on this phone shows it too. On the PC: set battery_status = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service</string>
     <string name="tour_remote_lock_title">Remote lock and unlock</string>
     <string name="tour_remote_lock_text">Locking from the phone is always available while the companion runs. Unlocking from the phone additionally needs a passkey check (Face ID, fingerprint or screen lock) every time.</string>
     <string name="tour_remote_lock_off">Off: the phone can still lock this PC, never unlock it.</string>
@@ -85,7 +118,7 @@
     <string name="tour_offline_alerts_title">Offline alerts</string>
     <string name="tour_offline_alerts_text">Your phone is told when this PC comes back online after being offline, with how long it was away. It uses the push alerts, so those must stay on.</string>
     <string name="tour_offline_alerts_off">Off: no offline history is recorded and no back-online notification is sent; push alerts keep working.</string>
-    <string name="tour_offline_alerts_where">These notifications reach the web app on this phone, as push alerts. On the PC: Features in soos-gui, or set offline_alerts = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service. The PC offline alerts of this app, the next step, work without them.</string>
+    <string name="tour_offline_alerts_where">These notifications reach the web app on this phone, as push alerts. On the PC: Features in soos-gui, or set offline_alerts = false in ~/.config/soos/remote.toml, then run: systemctl --user restart soos-remote.service. The Offline history card of this app lists the recorded periods. The PC offline alerts of this app, the next step, work without them.</string>
     <string name="tour_pc_offline_alerts_title">PC offline alerts</string>
     <string name="tour_pc_offline_alerts_text">This app can check your PC every 15 minutes in the background. You get one alert after two failed checks in a row, and one more when the PC is back online. It is off until you turn it on, and only then asks to show notifications.</string>
     <string name="tour_pc_offline_alerts_off">Off: this app makes no background check and shows no PC alert; nothing changes on the PC.</string>

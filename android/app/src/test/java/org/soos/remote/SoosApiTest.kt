@@ -9,9 +9,12 @@ import org.junit.Test
 import org.soos.remote.net.AlertRecord
 import org.soos.remote.net.AlertsView
 import org.soos.remote.net.ApiResult
+import org.soos.remote.net.BatteryView
 import org.soos.remote.net.HttpRequest
 import org.soos.remote.net.HttpResponse
 import org.soos.remote.net.HttpTransport
+import org.soos.remote.net.OfflineInterval
+import org.soos.remote.net.OfflineView
 import org.soos.remote.net.SoosApi
 
 class SoosApiTest {
@@ -233,5 +236,94 @@ class SoosApiTest {
         assertEquals(ApiResult.Unreachable, api.alerts())
         assertEquals(ApiResult.Unreachable, api.alerts())
         assertEquals("network error", ApiResult.Unreachable, api.alerts())
+    }
+
+    // --- battery and offline history (GitHub #439, matrix ANA24) ----------------------------
+
+    private val batteryJson = """{"state":"present","percent":64,"charge":"charging","external_power":true}"""
+    private val offlineJson =
+        """{"state":"active","reason":null,"network_monitor":"active","intervals":[""" +
+            """{"reason":"wifi_disabled","start_unix_ms":1700000000000,"end_unix_ms":1700000900000,"duration_ms":900000}]}"""
+
+    @Test
+    fun batteryAndOfflineArePlainGets() {
+        val fake = Fake(ArrayDeque(listOf(answer(200, batteryJson), answer(200, offlineJson))))
+        val api = SoosApi(origin, fake)
+        assertEquals(ApiResult.Ok(BatteryView("present", 64, "charging", true)), api.battery())
+        assertEquals(
+            ApiResult.Ok(
+                OfflineView(
+                    "active",
+                    null,
+                    "active",
+                    listOf(OfflineInterval("wifi_disabled", 1700000000000, 1700000900000, 900000)),
+                ),
+            ),
+            api.offline(),
+        )
+        assertEquals(
+            listOf("$origin/api/battery", "$origin/api/offline"),
+            fake.requests.map { it.url },
+        )
+        assertEquals("/api/battery", SoosApi.BATTERY_PATH)
+        assertEquals("/api/offline", SoosApi.OFFLINE_PATH)
+        for (request in fake.requests) {
+            assertEquals("GET", request.method)
+            assertEquals(listOf("Accept"), request.headers.map { it.first })
+            assertEquals("application/json", request.header("Accept"))
+            assertNull(request.header("Origin"))
+            assertNull(request.header("X-Soos-Action"))
+            assertNull(request.header("Cookie"))
+            assertNull(request.body)
+        }
+    }
+
+    @Test
+    fun batteryAndOfflineSendTheSessionCookieAndDropItOnLoginRequired() {
+        val fake = Fake(
+            ArrayDeque(
+                listOf(
+                    answer(200, """{"result":"logged_in"}""", listOf("__Host-soos_session=$token; Path=/; Secure")),
+                    answer(200, batteryJson),
+                    answer(200, offlineJson),
+                    answer(403, """{"result":"login_required"}"""),
+                    answer(403, """{"result":"login_required"}"""),
+                ),
+            ),
+        )
+        val api = SoosApi(origin, fake)
+        assertEquals(ApiResult.Ok("logged_in"), api.loginVerify("""{"id":"x"}"""))
+        assertTrue(api.battery() is ApiResult.Ok)
+        assertTrue(api.offline() is ApiResult.Ok)
+        assertEquals("__Host-soos_session=$token", fake.requests[1].header("Cookie"))
+        assertEquals("__Host-soos_session=$token", fake.requests[2].header("Cookie"))
+        assertEquals(1, fake.requests[2].headerCount("Cookie"))
+        assertEquals(ApiResult.Refused(403, "login_required"), api.battery())
+        assertFalse("login_required drops the session", api.hasSession)
+        assertEquals(ApiResult.Refused(403, "login_required"), api.offline())
+        assertNull("no session is sent once dropped", fake.requests[4].header("Cookie"))
+    }
+
+    @Test
+    fun batteryAndOfflineRefusalsAndUnreadableBodies() {
+        val fake = Fake(
+            ArrayDeque(
+                listOf(
+                    answer(503, """{"result":"unavailable"}"""),
+                    answer(200, """{"state":"exploded","percent":null,"charge":null,"external_power":null}"""),
+                    answer(200, "<html>"),
+                    answer(200, """{"state":"active","reason":null,"network_monitor":"active","intervals":"none"}"""),
+                    answer(500, "<html>"),
+                ),
+            ),
+        )
+        val api = SoosApi(origin, fake)
+        assertEquals(ApiResult.Refused(503, "unavailable"), api.battery())
+        assertEquals(ApiResult.Unreachable, api.battery())
+        assertEquals(ApiResult.Unreachable, api.offline())
+        assertEquals(ApiResult.Unreachable, api.offline())
+        assertEquals(ApiResult.Refused(500, null), api.offline())
+        assertEquals("network error", ApiResult.Unreachable, api.battery())
+        assertEquals("network error", ApiResult.Unreachable, api.offline())
     }
 }
