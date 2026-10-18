@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-18
 - **Target Branch**: `chore/companion-wording` (PR #424, after the rebase onto `origin/main`)
-- **Base (merge-base)**: `144d409` (`test(gui): deflake the held-store-lock enroll task test (#426)`)
-- **Reviewed-Diff-Fingerprint**: `a5e3984f9959db07e6f4d364a8e913da576411fc30b804dfe6126f29132850c4`
+- **Base (merge-base)**: `3a5ab6a` (`feat(android): add the first-run feature tour to the native app (#428)`)
+- **Reviewed-Diff-Fingerprint**: `65faef9c79fac98d17f62d26879ebdd67562c05e6b628f57a0018ca904966cb1`
 - **Audited Files**: `AI/ARCHITECTURE.md`, `AI/VERIFICATION_MATRIX.md`,
   `AI/architect_spec_companion_wording.md`, `AI/auditor_constraints_companion_wording.md`,
   `AI/walkthroughs/228_companion_wording.md`, `Docs/PACKAGING_AND_PROVISIONING.md`,
@@ -12,97 +12,106 @@
 
 ## 1. Executive Summary
 
-Independent re-review after the branch was rebased from `74782b8` onto `144d409`. The change is
-wording only: the `setup.sh` help paragraph and closing summary line, two doc sentences, two
-`AI/ARCHITECTURE.md` row headers and the README security sentence now match the setup defaults and
-the real `soos-gui` switches; a new std-only invariant module (CWD1–CWD5) pins that wording.
+Independent re-review after the branch was rebased from `74782b8` onto `3a5ab6a`, which adds
+#426 (GUI test deflake), #422 (Android alerts acknowledgement feedback) and #428 (native Android
+feature tour). The change stays wording only: the `setup.sh` help paragraph and closing summary
+line, the packaging defaults sentence, the `allow_funnel` example comment, two `AI/ARCHITECTURE.md`
+row headers and the README security sentence now match the setup defaults and the real `soos-gui`
+switches; a new std-only invariant module (CWD1–CWD5) pins that wording.
 
-Rebase integrity: `git range-diff 74782b8..cd6a34b 144d409..HEAD` shows the content commit
-`8d26a97` differing from `90b4cce` only in the matrix hunk context (the new tail rows DGS1/DGS2 of
-#426 instead of PTR9–PTR11); the review-record commits differ only in
-`AI/candid_review_report.md`. A line-by-line comparison of every added and removed line of
-`git diff 74782b8 cd6a34b` and `git diff 144d409 HEAD` (report excluded) is identical (empty
-`diff`). The branch's own changes are therefore unchanged by the rebase.
+Rebase integrity, checked mechanically:
 
-Interaction with what main gained since the old base (#426 only: `crates/gui/tests/store_task_tests.rs`,
-`Docs/GUI_APPLICATION.md`, walkthrough 226, matrix DGS1/DGS2): no file of #426 is touched by this
-branch except the matrix, where the new `companion-wording` component is appended after the DGS
-rows; the CWD2 premise (`RemoteSwitch::key` in `crates/gui/src/feature_control.rs`) is unaffected
-by #426, which changes only a test helper. The other open PRs of the train (#422 walkthrough 227,
-#428) use different walkthrough numbers; no collision with 228.
+- `git range-diff 74782b8..origin/chore/companion-wording 3a5ab6a..HEAD`: the content commit
+  differs only in context lines (the matrix tail now ends with main's ATR rows, and the
+  `plan_evaluator_report.md` it replaces is now #428's instead of #409's).
+- For every file the branch touches, the sequence of added and removed lines of
+  `git diff -U0 74782b8 <old tip>` equals that of `git diff -U0 3a5ab6a 5417839` (all files
+  except the excluded plan evaluator report, whose content is byte-identical to the old tip).
+- The branch files not touched by main (`ARCHITECTURE.md`, spec, constraints, walkthrough 228,
+  packaging doc, `README.md`, `setup.sh`, the contract module, `plan_evaluator_report.md`) are
+  byte-identical between the old and new tips. The only conflict was the matrix tail.
 
-No CRITICAL, MAJOR or MINOR finding.
+No claim of this branch is contradicted by #428 or #422 (see Logic & Architecture). No finding at
+MAJOR or above.
 
 ## 2. Test Changes
 
-Mechanical listing on the frozen patch:
+Mechanical listing on `target/candid_diff.patch`:
 
-- Test files touched: `tests/invariants/src/companion_wording_contract.rs` (new file) and
-  `tests/invariants/src/lib.rs` (one new `#[cfg(all(test, unix))] mod companion_wording_contract;`
-  with its doc comment, pure addition).
-- Removed/changed checks (`^-` with assert/test markers): one hit, line 17, the removed
-  `| Unlock (opt-in) |` row of `AI/ARCHITECTURE.md`, matched only because its text contains the
-  word "assertion". It is documentation, not a test. No test assertion of `origin/main` is removed
-  or changed.
-- New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance, epsilon): none.
-- Inline `mod tests` changes: none.
+- Test files touched: `tests/invariants/src/companion_wording_contract.rs` (new, 5 tests) and
+  `tests/invariants/src/lib.rs` (one `mod companion_wording_contract;` declaration added, nothing
+  removed).
+- Removed or changed checks (`^-.*assert|#[test]...`): one hit, patch line 17, the removed
+  `AI/ARCHITECTURE.md` "Unlock (opt-in)" row, which matches only the word "assertion" in prose.
+  It is not a test. No pre-existing assertion, test or test module changed.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
+- Inline test modules (`mod tests`): none touched.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Claim check against code at `144d409`: `RemoteSwitch::key` maps exactly `allow_unlock`,
-  `allow_funnel`, `push_notifications`, `camera_view`, `offline_alerts` (no `password_alerts`), so
-  "the failed-password alerts have no switch there" is true. `keys_to_clear` clears
-  `camera_view_funnel` with Funnel or camera view and `offline_alerts` with Push, matching the new
-  README sentence and the help's "also turns off the features that need them". `FEATURE_PREREQS`
-  in `setup.sh` (`push_notifications` needs `password_alerts`, `offline_alerts` needs
-  `push_notifications`) backs "set password_alerts, push_notifications and offline_alerts to false"
-  and `--password-alerts off` cascading. PASS.
-- The ARCHITECTURE Unlock cell keeps `default \`false\``; only the two header cells change. PASS.
-- Tried to break CWD1: a future sentence such as "every feature can be switched off in soos-gui"
-  is flagged; one with "except" or "no switch" is accepted by design (CWD5 covers both). The unit
-  splitter splits on ". " and ";", so the old wrapped heredoc sentence is still flagged (CWD5 last
-  assertion). PASS.
-- Tried to break CWD3: a second `| Unlock` row would fail the exactly-one assertion rather than
-  silently pass. PASS.
+
+- Claims checked against the code: `RemoteSwitch::key` (`crates/gui/src/feature_control.rs`)
+  maps Unlock, Funnel, Push, CameraView and OfflineAlerts only, with no `password_alerts` arm, so
+  the setup text "the failed-password alerts have no switch there" is true. `keys_to_clear` turns
+  off `camera_view_funnel` with Funnel or the camera view and `offline_alerts` with Push, matching
+  the README "also sets ... to `false`" sentence and the setup "also turns off the features that
+  need them".
+- Conflict with #428 (native Android tour): no branch-added line says any app has no tour. The
+  only branch line naming a tour is the README "feature switches of the first-run tour" in
+  `soos-gui`, which is pre-existing text rewrapped and names the `soos-gui` tour. #428's
+  `strings.xml` and `app.js` failed-password step say to turn the alerts off in `remote.toml`, not
+  in `soos-gui`, which agrees with this branch. `android_tour_contract` ATR8 (§2k no longer says the
+  app has no tour) passes on the rebased tree.
+- Conflict with #422 (alerts acknowledgement feedback): the branch says nothing about the
+  acknowledgement flow; no overlap.
+- The spec's out-of-scope note ("the Android app's own opt-in heartbeat wording") stays accurate:
+  #428 still calls the PC offline alerts the app's own opt-in check.
+- Matrix: one `companion-wording` component header, CWD1–CWD5 once each, no duplicate row id in
+  the whole file, main's ATR1–ATR9 and AAF1–AAF4 present once and unchanged, the new component
+  appended after ATR9.
 
 ### PAM Concurrency & Deadlines
-- No file under `crates/pam` or any runtime crate changes. Not applicable. PASS.
+
+No `crates/pam` change. PASS (not applicable).
 
 ### Panic Safety & Fail-Closed
-- No production Rust changes; the only Rust is a test module with an explicit, reasoned
-  `#![allow(clippy::unwrap_used, ...)]` like the sibling contract modules. PASS.
+
+No production Rust change. The only shell change is text inside the `usage()` heredoc and one
+double-quoted `info` string: no `$`, backtick or unescaped quote added, so `--help` does no
+expansion. PASS.
 
 ### Test Integrity & Anti-Weakening
-- New tests are red against the old wording (CWD1, CWD3, CWD4 red on `74782b8` per the
-  walkthrough; consistent with the needles, e.g. the old summary line lacks `--password-alerts off`).
-  CWD2 fails on purpose if a `password_alerts` switch is ever added. No existing assertion changed.
-- Re-run: `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/companion-wording
-  CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3
-  cargo test --locked -p soos-invariants -- --test-threads=3` on the rebased tree: 776 passed,
-  0 failed, 0 ignored; all five `companion_wording_contract` tests pass; the setup (SET*) and README
-  (RDM*) contracts stay green. PASS.
-- `AI/VERIFICATION_MATRIX.md`: one `companion-wording` component heading, CWD1–CWD5 each appear
-  once; no duplicated row id in the matrix. `AI/DECISIONS.md` is not touched by this branch (no
-  ADR, wording only) and has no duplicated heading. PASS.
+
+The CWD tests read the real files and would fail on the old wording (walkthrough 228 records each
+red run; CWD5 checks the detector on synthetic old and new text). CWD2 ties the setup claim to
+the GUI code, so a future `password_alerts` switch breaks the test instead of leaving the help
+wrong. No existing test weakened. PASS.
 
 ### Memory, Bounds & Secrets
-- No allocation, I/O or secret-handling code changes; the new text names no password, identity or
-  key. PASS.
+
+No runtime code, no new log line, no credential or biometric data. PASS.
 
 ### Supply Chain & Automation
-- `scripts/setup.sh` changes only text: the unquoted `usage()` heredoc gains no `$`, backtick or
-  `$(...)`; the closing `info` string stays inside double quotes with no unescaped `"`.
-  `bash -n scripts/setup.sh` passes and `--help` renders the new paragraph. No `Cargo.*`,
-  `deny.toml`, `.github/` or `.githooks/` change. PASS.
+
+`scripts/setup.sh` changes text only; no new command, dependency, workflow or action. PASS.
 
 ### English-Only Policy
-- All new text, identifiers and commit subjects are English. PASS.
+
+All added text is English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- None.
+- **[SUGGESTION]** `README.md:297` — with three tours now (`soos-gui`, web app, native Android
+  app after #428), "the feature switches of the first-run tour" could say "the `soos-gui`
+  first-run tour" for clarity. The sentence already says "in `soos-gui`", so it is not wrong.
+- **[SUGGESTION]** `README.md:296` — "offline alerts" here are the server `offline_alerts` key;
+  the Android app's own "PC offline alerts" switch (in the app's Settings) is a different feature.
+  An optional follow-up could name both to avoid confusion.
 
 ## 5. Final Verdict
+
+Tests: `cargo test --locked -p soos-invariants -- --test-threads=4` on the rebased tree, 787
+passed, 0 failed, 0 ignored.
 
 **VERDICT: APPROVED**
