@@ -85,6 +85,12 @@ readonly REMOTE_CONFIG_MARKER="# Managed by scripts/setup.sh (soos-setup): re-ru
 # daemon side is written, and reported done, only when <sysconfdir>/soos/daemon.toml is
 # this file; with another --sysconfdir it is a printed manual step.
 readonly DAEMON_READ_CONFIG="/etc/soos/daemon.toml"
+# The only lock-widget kill switch the GNOME extension reads (packaging/gnome-shell/
+# soos-lockscreen@soos/extension.js KILL_SWITCH_PATH; no other component reads it). The
+# lock-widget step is reported done only when <sysconfdir>/soos/lockwidget.disable is this
+# file; otherwise setup still records the request there but reports it "not applied" and
+# prints the command for this file (GitHub #451, same rule as DAEMON_READ_CONFIG).
+readonly LOCK_WIDGET_READ_FLAG="/etc/soos/lockwidget.disable"
 readonly DAEMON_PREVIEW_MARKER="# Written by scripts/setup.sh (soos-setup): live camera view of the phone companion."
 # The boolean keys of remote.toml, in the order setup writes them (prerequisites first).
 readonly COMPANION_KEYS=(allow_funnel allow_unlock password_alerts push_notifications
@@ -176,7 +182,10 @@ Options:
                            creates <sysconfdir>/soos/lockwidget.disable (the
                            GNOME card is off for every user and setup enables
                            and prints no locker adapter), on removes it; without
-                           it the current state is kept and reported
+                           it the current state is kept and reported; applied
+                           only when <sysconfdir> is /etc (the GNOME extension
+                           reads /etc/soos/lockwidget.disable), otherwise the
+                           exact command is printed and reported not applied
   --skip-packages          Do not install missing packages (the command is printed)
   --reinstall              Run scripts/install.sh even when the install looks complete
   --distro <FAMILY>        Package family: debian, fedora or arch (default:
@@ -992,8 +1001,34 @@ presence_report() {
     fi
 }
 
+# True when <sysconfdir>/soos/lockwidget.disable is not the file the GNOME extension reads
+# (a non-default --sysconfdir): the flag step is then never reported as applied.
+lock_widget_flag_elsewhere() {
+    [[ "${LOCK_WIDGET_FLAG}" != "${LOCK_WIDGET_READ_FLAG}" ]]
+}
+
+# "not applied: ..." with the exact administrator command that makes the extension see
+# the requested state ($1: off or on).
+lock_widget_not_applied() {
+    local cmd="sudo rm -f ${LOCK_WIDGET_READ_FLAG}"
+    [[ "$1" == off ]] && cmd="sudo touch ${LOCK_WIDGET_READ_FLAG}"
+    printf 'not applied: the GNOME extension reads %s, not %s (--sysconfdir); as an administrator run: %s' \
+        "${LOCK_WIDGET_READ_FLAG}" "${LOCK_WIDGET_FLAG}" "${cmd}"
+}
+
+# The state requested for this run: off or on (an existing flag is kept without an option).
+lock_widget_requested() {
+    if lock_widget_will_be_off; then printf 'off'; else printf 'on'; fi
+}
+
 lock_widget_report() {
-    if [[ -e "${LOCK_WIDGET_FLAG}" || -L "${LOCK_WIDGET_FLAG}" ]]; then
+    if lock_widget_flag_elsewhere; then
+        if [[ -e "${LOCK_WIDGET_FLAG}" || -L "${LOCK_WIDGET_FLAG}" ]]; then
+            printf 'off (%s present; --lock-widget on turns it on), %s' "${LOCK_WIDGET_FLAG}" "$(lock_widget_not_applied off)"
+        else
+            printf 'on (default; --lock-widget off turns it off), %s' "$(lock_widget_not_applied on)"
+        fi
+    elif [[ -e "${LOCK_WIDGET_FLAG}" || -L "${LOCK_WIDGET_FLAG}" ]]; then
         printf 'off (%s present: no GNOME card; --lock-widget on turns it on)' "${LOCK_WIDGET_FLAG}"
     else
         printf 'on (default; --lock-widget off turns it off)'
@@ -1065,7 +1100,11 @@ print_lockscreen_plan() {
         return 0
     fi
     if lock_widget_will_be_off; then
-        plan "lock screen" "skipped (lock widget off)" "${LOCK_WIDGET_FLAG}: no GNOME card, and setup enables and prints no locker adapter"
+        if lock_widget_flag_elsewhere; then
+            plan "lock screen" "skipped (lock widget off)" "setup enables and prints no locker adapter; the GNOME card: $(lock_widget_not_applied off)"
+        else
+            plan "lock screen" "skipped (lock widget off)" "${LOCK_WIDGET_FLAG}: no GNOME card, and setup enables and prints no locker adapter"
+        fi
         return 0
     fi
     for locker in "${LOCKERS[@]}"; do
@@ -1093,7 +1132,13 @@ print_lockscreen_lines() {
     local locker
     if lock_widget_will_be_off; then
         info "  Lock screen: off (${LOCK_WIDGET_FLAG}); the swaylock-plugin widget and the hyprlock label do not read it: remove the --command argument or the label to turn them off."
+        if lock_widget_flag_elsewhere; then
+            warn "  Lock screen (GNOME card): $(lock_widget_not_applied off)"
+        fi
         return 0
+    fi
+    if [[ "${LOCK_WIDGET}" == on ]] && lock_widget_flag_elsewhere; then
+        warn "  Lock screen (GNOME card): $(lock_widget_not_applied on)"
     fi
     for locker in "${LOCKERS[@]}"; do
         case "${locker}" in
@@ -1127,7 +1172,7 @@ run_gnome_enable_step() {
         return 0
     fi
     if run_bounded "${QUERY_TIMEOUT_S}" gnome-extensions enable "${GNOME_EXTENSION_UUID}" >/dev/null 2>&1; then
-        printf '[DONE] lock screen (GNOME): %s enabled for %s; the card shows from the next lock\n' \
+        printf '[DONE] lock screen (GNOME): %s enabled for %s; the card shows from the next lock once GNOME Shell has loaded it (if it does not, log out and back in)\n' \
             "${GNOME_EXTENSION_UUID}" "${TARGET_USER}"
     else
         printf '[SKIP] lock screen (GNOME): GNOME Shell has not loaded %s yet (it reads system extensions at login): log out and back in, then run: %s\n' \
@@ -1851,10 +1896,18 @@ phase_lock_widget() {
         error "${LOCK_WIDGET_FLAG} is a symbolic link; refusing to follow it"
         return 1
     fi
+    # A flag the extension never reads (non-default --sysconfdir) is still kept as setup's
+    # record of the request, but the step is reported "not applied" with the exact command.
+    local elsewhere=false
+    lock_widget_flag_elsewhere && elsewhere=true
     case "${LOCK_WIDGET}" in
         off)
             if [[ -e "${LOCK_WIDGET_FLAG}" ]]; then
-                printf '[DONE] lock widget: already done (off)\n'
+                if [[ "${elsewhere}" == true ]]; then
+                    printf '[SKIP] lock widget: off in %s, %s\n' "${LOCK_WIDGET_FLAG}" "$(lock_widget_not_applied off)"
+                else
+                    printf '[DONE] lock widget: already done (off)\n'
+                fi
                 return 0
             fi
             ensure_soos_conf_dir || return 1
@@ -1862,19 +1915,35 @@ phase_lock_widget() {
             JOURNAL+=(lock_widget_flag_created)
             LW_FLAG_CREATED_NOW=true
             chmod 0644 -- "${LOCK_WIDGET_FLAG}" || return 1
-            printf '[DONE] lock widget: turned off (%s)\n' "${LOCK_WIDGET_FLAG}"
+            if [[ "${elsewhere}" == true ]]; then
+                printf '[SKIP] lock widget: %s created, %s\n' "${LOCK_WIDGET_FLAG}" "$(lock_widget_not_applied off)"
+            else
+                printf '[DONE] lock widget: turned off (%s)\n' "${LOCK_WIDGET_FLAG}"
+            fi
             ;;
         on)
             if [[ ! -e "${LOCK_WIDGET_FLAG}" ]]; then
-                printf '[DONE] lock widget: already done (on)\n'
+                if [[ "${elsewhere}" == true ]]; then
+                    printf '[SKIP] lock widget: on in %s, %s\n' "${LOCK_WIDGET_FLAG}" "$(lock_widget_not_applied on)"
+                else
+                    printf '[DONE] lock widget: already done (on)\n'
+                fi
                 return 0
             fi
             rm -f -- "${LOCK_WIDGET_FLAG}" || return 1
             JOURNAL+=(lock_widget_flag_removed)
-            printf '[DONE] lock widget: turned on (%s removed)\n' "${LOCK_WIDGET_FLAG}"
+            if [[ "${elsewhere}" == true ]]; then
+                printf '[SKIP] lock widget: %s removed, %s\n' "${LOCK_WIDGET_FLAG}" "$(lock_widget_not_applied on)"
+            else
+                printf '[DONE] lock widget: turned on (%s removed)\n' "${LOCK_WIDGET_FLAG}"
+            fi
             ;;
         *)
-            printf '[DONE] lock widget: %s\n' "$(lock_widget_report)"
+            if [[ "${elsewhere}" == true ]]; then
+                printf '[SKIP] lock widget: %s\n' "$(lock_widget_report)"
+            else
+                printf '[DONE] lock widget: %s\n' "$(lock_widget_report)"
+            fi
             ;;
     esac
 }
@@ -2252,19 +2321,22 @@ case "${PRESENCE}" in
         plan presence "already done" "$(presence_report)"
         ;;
 esac
+# With a non-default --sysconfdir every lock-widget plan line also says "not applied".
+LW_PLAN_NOTE=""
+lock_widget_flag_elsewhere && LW_PLAN_NOTE=", $(lock_widget_not_applied "$(lock_widget_requested)")"
 case "${LOCK_WIDGET}" in
     off)
         if [[ -e "${LOCK_WIDGET_FLAG}" ]]; then
-            plan "lock widget" "already done" "off"
+            plan "lock widget" "already done" "off${LW_PLAN_NOTE}"
         else
-            plan "lock widget" "will run" "create ${LOCK_WIDGET_FLAG}"
+            plan "lock widget" "will run" "create ${LOCK_WIDGET_FLAG}${LW_PLAN_NOTE}"
         fi
         ;;
     on)
         if [[ -e "${LOCK_WIDGET_FLAG}" ]]; then
-            plan "lock widget" "will run" "remove ${LOCK_WIDGET_FLAG}"
+            plan "lock widget" "will run" "remove ${LOCK_WIDGET_FLAG}${LW_PLAN_NOTE}"
         else
-            plan "lock widget" "already done" "on"
+            plan "lock widget" "already done" "on${LW_PLAN_NOTE}"
         fi
         ;;
     *)

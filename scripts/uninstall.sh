@@ -364,13 +364,22 @@ else
     warn "Run 'authselect select <profile> [features] --force' and remove it manually."
 fi
 
+# <prefix>/share/soos holds the Arch PAM snippet and the hyprlock snippet. A symbolic link in
+# its place is never followed: nothing below it is removed (GitHub #451).
+SOOS_SHARE_DIR="${DESTDIR}${PREFIX}/share/soos"
+SOOS_SHARE_LINKED=false
+if [[ -L "${SOOS_SHARE_DIR}" ]]; then
+    SOOS_SHARE_LINKED=true
+    warn "${SOOS_SHARE_DIR} is a symbolic link: not followed, nothing below it is removed."
+fi
+
 # Clean up the Arch snippet: current location (GitHub #209) and the legacy
 # /etc/pam.d/soos.snippet shipped by older releases.
-ARCH_SNIPPET_DIR="${DESTDIR}${PREFIX}/share/soos/pam"
-if [[ -f "${ARCH_SNIPPET_DIR}/system-auth.snippet" ]]; then
+ARCH_SNIPPET_DIR="${SOOS_SHARE_DIR}/pam"
+if [[ "${SOOS_SHARE_LINKED}" == false && ! -L "${ARCH_SNIPPET_DIR}" && -f "${ARCH_SNIPPET_DIR}/system-auth.snippet" ]]; then
     rm -f "${ARCH_SNIPPET_DIR}/system-auth.snippet"
     rmdir "${ARCH_SNIPPET_DIR}" 2>/dev/null || true
-    rmdir "${DESTDIR}${PREFIX}/share/soos" 2>/dev/null || true
+    rmdir "${SOOS_SHARE_DIR}" 2>/dev/null || true
     success "Removed Arch PAM snippet."
 fi
 if [[ -f "${TARGET_PAM_D}/soos.snippet" ]]; then
@@ -458,13 +467,15 @@ elif [[ -d "${GNOME_EXT_DIR}" ]]; then
         warn "Kept ${GNOME_EXT_DIR}: it holds files soos did not install."
     fi
 fi
-LOCKSCREEN_SHARE_DIR="${DESTDIR}${PREFIX}/share/soos/lockscreen"
-if [[ -f "${LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf" && ! -L "${LOCKSCREEN_SHARE_DIR}" ]]; then
-    rm -f "${LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf"
-    success "Removed the hyprlock snippet."
+LOCKSCREEN_SHARE_DIR="${SOOS_SHARE_DIR}/lockscreen"
+if [[ "${SOOS_SHARE_LINKED}" == false ]]; then
+    if [[ -f "${LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf" && ! -L "${LOCKSCREEN_SHARE_DIR}" ]]; then
+        rm -f "${LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf"
+        success "Removed the hyprlock snippet."
+    fi
+    [[ -L "${LOCKSCREEN_SHARE_DIR}" ]] || rmdir "${LOCKSCREEN_SHARE_DIR}" 2>/dev/null || true
+    rmdir "${SOOS_SHARE_DIR}" 2>/dev/null || true
 fi
-rmdir "${LOCKSCREEN_SHARE_DIR}" 2>/dev/null || true
-rmdir "${DESTDIR}${PREFIX}/share/soos" 2>/dev/null || true
 
 for cand in "${PAM_CANDIDATES[@]}"; do
     if [[ -f "${cand}/pam_soos.so" ]]; then

@@ -74,9 +74,13 @@ keeps it). The installer enables nothing. `scripts/setup.sh` then opts you in, o
   desktop the command is printed instead;
 - **swaylock-plugin** and **hyprlock**: setup prints the exact line (§4, §5) and never edits a
   locker configuration;
-- `--lock-widget off` creates `/etc/soos/lockwidget.disable` (no GNOME card for any user, nothing
-  enabled or printed), `--lock-widget on` removes it, and without the option the current state is
-  kept (`Docs/PACKAGING_AND_PROVISIONING.md` §3.0).
+- `--lock-widget off` creates `/etc/soos/lockwidget.disable` (no GNOME card for any user; setup
+  enables no adapter and prints no locker line, only an off notice saying that the swaylock-plugin
+  widget and the hyprlock label do not read the file), `--lock-widget on` removes it, and without
+  the option the current state is kept (`Docs/PACKAGING_AND_PROVISIONING.md` §3.0). The extension
+  reads only `/etc/soos/lockwidget.disable`: with another `--sysconfdir` setup still records the
+  request in `<sysconfdir>/soos/lockwidget.disable` but reports the step "not applied" and prints
+  the exact `sudo touch` or `sudo rm -f` command for `/etc/soos/lockwidget.disable` (GitHub #451).
 
 **Shipped build.** Every installer path (`install.sh --build`, `setup.sh`, the PKGBUILD, the Debian
 rules and the RPM spec) runs `cargo build --release --locked --workspace`. That whole-workspace build
