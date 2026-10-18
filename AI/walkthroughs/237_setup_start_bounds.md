@@ -7,7 +7,7 @@
 
 ## 1. Context & Objectives
 
-Three follow-ups of the setup work were still open on `main` (3f76090):
+Three follow-ups of the setup work were still open on `main` (3f76090; rebased onto 1043be6 after #445 merged):
 
 1. **Daemon start bounds.** `setup.sh` wrapped every `systemctl start|restart|stop|try-restart soos-daemon.service` in `run_bounded "${QUERY_TIMEOUT_S}"` (10 s). `packaging/soos-daemon.service` is `Type=notify` with `TimeoutStartSec=60`: `systemctl start` returns only after `READY=1`, and model verification and inference warm-up run before that point. A start slower than 10 s was killed by setup even though systemd would still have accepted it. The `[preview]` step then removed the `daemon.toml` it had just created and reported a failure. The enrollment hand-off reported `did not start again`.
 2. **Tailscale print rule.** SET3 (`test_set_s3_no_pam_tailscale_remote_or_network_lock_action`) and the `quoted_at` helper of `setup_user_phase_contract.rs` decide "printed, not run" by counting quote characters before the word. A `"$(tailscale serve ...)"` has one `"` before the word, so it counted as a printed message.
@@ -22,9 +22,9 @@ Three follow-ups of the setup work were still open on `main` (3f76090):
 ### Plan self-check (plan-evaluator)
 
 - *Restart = stop + start.* The unit sets no `TimeoutStopSec`, so a stop that hangs falls back to systemd's `DefaultTimeoutStopSec` (90 s by default). The 30 s margin covers a graceful stop: the daemon exits on SIGTERM. It does not cover a stop that hangs. In that case `timeout` ends the `systemctl` client, the systemd job continues, and setup reports the failure. This is the same fail-closed path as before, reached later. Adding `TimeoutStopSec` to the unit was left out of scope because it would change the shipped unit and its own contracts.
-- *Total worst case.* The camera-view step can run two restarts and two readiness waits: 2 × (90 + 2 kill grace) + 2 × ~37.5 s ≈ 260 s. It is still bounded. Before, the bound was 10 s, but it gave the wrong answer.
+- *Total worst case.* The camera-view step can run two restarts and two readiness waits: one `--check-config` run (≤ 10 s, #445) + 2 × (90 + 2 kill grace) + 2 × ~37.5 s ≈ 270 s. It is still bounded. Before, the bound was 10 s, but it gave the wrong answer.
 - *Docker job `setup-root-preview`.* Case C2 makes the restart fail at once (the stand-in daemon refuses the config). It does not depend on the 10 s bound, so this change does not lengthen it.
-- *Existing contracts.* `test_set_daemon_stop_marker_cleared_only_after_restart` still finds `systemctl start "${UNIT}"` in `phase_enrollment`. No other test names `QUERY_TIMEOUT_S`.
+- *Existing contracts.* `test_set_daemon_stop_marker_cleared_only_after_restart` still finds `systemctl start "${UNIT}"` in `phase_enrollment`. After the rebase onto #445, `daemon_check_config_contract` (DCC8, DCC9) also names `QUERY_TIMEOUT_S` for the `--check-config` call, which keeps that 10 s bound; its DCC8 harness now also reads `UNIT_START_TIMEOUT_S` from the script (setup-only change approved by the owner on 2026-10-18, no assertion changed).
 
 ## 3. Tester Contract (written first)
 
