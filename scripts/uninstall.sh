@@ -438,6 +438,34 @@ rm -f "${TARGET_BIN_DIR}/soos-admin"
 rm -f "${TARGET_BIN_DIR}/soos-enroll"
 rm -f "${TARGET_BIN_DIR}/soos-gui"
 
+# 3b. Lock-screen adapters (GitHub #432, PR 6 of #352): the two programs, exactly the three
+#     files of the GNOME Shell extension (a symbolic link is never followed) and the hyprlock
+#     snippet. The kill switch <sysconfdir>/soos/lockwidget.disable is configuration and is kept,
+#     like presence.disable. A GNOME user who enabled the extension keeps that per-user
+#     setting; with the files gone the shell lists the extension no more.
+rm -f "${TARGET_BIN_DIR}/soos-lockstatus"
+rm -f "${TARGET_BIN_DIR}/soos-lock-widget"
+GNOME_EXT_DIR="${DESTDIR}${PREFIX}/share/gnome-shell/extensions/soos-lockscreen@soos"
+if [[ -L "${GNOME_EXT_DIR}" ]]; then
+    warn "${GNOME_EXT_DIR} is a symbolic link: not followed, left in place."
+elif [[ -d "${GNOME_EXT_DIR}" ]]; then
+    for ext_file in metadata.json extension.js stylesheet.css; do
+        rm -f "${GNOME_EXT_DIR}/${ext_file}"
+    done
+    if rmdir "${GNOME_EXT_DIR}" 2>/dev/null; then
+        success "Removed the GNOME Shell lock-screen extension ${GNOME_EXT_DIR}"
+    else
+        warn "Kept ${GNOME_EXT_DIR}: it holds files soos did not install."
+    fi
+fi
+LOCKSCREEN_SHARE_DIR="${DESTDIR}${PREFIX}/share/soos/lockscreen"
+if [[ -f "${LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf" && ! -L "${LOCKSCREEN_SHARE_DIR}" ]]; then
+    rm -f "${LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf"
+    success "Removed the hyprlock snippet."
+fi
+rmdir "${LOCKSCREEN_SHARE_DIR}" 2>/dev/null || true
+rmdir "${DESTDIR}${PREFIX}/share/soos" 2>/dev/null || true
+
 for cand in "${PAM_CANDIDATES[@]}"; do
     if [[ -f "${cand}/pam_soos.so" ]]; then
         if [[ "${PAM_ROLLBACK_INCOMPLETE}" = true ]]; then

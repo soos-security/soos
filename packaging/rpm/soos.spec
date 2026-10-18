@@ -52,6 +52,17 @@ install -d -m 0755 %{buildroot}%{_bindir}
 install -m 0755 target/release/soos-admin %{buildroot}%{_bindir}/soos-admin
 install -m 0755 target/release/soos-enroll %{buildroot}%{_bindir}/soos-enroll
 install -m 0755 target/release/soos-gui %{buildroot}%{_bindir}/soos-gui
+# Lock-screen adapters (GitHub #432, PR 6 of #352): the workspace build above is the shipped
+# widget variant (ADR 2026-10-18).
+install -m 0755 target/release/soos-lockstatus %{buildroot}%{_bindir}/soos-lockstatus
+install -m 0755 target/release/soos-lock-widget %{buildroot}%{_bindir}/soos-lock-widget
+install -d -m 0755 %{buildroot}%{_datadir}/gnome-shell/extensions/soos-lockscreen@soos
+for f in metadata.json extension.js stylesheet.css; do
+    install -m 0644 packaging/gnome-shell/soos-lockscreen@soos/${f} \
+        %{buildroot}%{_datadir}/gnome-shell/extensions/soos-lockscreen@soos/${f}
+done
+install -d -m 0755 %{buildroot}%{_datadir}/soos/lockscreen
+install -m 0644 packaging/lockscreen/hyprlock-soos.conf %{buildroot}%{_datadir}/soos/lockscreen/hyprlock-soos.conf
 
 # Install PAM module
 install -d -m 0755 %{buildroot}%{_libdir}/security
@@ -187,6 +198,12 @@ fi
 %{_bindir}/soos-admin
 %{_bindir}/soos-enroll
 %{_bindir}/soos-gui
+%{_bindir}/soos-lockstatus
+%{_bindir}/soos-lock-widget
+%{_datadir}/gnome-shell/extensions/soos-lockscreen@soos
+%dir %{_datadir}/soos
+%dir %{_datadir}/soos/lockscreen
+%{_datadir}/soos/lockscreen/hyprlock-soos.conf
 %{_libdir}/security/pam_soos.so
 %{_unitdir}/soos-daemon.service
 %{_sysconfdir}/authselect/custom/soos

@@ -503,6 +503,18 @@ mod remote_tour_contract;
 #[cfg(all(test, unix))]
 mod android_tour_contract;
 
+/// Installer opt-in of the lock-screen adapters: `install.sh` stages `soos-lockstatus`,
+/// `soos-lock-widget` (optional artifacts), the GNOME Shell system extension and the hyprlock
+/// snippet with rollback, `uninstall.sh` removes them without following links, `setup.sh`
+/// `--lock-widget on|off` (default on, kill switch), read-only locker detection, the GNOME
+/// enable only as the session owner from a local GNOME seat, printed swaylock-plugin and
+/// hyprlock lines, packages and documentation (GitHub #432, PR 6 of #352; ADR 2026-10-18
+/// "Installer Opt-In of the Lock-Screen Adapters and the Shipped Widget Build"; spec
+/// AI/architect_spec_lockscreen_installer.md; rows LKI1-LKI10, LKI11 and LKI12 being the
+/// owner's hardware checks).
+#[cfg(all(test, unix))]
+mod lockscreen_installer_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

@@ -18,6 +18,7 @@
 #   system      scripts/install.sh --start (root; its own journal and rollback)
 #   access      soos-admin add-user <user> (root)
 #   presence    --presence on|off: <sysconfdir>/soos/presence.disable (root)
+#   lock widget --lock-widget on|off: <sysconfdir>/soos/lockwidget.disable (root)
 #   verify      scripts/wait_daemon_ready.sh and soos-admin camera list (root)
 #   enrollment  daemon stopped, soos-enroll enroll --username <user>, daemon
 #               started again; from a local seat only (root)
@@ -27,6 +28,11 @@
 #   companion   phone companion as the session owner (never root): remote.toml
 #               written with the owner's default-on features, scripts/install_remote.sh,
 #               user units, verification; Tailscale steps are printed, never run
+#   lock screen the adapters install.sh installed (GitHub #432, PR 6 of #352):
+#               swaylock-plugin, hyprlock and gnome-shell detected read-only;
+#               gnome-extensions enable soos-lockscreen@soos as the session owner
+#               from a local GNOME seat only; the swaylock-plugin and hyprlock lines
+#               are printed, a user locker configuration is never edited
 #
 # Started as a normal user, it escalates with sudo (or doas) twice at most: once for
 # the package manager, once to re-execute itself with --system-phase (sudo resets
@@ -126,6 +132,7 @@ DRY_RUN=false
 TARGET_USER=""
 ENROLL=true
 PRESENCE=""
+LOCK_WIDGET=""
 SKIP_PACKAGES=false
 REINSTALL=false
 DISTRO_OVERRIDE=""
@@ -165,6 +172,11 @@ Options:
                            <sysconfdir>/soos/presence.disable, on removes it;
                            without it the current state is kept and reported
                            (the daemon default is on)
+  --lock-widget <on|off>   Lock-screen face-scan widget, on by default: off
+                           creates <sysconfdir>/soos/lockwidget.disable (the
+                           GNOME card is off for every user and setup enables
+                           and prints no locker adapter), on removes it; without
+                           it the current state is kept and reported
   --skip-packages          Do not install missing packages (the command is printed)
   --reinstall              Run scripts/install.sh even when the install looks complete
   --distro <FAMILY>        Package family: debian, fedora or arch (default:
@@ -212,6 +224,14 @@ setup-managed remote.toml stays off unless its option says on:
   --local-seat <yes|no>    Internal: local-seat verdict of the user half for
                            --system-phase
   -h, --help               Display this help message and exit
+
+Lock screen (Docs/LOCKSCREEN_WIDGET.md): install.sh installs soos-lockstatus,
+soos-lock-widget, the GNOME Shell system extension soos-lockscreen@soos and the
+hyprlock snippet. After the system phase, as the session owner from a local GNOME
+seat, setup runs gnome-extensions enable soos-lockscreen@soos (GNOME Shell reads a
+new system extension at login: log out and back in if it is not loaded yet). For
+swaylock-plugin and hyprlock it prints the exact line to add; it never edits a
+locker configuration.
 
 The build always runs as a normal user (never root). Enrollment runs only from a
 local seat (loginctl: Remote=no and a seat); from an SSH or remote session it is
@@ -326,6 +346,14 @@ while [[ $# -gt 0 ]]; do
             case "$2" in
                 on|off) PRESENCE="$2" ;;
                 *) usage_error "--presence takes on or off: '$2'" ;;
+            esac
+            shift 2
+            ;;
+        --lock-widget)
+            require_value "$@"
+            case "$2" in
+                on|off) LOCK_WIDGET="$2" ;;
+                *) usage_error "--lock-widget takes on or off: '$2'" ;;
             esac
             shift 2
             ;;
@@ -478,6 +506,15 @@ fi
 
 # Paths derived from the options (the same layout as scripts/install.sh).
 PRESENCE_FLAG="${SYSCONFDIR}/soos/presence.disable"
+# Lock-screen adapters (GitHub #432, PR 6 of #352): the paths scripts/install.sh writes.
+LOCK_WIDGET_FLAG="${SYSCONFDIR}/soos/lockwidget.disable"
+readonly GNOME_EXTENSION_UUID="soos-lockscreen@soos"
+readonly GNOME_EXTENSION_FILES=(metadata.json extension.js stylesheet.css)
+GNOME_EXT_SRC="${WORKSPACE_ROOT}/packaging/gnome-shell/${GNOME_EXTENSION_UUID}"
+GNOME_EXT_DIR="${PREFIX}/share/gnome-shell/extensions/${GNOME_EXTENSION_UUID}"
+HYPRLOCK_SNIPPET_SRC="${WORKSPACE_ROOT}/packaging/lockscreen/hyprlock-soos.conf"
+HYPRLOCK_SNIPPET="${PREFIX}/share/soos/lockscreen/hyprlock-soos.conf"
+LOCK_WIDGET_BIN="${PREFIX}/bin/soos-lock-widget"
 KILL_SWITCH="${SYSCONFDIR}/soos/disabled"
 STATE_DIR="${LOCALSTATEDIR}/lib/soos/state"
 STATE_FILE="${STATE_DIR}/setup.json"
@@ -893,6 +930,21 @@ system_up_to_date() {
         cmp -s -- "${artifacts}/${name}" "${PREFIX}/bin/${name}" || return 1
     done
     cmp -s -- "${artifacts}/libpam_soos.so" "${PAM_DIR}/pam_soos.so" || return 1
+    # Lock-screen adapters: compared when this build or checkout has them (install.sh
+    # installs them only then).
+    for name in soos-lockstatus soos-lock-widget; do
+        if [[ -f "${artifacts}/${name}" && -s "${artifacts}/${name}" ]]; then
+            cmp -s -- "${artifacts}/${name}" "${PREFIX}/bin/${name}" || return 1
+        fi
+    done
+    if gnome_extension_in_checkout; then
+        for name in "${GNOME_EXTENSION_FILES[@]}"; do
+            cmp -s -- "${GNOME_EXT_SRC}/${name}" "${GNOME_EXT_DIR}/${name}" || return 1
+        done
+    fi
+    if [[ -f "${HYPRLOCK_SNIPPET_SRC}" ]]; then
+        cmp -s -- "${HYPRLOCK_SNIPPET_SRC}" "${HYPRLOCK_SNIPPET}" || return 1
+    fi
     cmp -s -- "${WORKSPACE_ROOT}/scripts/provision_master_key.sh" \
         "${PREFIX}/libexec/soos/provision-master-key" || return 1
     cmp -s -- "${WORKSPACE_ROOT}/packaging/soos-daemon.service" \
@@ -938,6 +990,163 @@ presence_report() {
     else
         printf 'auto-unlock on (daemon default; --presence off disables it)'
     fi
+}
+
+lock_widget_report() {
+    if [[ -e "${LOCK_WIDGET_FLAG}" || -L "${LOCK_WIDGET_FLAG}" ]]; then
+        printf 'off (%s present: no GNOME card; --lock-widget on turns it on)' "${LOCK_WIDGET_FLAG}"
+    else
+        printf 'on (default; --lock-widget off turns it off)'
+    fi
+}
+
+# The lock widget is off after the root half: --lock-widget off, or an existing flag kept.
+lock_widget_will_be_off() {
+    [[ "${LOCK_WIDGET}" == off ]] && return 0
+    [[ "${LOCK_WIDGET}" == on ]] && return 1
+    [[ -e "${LOCK_WIDGET_FLAG}" || -L "${LOCK_WIDGET_FLAG}" ]]
+}
+
+gnome_extension_in_checkout() {
+    local name
+    for name in "${GNOME_EXTENSION_FILES[@]}"; do
+        [[ -f "${GNOME_EXT_SRC}/${name}" ]] || return 1
+    done
+}
+
+# Supported lockers found on this host (read-only: command -v only, nothing is run).
+LOCKERS=()
+detect_lockers() {
+    local locker
+    LOCKERS=()
+    for locker in swaylock-plugin hyprlock gnome-shell; do
+        if command -v "${locker}" >/dev/null 2>&1; then
+            LOCKERS+=("${locker}")
+        fi
+    done
+}
+
+# The session desktop is GNOME (XDG_CURRENT_DESKTOP, for example ubuntu:GNOME).
+gnome_desktop() {
+    local token
+    local -a tokens=()
+    IFS=: read -r -a tokens <<< "${XDG_CURRENT_DESKTOP:-}"
+    for token in "${tokens[@]}"; do
+        [[ "${token,,}" == gnome ]] && return 0
+    done
+    return 1
+}
+
+# Why gnome-extensions enable cannot run from this shell (empty: it can).
+gnome_enable_blocker() {
+    if [[ "${IS_ROOT}" == true ]]; then
+        printf 'started as root'
+    elif [[ "${LOCAL_SEAT}" != true ]]; then
+        printf 'remote session or no local seat'
+    elif ! gnome_desktop; then
+        printf 'not a GNOME session'
+    elif ! command -v gnome-extensions >/dev/null 2>&1; then
+        printf 'gnome-extensions not found'
+    fi
+}
+
+swaylock_line() {
+    printf "swaylock-plugin --command '%s'" "${LOCK_WIDGET_BIN}"
+}
+
+hyprlock_line() {
+    printf 'cat %s >> ~/.config/hypr/hyprlock.conf' "${HYPRLOCK_SNIPPET}"
+}
+
+print_lockscreen_plan() {
+    local locker blocker
+    if [[ ${#LOCKERS[@]} -eq 0 ]]; then
+        plan "lock screen" "skipped (no supported locker found)" "swaylock-plugin, hyprlock and gnome-shell were not found; install.sh still installs the adapters (Docs/LOCKSCREEN_WIDGET.md)"
+        return 0
+    fi
+    if lock_widget_will_be_off; then
+        plan "lock screen" "skipped (lock widget off)" "${LOCK_WIDGET_FLAG}: no GNOME card, and setup enables and prints no locker adapter"
+        return 0
+    fi
+    for locker in "${LOCKERS[@]}"; do
+        case "${locker}" in
+            gnome-shell)
+                blocker="$(gnome_enable_blocker)"
+                if [[ -z "${blocker}" ]]; then
+                    plan "lock screen (GNOME)" "will run" "gnome-extensions enable ${GNOME_EXTENSION_UUID} as ${TARGET_USER} after the system phase (log out and back in if GNOME Shell has not loaded it yet)"
+                else
+                    plan "lock screen (GNOME)" "printed only (${blocker})" "in ${TARGET_USER:-the user}'s local GNOME session: gnome-extensions enable ${GNOME_EXTENSION_UUID}"
+                fi
+                ;;
+            swaylock-plugin)
+                plan "lock screen (swaylock-plugin)" "printed only" "start the locker with: $(swaylock_line); setup never edits a locker configuration"
+                ;;
+            hyprlock)
+                plan "lock screen (hyprlock)" "printed only" "append the label: $(hyprlock_line); setup never edits hyprlock.conf"
+                ;;
+        esac
+    done
+}
+
+# Printed after the system phase: the locker lines (never written by setup).
+print_lockscreen_lines() {
+    local locker
+    if lock_widget_will_be_off; then
+        info "  Lock screen: off (${LOCK_WIDGET_FLAG}); the swaylock-plugin widget and the hyprlock label do not read it: remove the --command argument or the label to turn them off."
+        return 0
+    fi
+    for locker in "${LOCKERS[@]}"; do
+        case "${locker}" in
+            swaylock-plugin)
+                info "  Lock screen (swaylock-plugin): start the locker with: $(swaylock_line)"
+                info "    for example in the SetLockedHint wrapper of Docs/DISTRIBUTION_DEPLOYMENT.md section 5.5 (setup never edits it)."
+                ;;
+            hyprlock)
+                info "  Lock screen (hyprlock): append the label once: $(hyprlock_line) (setup never edits it)."
+                ;;
+            gnome-shell)
+                if [[ -n "$(gnome_enable_blocker)" ]]; then
+                    info "  Lock screen (GNOME): in ${TARGET_USER:-the user}'s local GNOME session run: gnome-extensions enable ${GNOME_EXTENSION_UUID}"
+                fi
+                ;;
+        esac
+    done
+}
+
+# User phase (session owner, local GNOME seat only): enables the system extension for this
+# user. Never fatal: the face install is committed; a failure prints the command.
+run_gnome_enable_step() {
+    local enabled="" cmd="gnome-extensions enable ${GNOME_EXTENSION_UUID}"
+    if [[ ! -f "${GNOME_EXT_DIR}/metadata.json" ]]; then
+        printf '[SKIP] lock screen (GNOME): %s is not installed (scripts/install.sh installs it)\n' "${GNOME_EXT_DIR}"
+        return 0
+    fi
+    enabled="$(run_bounded "${QUERY_TIMEOUT_S}" gnome-extensions list --enabled 2>/dev/null)" || enabled=""
+    if grep -Fxq -- "${GNOME_EXTENSION_UUID}" <<< "${enabled:0:65536}"; then
+        printf '[DONE] lock screen (GNOME): already done (%s enabled)\n' "${GNOME_EXTENSION_UUID}"
+        return 0
+    fi
+    if run_bounded "${QUERY_TIMEOUT_S}" gnome-extensions enable "${GNOME_EXTENSION_UUID}" >/dev/null 2>&1; then
+        printf '[DONE] lock screen (GNOME): %s enabled for %s; the card shows from the next lock\n' \
+            "${GNOME_EXTENSION_UUID}" "${TARGET_USER}"
+    else
+        printf '[SKIP] lock screen (GNOME): GNOME Shell has not loaded %s yet (it reads system extensions at login): log out and back in, then run: %s\n' \
+            "${GNOME_EXTENSION_UUID}" "${cmd}"
+    fi
+}
+
+run_lockscreen_step() {
+    local locker
+    [[ ${#LOCKERS[@]} -gt 0 ]] || return 0
+    echo ""
+    if ! lock_widget_will_be_off && [[ -z "$(gnome_enable_blocker)" ]]; then
+        for locker in "${LOCKERS[@]}"; do
+            if [[ "${locker}" == gnome-shell ]]; then
+                run_gnome_enable_step
+            fi
+        done
+    fi
+    print_lockscreen_lines
 }
 
 # =============================================================================
@@ -1372,6 +1581,7 @@ print_daemon_preview_plan() {
 # =============================================================================
 PREV_GROUP_ADDED=false
 PREV_FLAG_CREATED=false
+PREV_LW_FLAG_CREATED=false
 STATE_REFUSE_CODE="${EXIT_USAGE}"
 
 state_invalid() {
@@ -1383,6 +1593,7 @@ state_invalid() {
 read_state() {
     PREV_GROUP_ADDED=false
     PREV_FLAG_CREATED=false
+    PREV_LW_FLAG_CREATED=false
     [[ -L "${STATE_DIR}" ]] && state_invalid "its directory is a symbolic link"
     [[ -L "${STATE_FILE}" ]] && state_invalid "it is a symbolic link"
     [[ -e "${STATE_FILE}" ]] || return 0
@@ -1415,6 +1626,11 @@ read_state() {
                 fi
                 ;;
             presence) [[ "${value}" == '"on"' || "${value}" == '"off"' ]] || state_invalid "invalid presence" ;;
+            lock_widget) [[ "${value}" == '"off"' ]] || state_invalid "invalid lock_widget" ;;
+            lock_widget_flag_created_by_setup)
+                [[ "${value}" == true ]] || state_invalid "invalid ${key}"
+                PREV_LW_FLAG_CREATED=true
+                ;;
             enrolled) [[ "${value}" == true || "${value}" == false ]] || state_invalid "invalid enrolled" ;;
             group_added_by_setup)
                 [[ "${value}" == true || "${value}" == false ]] || state_invalid "invalid ${key}"
@@ -1434,7 +1650,7 @@ read_state() {
 root_preflight() {
     local path
     read_state
-    for path in "${SYSCONFDIR}/soos" "${PRESENCE_FLAG}"; do
+    for path in "${SYSCONFDIR}/soos" "${PRESENCE_FLAG}" "${LOCK_WIDGET_FLAG}"; do
         if [[ -L "${path}" ]]; then
             error "${path} is a symbolic link; refusing to follow it"
             exit "${STATE_REFUSE_CODE}"
@@ -1444,6 +1660,7 @@ root_preflight() {
 
 GROUP_ADDED_NOW=false
 FLAG_CREATED_NOW=false
+LW_FLAG_CREATED_NOW=false
 
 write_state() {
     local presence="on" enrolled=false group=false flag=false content tmp
@@ -1451,8 +1668,17 @@ write_state() {
     [[ -n "${TARGET_UID}" && -e "$(template_path)" ]] && enrolled=true
     [[ "${PREV_GROUP_ADDED}" == true || "${GROUP_ADDED_NOW}" == true ]] && group=true
     [[ "${PREV_FLAG_CREATED}" == true || "${FLAG_CREATED_NOW}" == true ]] && flag=true
-    content="$(printf '{\n  "format": %s,\n  "tool": "soos-setup",\n  "profile": "face",\n  "user": "%s",\n  "group_added_by_setup": %s,\n  "presence_flag_created_by_setup": %s,\n  "presence": "%s",\n  "enrolled": %s\n}' \
-        "${SETUP_STATE_FORMAT}" "${TARGET_USER}" "${group}" "${flag}" "${presence}" "${enrolled}")"
+    # The lock widget keys are written only away from the default (widget on, flag never
+    # created by setup), so a default state file keeps its format-1 content exactly.
+    local lock_keys=""
+    if [[ "${PREV_LW_FLAG_CREATED}" == true || "${LW_FLAG_CREATED_NOW}" == true ]]; then
+        lock_keys+=$'  "lock_widget_flag_created_by_setup": true,\n'
+    fi
+    if [[ -e "${LOCK_WIDGET_FLAG}" || -L "${LOCK_WIDGET_FLAG}" ]]; then
+        lock_keys+=$'  "lock_widget": "off",\n'
+    fi
+    content="$(printf '{\n  "format": %s,\n  "tool": "soos-setup",\n  "profile": "face",\n  "user": "%s",\n  "group_added_by_setup": %s,\n  "presence_flag_created_by_setup": %s,\n  "presence": "%s",\n%s  "enrolled": %s\n}' \
+        "${SETUP_STATE_FORMAT}" "${TARGET_USER}" "${group}" "${flag}" "${presence}" "${lock_keys}" "${enrolled}")"
     content+=$'\n'
     if [[ -L "${STATE_DIR}" || -L "${STATE_FILE}" ]]; then
         error "The state path is a symbolic link: ${STATE_FILE}"
@@ -1494,6 +1720,8 @@ rollback_journal() {
                 ;;
             presence_flag_created) rm -f -- "${PRESENCE_FLAG}" ;;
             presence_flag_removed) (set -C; : > "${PRESENCE_FLAG}") 2>/dev/null && chmod 0644 -- "${PRESENCE_FLAG}" ;;
+            lock_widget_flag_created) rm -f -- "${LOCK_WIDGET_FLAG}" ;;
+            lock_widget_flag_removed) (set -C; : > "${LOCK_WIDGET_FLAG}") 2>/dev/null && chmod 0644 -- "${LOCK_WIDGET_FLAG}" ;;
             soos_conf_dir_created) rmdir -- "${SYSCONFDIR}/soos" 2>/dev/null ;;
             daemon_toml_created)
                 rm -f -- "${DAEMON_TOML}"
@@ -1613,6 +1841,40 @@ phase_presence() {
             ;;
         *)
             printf '[DONE] presence: %s\n' "$(presence_report)"
+            ;;
+    esac
+}
+
+# --lock-widget on|off: the kill switch the GNOME extension reads at every lock.
+phase_lock_widget() {
+    if [[ -L "${LOCK_WIDGET_FLAG}" ]]; then
+        error "${LOCK_WIDGET_FLAG} is a symbolic link; refusing to follow it"
+        return 1
+    fi
+    case "${LOCK_WIDGET}" in
+        off)
+            if [[ -e "${LOCK_WIDGET_FLAG}" ]]; then
+                printf '[DONE] lock widget: already done (off)\n'
+                return 0
+            fi
+            ensure_soos_conf_dir || return 1
+            (set -C; : > "${LOCK_WIDGET_FLAG}") || return 1
+            JOURNAL+=(lock_widget_flag_created)
+            LW_FLAG_CREATED_NOW=true
+            chmod 0644 -- "${LOCK_WIDGET_FLAG}" || return 1
+            printf '[DONE] lock widget: turned off (%s)\n' "${LOCK_WIDGET_FLAG}"
+            ;;
+        on)
+            if [[ ! -e "${LOCK_WIDGET_FLAG}" ]]; then
+                printf '[DONE] lock widget: already done (on)\n'
+                return 0
+            fi
+            rm -f -- "${LOCK_WIDGET_FLAG}" || return 1
+            JOURNAL+=(lock_widget_flag_removed)
+            printf '[DONE] lock widget: turned on (%s removed)\n' "${LOCK_WIDGET_FLAG}"
+            ;;
+        *)
+            printf '[DONE] lock widget: %s\n' "$(lock_widget_report)"
             ;;
     esac
 }
@@ -1768,6 +2030,11 @@ print_summary() {
         info "  ${TARGET_USER} was added to the soos group: log out and back in for it to apply."
     fi
     info "  Presence: $(presence_report)"
+    info "  Lock widget: $(lock_widget_report)"
+    # Started as root, the user half never runs: the locker lines are printed here.
+    if [[ "${SYSTEM_PHASE}" != true && ${#LOCKERS[@]} -gt 0 ]]; then
+        print_lockscreen_lines
+    fi
     info "  PAM is not activated by this version: see Docs/DISTRIBUTION_DEPLOYMENT.md (test before activating)."
     if [[ -n "${COMPANION_SKIP}" ]]; then
         info "  Phone companion: skipped (${COMPANION_SKIP})."
@@ -1815,6 +2082,7 @@ run_system_phase() {
     ROLLBACK_ARMED=true
     phase_access || fail_and_rollback "access"
     phase_presence || fail_and_rollback "presence"
+    phase_lock_widget || fail_and_rollback "lock widget"
     if ! phase_preview; then
         if [[ "${PREVIEW_DAEMON_DOWN}" == true ]]; then
             printf '[FAIL] camera view (daemon): %s is not ready even without %s (exit 70; nothing else rolled back)\n' "${UNIT}" "${DAEMON_TOML}"
@@ -1907,6 +2175,12 @@ else
     detected "session: remote or no local seat"
 fi
 detected "camera: ${CAMERA_NODES} V4L2 node(s) under /dev"
+detect_lockers
+if [[ ${#LOCKERS[@]} -gt 0 ]]; then
+    detected "lock screen: ${LOCKERS[*]}"
+else
+    detected "lock screen: none of swaylock-plugin, hyprlock, gnome-shell found"
+fi
 detected "user: ${TARGET_USER:-unknown} (build user: ${BUILD_USER:-none})"
 
 # Started as root, the root-only checks run now, before anything changes.
@@ -1978,6 +2252,25 @@ case "${PRESENCE}" in
         plan presence "already done" "$(presence_report)"
         ;;
 esac
+case "${LOCK_WIDGET}" in
+    off)
+        if [[ -e "${LOCK_WIDGET_FLAG}" ]]; then
+            plan "lock widget" "already done" "off"
+        else
+            plan "lock widget" "will run" "create ${LOCK_WIDGET_FLAG}"
+        fi
+        ;;
+    on)
+        if [[ -e "${LOCK_WIDGET_FLAG}" ]]; then
+            plan "lock widget" "will run" "remove ${LOCK_WIDGET_FLAG}"
+        else
+            plan "lock widget" "already done" "on"
+        fi
+        ;;
+    *)
+        plan "lock widget" "already done" "$(lock_widget_report)"
+        ;;
+esac
 plan verify "will run" "daemon health (wait_daemon_ready.sh) and camera report"
 if [[ "${ENROLL}" != true ]]; then
     plan enrollment "skipped (--no-enroll)" "$(enroll_command)"
@@ -1992,6 +2285,7 @@ else
 fi
 plan state "will run" "${STATE_FILE} (opt-ins and results only, never a secret)"
 print_companion_plan
+print_lockscreen_plan
 plan later "not in this version" "PAM activation (Docs/DISTRIBUTION_DEPLOYMENT.md)"
 
 if [[ "${DRY_RUN}" == true ]]; then
@@ -2392,6 +2686,7 @@ SYSTEM_ARGS=(--system-phase --yes --user "${TARGET_USER}" --artifact-dir "${ARTI
     --prefix "${PREFIX}" --sysconfdir "${SYSCONFDIR}" --localstatedir "${LOCALSTATEDIR}"
     --runstatedir "${RUNSTATEDIR}")
 [[ -n "${PRESENCE}" ]] && SYSTEM_ARGS+=(--presence "${PRESENCE}")
+[[ -n "${LOCK_WIDGET}" ]] && SYSTEM_ARGS+=(--lock-widget "${LOCK_WIDGET}")
 [[ "${ENROLL}" != true ]] && SYSTEM_ARGS+=(--no-enroll)
 [[ "${REINSTALL}" == true ]] && SYSTEM_ARGS+=(--reinstall)
 # The root half resolves the uid of the [preview] section itself; only the decision is passed.
@@ -2401,6 +2696,11 @@ fi
 info "Escalating once for the system phase: ${ESCALATE[0]} bash scripts/setup.sh --system-phase ..."
 rc=0
 as_root bash "${SCRIPT_PATH}" "${SYSTEM_ARGS[@]}" || rc=$?
+
+# --- user phase: the lock screen (as this user, never root; never changes the exit code) ---
+if [[ "${rc}" -eq 0 || "${rc}" -eq "${EXIT_INCOMPLETE}" ]]; then
+    run_lockscreen_step
+fi
 
 # --- user phase: the phone companion (as this user, never root) ---
 # Runs after a complete root half (0) or a failed enrollment (3, which stays the exit

@@ -66,6 +66,10 @@
 #     never contains /run: it is a tmpfs the package scriptlets recreate)
 #   - Binaries installed mode 0755
 #   - PAM module installed mode 0644
+#   - Lock-screen adapters (GitHub #432, PR 6 of #352): soos-lockstatus and
+#     soos-lock-widget 0755 in <prefix>/bin when built (optional artifacts), the
+#     GNOME Shell system extension soos-lockscreen@soos (0755 directory, 0644 files)
+#     and the hyprlock snippet (0644); journaled and rolled back like every file
 #   - Pre-existing system directories (bin, PAM module dir, ...) are never re-moded
 # =============================================================================
 
@@ -117,6 +121,12 @@ START_UNIT=false
 
 # Artifacts produced by 'cargo build --release --workspace'.
 REQUIRED_ARTIFACTS=(soos-daemon soos-admin soos-enroll soos-gui libpam_soos.so)
+# Lock-screen adapters (GitHub #432, PR 6 of #352; Docs/LOCKSCREEN_WIDGET.md): built by the
+# same workspace build, installed when present and skipped with a notice otherwise, so an
+# artifact set built before the adapters existed still installs.
+OPTIONAL_ARTIFACTS=(soos-lockstatus soos-lock-widget)
+GNOME_EXTENSION_UUID="soos-lockscreen@soos"
+GNOME_EXTENSION_FILES=(metadata.json extension.js stylesheet.css)
 
 usage() {
     cat <<EOF
@@ -321,6 +331,10 @@ TARGET_PAM_DIR="${DESTDIR}${PAM_DIR}"
 TARGET_SYSTEMD_DIR="${DESTDIR}${UNIT_DIR:-${SYSCONFDIR}/systemd/system}"
 TARGET_STATE_DIR="${DESTDIR}${LOCALSTATEDIR}/lib/soos"
 TARGET_RUN_DIR="${DESTDIR}${RUNSTATEDIR}/soos"
+TARGET_GNOME_EXT_DIR="${DESTDIR}${PREFIX}/share/gnome-shell/extensions/${GNOME_EXTENSION_UUID}"
+TARGET_LOCKSCREEN_SHARE_DIR="${DESTDIR}${PREFIX}/share/soos/lockscreen"
+GNOME_EXTENSION_SRC="${WORKSPACE_ROOT}/packaging/gnome-shell/${GNOME_EXTENSION_UUID}"
+HYPRLOCK_SNIPPET_SRC="${WORKSPACE_ROOT}/packaging/lockscreen/hyprlock-soos.conf"
 
 LIVE_INSTALL=false
 [[ -z "${DESTDIR}" ]] && LIVE_INSTALL=true
@@ -390,6 +404,8 @@ else
     info "Runtime Directory:  ${RUNSTATEDIR}/soos (not staged: created by the package scriptlets)"
 fi
 info "PAM Templates:      ${PAM_FAMILY:-invalid} (--distro ${DISTRO})"
+info "Lock screen:        ${TARGET_BIN_DIR}/soos-lockstatus, ${TARGET_BIN_DIR}/soos-lock-widget (when built),"
+info "                    ${TARGET_GNOME_EXT_DIR}, ${TARGET_LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf"
 info "==============================="
 
 # =============================================================================
@@ -625,6 +641,26 @@ else
         fi
     done
 fi
+# A.4b Optional lock-screen adapters: never a preflight failure.
+SKIPPED_ADAPTERS=()
+if [[ -n "${RESOLVED_ARTIFACT_DIR:-}" ]]; then
+    for name in "${OPTIONAL_ARTIFACTS[@]}"; do
+        candidate="${RESOLVED_ARTIFACT_DIR}/${name}"
+        if [[ -f "${candidate}" && -s "${candidate}" ]]; then
+            ARTIFACT_PATHS[${name}]="${candidate}"
+        else
+            SKIPPED_ADAPTERS+=("${name}")
+        fi
+    done
+    if [[ ${#SKIPPED_ADAPTERS[@]} -gt 0 ]]; then
+        info "Optional lock-screen adapters not built, skipped: ${SKIPPED_ADAPTERS[*]} (cargo build --release --locked --workspace builds them)"
+    fi
+fi
+if [[ "${PREFIX}" != "/usr" && "${PREFIX}" != "/usr/local" ]]; then
+    warn "--prefix ${PREFIX}: the GNOME lock-screen extension only runs soos-lockstatus from /usr/bin or"
+    warn "/usr/local/bin, and GNOME Shell only finds system extensions under /usr/share or /usr/local/share."
+fi
+
 if [[ ${#MISSING_ARTIFACTS[@]} -gt 0 ]]; then
     if [[ "${ALLOW_MISSING}" = true ]]; then
         warn "--allow-missing: the following artifacts will NOT be installed: ${MISSING_ARTIFACTS[*]}"
@@ -874,6 +910,44 @@ install_artifact soos-enroll 0755 "${TARGET_BIN_DIR}/soos-enroll"
 install_artifact soos-gui 0755 "${TARGET_BIN_DIR}/soos-gui"
 install_artifact libpam_soos.so 0644 "${TARGET_PAM_DIR}/pam_soos.so"
 
+# 4b. Lock-screen adapters (GitHub #432, PR 6 of #352; Docs/LOCKSCREEN_WIDGET.md). Nothing
+#     is enabled here: scripts/setup.sh opts the user in (GNOME) or prints the locker line.
+for name in "${OPTIONAL_ARTIFACTS[@]}"; do
+    if [[ -n "${ARTIFACT_PATHS[${name}]:-}" ]]; then
+        tracked_install 0755 "${ARTIFACT_PATHS[${name}]}" "${TARGET_BIN_DIR}/${name}"
+        success "Installed ${TARGET_BIN_DIR}/${name}"
+    fi
+done
+# GNOME Shell system extension: copied verbatim, exactly its three files.
+GNOME_EXTENSION_COMPLETE=true
+for ext_file in "${GNOME_EXTENSION_FILES[@]}"; do
+    [[ -f "${GNOME_EXTENSION_SRC}/${ext_file}" ]] || GNOME_EXTENSION_COMPLETE=false
+done
+if [[ "${GNOME_EXTENSION_COMPLETE}" = true ]]; then
+    if [[ -L "${TARGET_GNOME_EXT_DIR}" ]]; then
+        error "Refusing to install through the symbolic link ${TARGET_GNOME_EXT_DIR}"
+        exit 1
+    fi
+    ensure_dir "$(dirname "${TARGET_GNOME_EXT_DIR}")" 0755
+    ensure_dir "${TARGET_GNOME_EXT_DIR}" 0755 owned
+    for ext_file in "${GNOME_EXTENSION_FILES[@]}"; do
+        tracked_install 0644 "${GNOME_EXTENSION_SRC}/${ext_file}" "${TARGET_GNOME_EXT_DIR}/${ext_file}"
+    done
+    success "Installed the GNOME Shell lock-screen extension ${TARGET_GNOME_EXT_DIR}"
+else
+    info "GNOME Shell lock-screen extension not found in this checkout (${GNOME_EXTENSION_SRC}); skipped."
+fi
+# hyprlock label snippet: reference material, appended by the user to hyprlock.conf.
+if [[ -f "${HYPRLOCK_SNIPPET_SRC}" ]]; then
+    if [[ -L "${TARGET_LOCKSCREEN_SHARE_DIR}" ]]; then
+        error "Refusing to install through the symbolic link ${TARGET_LOCKSCREEN_SHARE_DIR}"
+        exit 1
+    fi
+    ensure_dir "${TARGET_LOCKSCREEN_SHARE_DIR}" 0755
+    tracked_install 0644 "${HYPRLOCK_SNIPPET_SRC}" "${TARGET_LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf"
+    success "Installed the hyprlock snippet ${TARGET_LOCKSCREEN_SHARE_DIR}/hyprlock-soos.conf"
+fi
+
 # 5. Install Systemd Service Unit (enabled only at the very end, step 8)
 SERVICE_SRC="${WORKSPACE_ROOT}/packaging/soos-daemon.service"
 if [[ -f "${SERVICE_SRC}" ]]; then
@@ -1044,4 +1118,5 @@ info "  3. Start the daemon:      sudo systemctl start soos-daemon"
 info "     then wait for it:      sudo scripts/wait_daemon_ready.sh"
 info "  4. Check the daemon:      soos-admin status && soos-admin test-pam"
 info "  5. Activate PAM (explicit, per distribution): see Docs/DISTRIBUTION_DEPLOYMENT.md"
+info "  6. Lock screen (optional): scripts/setup.sh opts you in, or see Docs/LOCKSCREEN_WIDGET.md"
 exit 0
