@@ -116,6 +116,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some((switchable, backend)) = camera_source {
                 app.attach_camera_source(switchable, backend);
             }
+            // Reduced motion (Docs/UI_MOTION.md §8): the switch, then SOOS_REDUCE_MOTION, then
+            // the desktop portal, read once off the UI thread.
+            app.configure_motion(
+                args.reduce_motion,
+                std::env::var_os(soos_gui::motion::REDUCE_MOTION_ENV).as_deref(),
+            );
             Ok(Box::new(app))
         }),
     )?;

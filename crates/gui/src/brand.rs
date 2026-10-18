@@ -404,7 +404,7 @@ struct CachedMark {
     texture: egui::TextureHandle,
 }
 
-fn paint_mark(ui: &egui::Ui, mark: Mark, target: Rect, color: Color32) {
+fn paint_mark(ui: &egui::Ui, mark: Mark, target: Rect, color: Color32, angle: f32) {
     let view = match mark {
         Mark::Wordmark => WORDMARK_VIEWBOX,
         Mark::Star => STAR_VIEWBOX,
@@ -445,22 +445,34 @@ fn paint_mark(ui: &egui::Ui, mark: Mark, target: Rect, color: Color32) {
             texture
         }
     };
-    ui.painter().image(
-        texture.id(),
-        rect,
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-        Color32::WHITE,
-    );
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    if angle == 0.0 || !angle.is_finite() {
+        ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
+    } else {
+        // Same textured quad, turned about its centre (the star stays inside its inscribed
+        // circle, so it never leaves `rect`).
+        let mut mesh = egui::epaint::Mesh::with_texture(texture.id());
+        mesh.add_rect_with_uv(rect, uv, Color32::WHITE);
+        mesh.rotate(egui::emath::Rot2::from_angle(angle), rect.center());
+        ui.painter().add(egui::Shape::mesh(mesh));
+    }
 }
 
 /// Paints the "SOOS" wordmark in `color`, fitted (aspect preserved) and centered in `rect`.
 pub fn paint_wordmark(ui: &egui::Ui, rect: Rect, color: Color32) {
-    paint_mark(ui, Mark::Wordmark, rect, color);
+    paint_mark(ui, Mark::Wordmark, rect, color, 0.0);
 }
 
 /// Paints the two star spikes in `color`, fitted (square) and centered in `rect`.
 pub fn paint_star(ui: &egui::Ui, rect: Rect, color: Color32) {
-    paint_mark(ui, Mark::Star, rect, color);
+    paint_mark(ui, Mark::Star, rect, color, 0.0);
+}
+
+/// Paints the star mark like [`paint_star`], turned by `angle` radians about the centre of its
+/// fitted rectangle (`Docs/UI_MOTION.md` §5). An angle of 0 (or a non-finite one) paints exactly
+/// what [`paint_star`] paints.
+pub fn paint_star_rotated(ui: &egui::Ui, rect: Rect, color: Color32, angle: f32) {
+    paint_mark(ui, Mark::Star, rect, color, angle);
 }
 
 /// Whether the normalized point `(u, v)` (v pointing down) is blue in `Icon_logo.svg`.

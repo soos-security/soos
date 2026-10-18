@@ -51,7 +51,7 @@ waits on I/O it does not own.
   back over an `mpsc` channel that `SoosApp::handle_task_outcomes` drains each frame; the worker
   wakes the UI with `request_repaint`. Only one privileged action runs at a time
   (`TaskRunnerError::Busy`), so the user never faces stacked Polkit dialogs; the daemon switch
-  is disabled and replaced by a spinner with "Waiting for authorization..." meanwhile ("Daemon
+  is disabled and replaced by the pending star with "Waiting for authorization..." meanwhile ("Daemon
   status unknown" while the daemon state is not yet known).
 - **Direct-mode store mutations (GitHub #291)**: with a local store (`GuiStore::System` or
   `GuiStore::Developer`) the UI never calls `BiometricStore::enroll` / `delete` itself: both
@@ -379,7 +379,9 @@ widgets, thin floating scroll bars).
 | `theme` | Palette tokens, sizes, `Metrics::for_width` (responsive paddings and the 250–300 pt right column), `split_columns`, `content_rect`, `fit_video`, `apply`, and `paint_faux_bold` (the default font has one weight; passes are snapped to whole physical pixels by `faux_bold_offsets` so headings render with the same weight everywhere) |
 | `brand` | SVG path data of the "SOOS" wordmark and the star mark, a small anti-aliased rasterizer (each mark is rasterized once into a texture, re-rasterized only when its size or color changes), `paint_wordmark`, `paint_star` and `window_icon` (the four-quadrant logo used as the window icon) |
 | `widgets` | Cards (`card_in_rect`, `card_in_rect_with_footer`), card and section titles, inner tables, stat and star tiles, `column_stack` / `column_stack_card_first`, banners with vector icons, `BrandButton` (primary, secondary, danger, danger outline), `progress_bar`, overlay chips, the enrollment checklist (`step_list`) and the toggle switch |
-| `header` | Header band and tabs ("Live Model Diagnostic", "Guided Enrollment", "Biometric Profiles", with painted icons; inactive tabs collapse to their icon on narrow windows) and the daemon panel |
+| `header` | Header band and tabs ("Live Model Diagnostic", "Guided Enrollment", "Biometric Profiles", with painted icons; inactive tabs collapse to their icon on narrow windows), the sliding active-tab shape (`tab_pill`) and the daemon panel |
+| `motion` | Motion helpers (§5.5): closed-form `SpringState`, `cubic_bezier`, `Tween`, entrances and stagger, the pending-star angle, `MotionPrefs` / `resolve_motion_prefs`, the egui glue (`spring_value`, `tween_value`, `entrance`, `fade_in_on_change`, `pending_star_rotation`) and `MotionControl`; `motion::portal` reads the desktop reduced-motion preference once |
+| `overlay` | Face overlay of the live video (boxes, PAD crop area, landmarks), drawn from the painted frame only |
 
 Symbols missing from the default fonts (check, cross, warning, info) are painted as shapes.
 
@@ -394,8 +396,8 @@ Pause/Resume buttons with a toggle switch (`header::DaemonSwitch`):
 | `Active` | on (green track) | `PrivilegedAction::PauseDaemon` |
 | `Inactive` | off | `PrivilegedAction::ResumeDaemon` |
 | `Unknown` | no knob, inert | nothing |
-| `Active` / `Inactive`, privileged action pending | spinner, "Waiting for authorization..." | nothing |
-| `Unknown`, privileged action pending | spinner, "Daemon status unknown" | nothing |
+| `Active` / `Inactive`, privileged action pending | pending star, "Waiting for authorization..." | nothing |
+| `Unknown`, privileged action pending | pending star, "Daemon status unknown" | nothing |
 
 The action goes through `submit_privileged` exactly as the buttons did, followed by
 `request_refresh()`. The result of a daemon action is shown as a success or error banner at
@@ -439,13 +441,39 @@ passes (no "Widget rect changed id between passes" warning, no lost hover or scr
 
 ### 5.5 Motion
 
-Motion is specified in [`UI_MOTION.md`](UI_MOTION.md) (ADR "[2026-10-13] Motion System for soos-gui
-and soos-remote") and lands with `feat/gui-motion` after the owner approves the prototype
-`Docs/prototypes/ui_motion_prototype.html`. Today the GUI animates only the progress bar (0.25 s) and
-the header switch (0.15 s) and shows `egui::Spinner`s. The specification adds the duration, easing and
-spring tokens to `theme.rs`, a pure `motion.rs` (closed-form spring, cubic-bezier easings), a sliding
-tab indicator, a spring daemon switch, card, banner and camera-status cross-fades, and the pink-star
-pending indicator in place of the spinners. The face overlay is never interpolated. Reduced motion
-comes from `--reduce-motion`, then `SOOS_REDUCE_MOTION`, then the XDG desktop portal (read once with a
-200 ms deadline off the UI thread); motion code requests no repaint once every animation has settled.
+Motion follows [`UI_MOTION.md`](UI_MOTION.md) (ADR "[2026-10-13] Motion System for soos-gui and
+soos-remote"; GitHub #438, walkthrough 234). The tokens (durations, exits, stagger, easings, spring,
+`MAX_MOTION_DT`, `AMBIENT_REPAINT_MS`, `PORTAL_READ_DEADLINE_MS`, `RISE_PX`, `SLIDE_PX`,
+`STAR_TURN_DEG`) live in `theme.rs`; `motion.rs` holds the pure maths and the egui glue (one small
+state per animated widget in egui temp storage, stepped at most once per pass with `stable_dt`
+clamped to 0.05 s).
+
+| Element | Motion |
+|---|---|
+| Daemon switch | the thumb moves on the spring (overshoot at most 4 %, retargetable), the track colour cross-fades over `T_SHORT`; while a privileged action is pending the star mark (blue on the pale panel) turns a quarter turn per 1.2 s in place of the old spinner and "Waiting for authorization..." stays visible |
+| Tabs | the pale active-tab shape slides to the newly active tab (`T_MEDIUM`, standard easing) and follows its tab at once on a window resize; icon and label colours cross-fade over `T_FAST` |
+| Right column | on a tab change the card, the stat tile and the star tile fade in and rise 6 pt, 30 ms apart; a stat tile fades its value in when what it shows changes (caption, or em dash / value), never on live numeric updates |
+| Banners | a banner that appears fades in and slides 8 pt (`T_SHORT`); a kind change cross-fades its colours; the daemon result leaves over `T_SHORT_EXIT` when it is cleared; nothing auto-dismisses |
+| Progress bar | the fill eases over `T_MEDIUM` |
+| Camera status card | the new state is drawn at once and fades in over `T_SHORT` (title colour cross-fading from the previous severity); Info states show the pending star |
+| Star tiles | the star turns 45° on the spring while the daemon is confirmed paused (`DaemonState::Inactive`) |
+| Face overlay | never animated: boxes, landmarks and live/spoof colours come from the frame being painted |
+| Windows and popups | egui's built-in fade with `Style::animation_time` = `T_SHORT` |
+
+**Reduced motion** (`MotionPrefs`), in this order: `soos-gui --reduce-motion`; `SOOS_REDUCE_MOTION=1`
+(reduce) or `=0` (full motion, overriding the desktop; any other value or more than 8 bytes is ignored);
+the XDG desktop portal (`org.freedesktop.portal.Settings.ReadOne`, fallback `Read`, for
+`org.freedesktop.appearance` `reduced-motion`, then `org.gnome.desktop.interface` `enable-animations`),
+read once at start-up by one background thread with its own current-thread Tokio runtime and one zbus
+session connection, under a 200 ms deadline (no portal, an error, an invalid value, the deadline or a
+dead reader = no preference = full motion; no retry); otherwise full motion. The portal is not contacted
+when the switch or the variable decides. Until the answer arrives the GUI counts motion as reduced, and
+a desktop setting changed while the GUI runs applies at the next launch. With reduced motion every
+helper returns its target on the first frame, `Style::animation_time` is 0, the pending star is static
+and nothing requests a motion repaint.
+
+**Repaint budget**: motion code calls `request_repaint()` only while something is unsettled and stops on
+the frame it settles; the pending star uses `request_repaint_after(33 ms)` (at most 30 Hz); once every
+animation has settled, motion requests no repaint (GMO6, GMO7). The README capture scenes run with
+reduced motion, and every widget at rest paints exactly what it painted before this change (RAC1).
 The GUI dark variant is out of scope.

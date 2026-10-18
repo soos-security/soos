@@ -548,6 +548,14 @@ mod lockscreen_installer_contract;
 #[cfg(all(test, unix))]
 mod remote_motion_contract;
 
+/// `soos-gui` motion system: zbus and Tokio confined to the read-only XDG portal reader thread
+/// (`Settings.ReadOne` / `Read` on `org.freedesktop.portal.Desktop` only, no object server, name
+/// or match rule), the manifest lines, the portal value never logged, and the security
+/// guideline naming the exception (GitHub #438 = PR 3 of #358; ADR 2026-10-13 "Motion System
+/// for soos-gui and soos-remote" item (6); spec AI/architect_spec_gui_motion.md; rows GMO15-GMO19).
+#[cfg(all(test, unix))]
+mod gui_motion_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

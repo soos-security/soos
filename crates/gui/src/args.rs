@@ -57,4 +57,10 @@ pub struct GuiArgs {
     /// store under the production model id (GitHub #314, CAM-NEW-5).
     #[arg(long = "mock", requires = "dev_store")]
     pub mock: bool,
+
+    /// Reduce motion: every transition shows its final state at once and nothing animates.
+    /// Overrides `SOOS_REDUCE_MOTION` (`1` reduce, `0` full motion) and the desktop setting
+    /// read from the XDG desktop portal.
+    #[arg(long = "reduce-motion")]
+    pub reduce_motion: bool,
 }

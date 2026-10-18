@@ -17,6 +17,7 @@ use eframe::egui::{
 };
 
 use crate::brand;
+use crate::motion;
 use crate::theme::{self, paint_faux_bold};
 
 // ---------------------------------------------------------------------------------------------
@@ -174,8 +175,8 @@ pub fn progress_label_placement(fill_w: f32, label_w: f32) -> ProgressLabel {
 
 /// Brand progress bar: pale track, `fill` colored bar and a readable percentage label.
 ///
-/// `animate` smooths the fill toward its target and keeps repainting while it moves, like
-/// `egui::ProgressBar::animate`.
+/// `animate` eases the fill toward its target over `T_MEDIUM` with `EASE_STANDARD` and keeps
+/// repainting only while it moves (at once with reduced motion).
 pub fn progress_bar(
     ui: &mut Ui,
     fraction: f32,
@@ -192,8 +193,13 @@ pub fn progress_bar(
         0.0
     };
     let shown = if animate {
-        ui.ctx()
-            .animate_value_with_time(response.id.with("progress"), target, 0.25)
+        motion::tween_value(
+            ui.ctx(),
+            response.id.with("progress"),
+            target,
+            theme::T_MEDIUM,
+            theme::EASE_STANDARD,
+        )
     } else {
         target
     };
@@ -296,6 +302,20 @@ pub fn stat_tile(
         painter.circle_filled(Pos2::new(strip.max.x - 20.0, strip.center().y), 4.5, dot);
     }
 
+    // What the tile shows changed (caption, or em dash <-> value): the value fades in. Live
+    // numeric updates under the same caption are drawn at once (never counted up or faded).
+    let key = egui::Id::new((caption, value.is_some(), sub.is_some())).value();
+    let fade = motion::fade_in_on_change(
+        ui.ctx(),
+        ui.id().with("soos_stat_tile_value"),
+        key,
+        theme::T_SHORT,
+    );
+    let mut painter = painter;
+    if fade < 1.0 {
+        painter.multiply_opacity(fade);
+    }
+
     let body = Rect::from_min_max(Pos2::new(rect.min.x, strip.max.y), rect.max);
     let text = value.unwrap_or("\u{2014}");
     let max_w = rect.width() - 36.0;
@@ -335,9 +355,39 @@ pub fn stat_tile(
 
 /// Decorative star tile: blue rounded square with the pink star mark.
 pub fn star_tile(ui: &Ui, rect: Rect) {
+    star_tile_turned(ui, rect, false);
+}
+
+/// Id of the spring shared by the star tiles (one star tile is drawn per page).
+fn star_turn_id() -> egui::Id {
+    egui::Id::new("soos_star_turn")
+}
+
+/// Star tile whose star is turned `STAR_TURN_DEG` while `turned` (the confirmed state lowers
+/// protection: daemon paused), moving between the two angles on the spring
+/// (`Docs/UI_MOTION.md` §5).
+pub fn star_tile_turned(ui: &Ui, rect: Rect, turned: bool) {
     ui.painter()
         .rect_filled(rect, CornerRadius::same(theme::R_CARD), theme::BLUE);
-    brand::paint_star(ui, rect, theme::PINK);
+    let t = motion::spring_value(ui.ctx(), star_turn_id(), if turned { 1.0 } else { 0.0 });
+    brand::paint_star_rotated(
+        ui,
+        rect,
+        theme::PINK,
+        (theme::STAR_TURN_DEG * t).to_radians(),
+    );
+}
+
+/// Current angle of the star tiles, in degrees (0 before any star tile was drawn).
+pub fn star_turn_degrees(ctx: &egui::Context) -> f32 {
+    theme::STAR_TURN_DEG * motion::spring_peek(ctx, star_turn_id()).unwrap_or(0.0)
+}
+
+/// Pending indicator replacing `egui::Spinner`: the star mark turning a quarter turn per
+/// `T_PENDING` (static with reduced motion), painted centred in `rect`.
+pub fn pending_star(ui: &Ui, rect: Rect, color: Color32) {
+    let angle = motion::pending_star_rotation(ui.ctx());
+    brand::paint_star_rotated(ui, rect, color, angle);
 }
 
 /// Allocates a stack of right-column rectangles: the card gets what the tiles leave over.
@@ -531,9 +581,21 @@ impl BannerKind {
     }
 }
 
-/// Full-width banner with a colored accent bar, a glyph and wrapped text.
-pub fn banner(ui: &mut Ui, kind: BannerKind, text: &str) -> Response {
-    let (bg, border, accent, fg) = kind.colors();
+/// `(background, border, accent, text)` colours of a banner.
+type BannerColors = (Color32, Color32, Color32, Color32);
+
+fn mix_banner_colors(from: BannerColors, to: BannerColors, t: f32) -> BannerColors {
+    (
+        motion::mix_color(from.0, to.0, t),
+        motion::mix_color(from.1, to.1, t),
+        motion::mix_color(from.2, to.2, t),
+        motion::mix_color(from.3, to.3, t),
+    )
+}
+
+/// Paints one banner (the drawing of [`banner`] at rest).
+fn paint_banner(ui: &mut Ui, kind: BannerKind, colors: BannerColors, text: &str) -> Response {
+    let (bg, border, accent, fg) = colors;
     let inner = Frame::new()
         .fill(bg)
         .stroke(Stroke::new(1.0, border))
@@ -560,6 +622,189 @@ pub fn banner(ui: &mut Ui, kind: BannerKind, text: &str) -> Response {
         .with_clip_rect(bar.intersect(ui.clip_rect()))
         .rect_filled(rect, CornerRadius::same(12), accent);
     inner.response
+}
+
+/// Paints a banner moved `offset_y` points and faded to `opacity`; at rest (opacity 1, offset
+/// 0) exactly [`paint_banner`].
+fn paint_banner_moved(
+    ui: &mut Ui,
+    kind: BannerKind,
+    colors: BannerColors,
+    text: &str,
+    opacity: f32,
+    offset_y: f32,
+) -> Response {
+    if opacity >= 1.0 && offset_y == 0.0 {
+        return paint_banner(ui, kind, colors, text);
+    }
+    ui.with_visual_transform(
+        egui::emath::TSTransform::from_translation(vec2(0.0, offset_y)),
+        |ui| motion::with_opacity(ui, opacity, |ui| paint_banner(ui, kind, colors, text)),
+    )
+    .inner
+}
+
+/// Hashed slots of the banner motion state (bounded memory whatever the banner texts).
+const BANNER_SLOTS: u64 = 1024;
+
+/// Motion state of one banner: entry and kind cross-fade.
+#[derive(Debug, Clone, Copy)]
+struct BannerMotion {
+    key: u64,
+    kind: BannerKind,
+    from: BannerKind,
+    color_elapsed: f32,
+    enter_elapsed: f32,
+    pass: u64,
+}
+
+/// Full-width banner with a colored accent bar, a glyph and wrapped text.
+///
+/// A banner that was not drawn in the previous pass enters (fade and `SLIDE_PX` from above,
+/// `T_SHORT`, `EASE_ENTER`); a kind change under the same text cross-fades the colours
+/// (`T_SHORT`, `EASE_STANDARD`). Nothing auto-dismisses; reduced motion draws it at rest.
+pub fn banner(ui: &mut Ui, kind: BannerKind, text: &str) -> Response {
+    let ctx = ui.ctx().clone();
+    let reduced = motion::prefs(&ctx).reduced;
+    let pass = ctx.cumulative_pass_nr();
+    let dt = motion::clamp_dt(ctx.input(|i| i.stable_dt));
+    let key = egui::Id::new(("soos_banner_text", text)).value();
+    let slot = egui::Id::new(("soos_banner", key % BANNER_SLOTS));
+    let fresh = BannerMotion {
+        key,
+        kind,
+        from: kind,
+        color_elapsed: theme::T_SHORT,
+        enter_elapsed: 0.0,
+        pass,
+    };
+    let state = ctx.data_mut(|d| {
+        let s = d.get_temp_mut_or_insert_with(slot, || fresh);
+        if s.key != key {
+            if s.pass == pass {
+                // Another banner of this pass owns the slot: draw this one at rest.
+                return None;
+            }
+            *s = fresh;
+        } else if s.pass.saturating_add(1) < pass {
+            *s = fresh;
+        } else if s.kind != kind {
+            s.from = s.kind;
+            s.kind = kind;
+            s.color_elapsed = 0.0;
+        } else if s.pass != pass {
+            s.color_elapsed = (s.color_elapsed + dt).min(theme::T_SHORT);
+            s.enter_elapsed = (s.enter_elapsed + dt).min(theme::T_SHORT);
+        }
+        if reduced {
+            s.color_elapsed = theme::T_SHORT;
+            s.enter_elapsed = theme::T_SHORT;
+        }
+        s.pass = pass;
+        Some(*s)
+    });
+    let Some(state) = state else {
+        return paint_banner(ui, kind, kind.colors(), text);
+    };
+    let enter = motion::cubic_bezier(theme::EASE_ENTER, state.enter_elapsed / theme::T_SHORT);
+    let mix = motion::cubic_bezier(theme::EASE_STANDARD, state.color_elapsed / theme::T_SHORT);
+    if enter < 1.0 || mix < 1.0 {
+        ctx.request_repaint();
+    }
+    let colors = mix_banner_colors(state.from.colors(), kind.colors(), mix);
+    paint_banner_moved(
+        ui,
+        kind,
+        colors,
+        text,
+        enter,
+        -theme::SLIDE_PX * (1.0 - enter),
+    )
+}
+
+/// Retained content of a [`banner_slot`], kept only for its exit.
+#[derive(Debug, Clone)]
+struct BannerSlotState {
+    kind: BannerKind,
+    text: String,
+    exit_elapsed: f32,
+    visible: bool,
+    pass: u64,
+}
+
+impl BannerSlotState {
+    fn empty() -> Self {
+        Self {
+            kind: BannerKind::Info,
+            text: String::new(),
+            exit_elapsed: 0.0,
+            visible: false,
+            pass: 0,
+        }
+    }
+}
+
+/// A notice slot: `Some((kind, text))` draws [`banner`]; once it becomes `None` the last banner
+/// leaves (fade and slide up, `T_SHORT_EXIT`, `EASE_EXIT`) instead of vanishing, then the slot is
+/// empty. Returns the banner response while something is drawn. The text is copied only when it
+/// changes; reduced motion removes it at once.
+pub fn banner_slot(
+    ui: &mut Ui,
+    id: egui::Id,
+    content: Option<(BannerKind, &str)>,
+) -> Option<Response> {
+    let ctx = ui.ctx().clone();
+    let pass = ctx.cumulative_pass_nr();
+    if let Some((kind, text)) = content {
+        let response = banner(ui, kind, text);
+        ctx.data_mut(|d| {
+            let s = d.get_temp_mut_or_insert_with(id, || BannerSlotState {
+                kind,
+                text: text.to_owned(),
+                exit_elapsed: 0.0,
+                visible: true,
+                pass,
+            });
+            if s.text != text {
+                text.clone_into(&mut s.text);
+            }
+            s.kind = kind;
+            s.exit_elapsed = 0.0;
+            s.visible = true;
+            s.pass = pass;
+        });
+        return Some(response);
+    }
+    let reduced = motion::prefs(&ctx).reduced;
+    let dt = motion::clamp_dt(ctx.input(|i| i.stable_dt));
+    let leaving = ctx.data_mut(|d| {
+        let s = d.get_temp_mut_or_insert_with(id, BannerSlotState::empty);
+        if !s.visible || reduced || s.pass.saturating_add(1) < pass {
+            s.visible = false;
+            s.pass = pass;
+            return None;
+        }
+        if s.pass != pass {
+            s.exit_elapsed += dt;
+        }
+        s.pass = pass;
+        if s.exit_elapsed >= theme::T_SHORT_EXIT {
+            s.visible = false;
+            return None;
+        }
+        Some((s.kind, s.text.clone(), s.exit_elapsed))
+    })?;
+    let (kind, text, elapsed) = leaving;
+    ctx.request_repaint();
+    let out = motion::cubic_bezier(theme::EASE_EXIT, elapsed / theme::T_SHORT_EXIT);
+    Some(paint_banner_moved(
+        ui,
+        kind,
+        kind.colors(),
+        &text,
+        1.0 - out,
+        -theme::SLIDE_PX * out,
+    ))
 }
 
 /// Centered status card (420 points wide at most) used when no frame can be shown.
@@ -769,12 +1014,17 @@ pub fn toggle_switch(
             );
         }
         Some(on) => {
-            let t = ui.ctx().animate_bool_with_time(id, on, 0.15);
-            let mut track = if on {
-                theme::SUCCESS_TOGGLE
-            } else {
-                theme::LINE
-            };
+            // Thumb on the spring (retargetable), track colour cross-faded (UI_MOTION.md G2).
+            let target = if on { 1.0 } else { 0.0 };
+            let t = motion::spring_value(ui.ctx(), id, target);
+            let track_t = motion::tween_value(
+                ui.ctx(),
+                id.with("soos_switch_track"),
+                target,
+                theme::T_SHORT,
+                theme::EASE_STANDARD,
+            );
+            let mut track = motion::mix_color(theme::LINE, theme::SUCCESS_TOGGLE, track_t);
             if interactive && response.hovered() {
                 track = theme::lighten(track, 0.1);
             }
