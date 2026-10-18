@@ -1,117 +1,140 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `chore/companion-wording` (PR #424, after the rebase onto `origin/main`)
-- **Base (merge-base)**: `3a5ab6a` (`feat(android): add the first-run feature tour to the native app (#428)`)
-- **Reviewed-Diff-Fingerprint**: `65faef9c79fac98d17f62d26879ebdd67562c05e6b628f57a0018ca904966cb1`
-- **Audited Files**: `AI/ARCHITECTURE.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/architect_spec_companion_wording.md`, `AI/auditor_constraints_companion_wording.md`,
-  `AI/walkthroughs/228_companion_wording.md`, `Docs/PACKAGING_AND_PROVISIONING.md`,
-  `Docs/REMOTE_COMPANION.md`, `README.md`, `scripts/setup.sh`,
-  `tests/invariants/src/companion_wording_contract.rs`, `tests/invariants/src/lib.rs`
+- **Target Branch**: `feat/gui-android-safe-keys`
+- **Base (merge-base)**: `4671888` (origin/main after #422, #424 and #428)
+- **Reviewed-Diff-Fingerprint**: `f457a30fa1e780ad637e8a79f016afa1a049047e638de75612f50f12656bfd50`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/231_gui_android_safe_keys.md`, `Docs/GUI_APPLICATION.md`, `Docs/REMOTE_COMPANION.md`, `crates/gui/src/feature_control.rs`, `crates/gui/src/onboarding.rs`, `crates/gui/tests/remote_android_edit_tests.rs`
 
 ## 1. Executive Summary
 
-Independent re-review after the branch was rebased from `74782b8` onto `3a5ab6a`, which adds
-#426 (GUI test deflake), #422 (Android alerts acknowledgement feedback) and #428 (native Android
-feature tour). The change stays wording only: the `setup.sh` help paragraph and closing summary
-line, the packaging defaults sentence, the `allow_funnel` example comment, two `AI/ARCHITECTURE.md`
-row headers and the README security sentence now match the setup defaults and the real `soos-gui`
-switches; a new std-only invariant module (CWD1–CWD5) pins that wording.
+Independent re-review after the rebase onto `origin/main` `4671888`. The raw diff against the new
+merge base (778 lines, 8 files) was read in full; it contains only the #429 change, no hunk of
+#422, #424 or #428 leaks into it.
 
-Rebase integrity, checked mechanically:
+`feature_control::disable_remote_keys` used to refuse any `remote.toml` with a line starting with
+`[`. It now accepts exactly one `[android]` header (optionally indented, spaced inside the
+brackets, followed by a `#` comment): top-level `key = true` lines above it are rewritten to
+`key = false`, the table lines are copied byte for byte, and a second header, any other header, or
+a key of the switch inside the table is `UnsupportedLayout`. A new
+`RemoteEditError::FunnelRequiredByAndroid` refuses the Internet access switch whenever the parsed
+file has an `android` key, before any edit, write or restart. `onboarding::toggle_route` appends a
+fixed note to the shown Internet access "off" command. The existing TOML verification (target keys
+`false` or absent, every other top-level key equal, `android` included, no key added) is unchanged
+and runs on every result.
 
-- `git range-diff 74782b8..origin/chore/companion-wording 3a5ab6a..HEAD`: the content commit
-  differs only in context lines (the matrix tail now ends with main's ATR rows, and the
-  `plan_evaluator_report.md` it replaces is now #428's instead of #409's).
-- For every file the branch touches, the sequence of added and removed lines of
-  `git diff -U0 74782b8 <old tip>` equals that of `git diff -U0 3a5ab6a 5417839` (all files
-  except the excluded plan evaluator report, whose content is byte-identical to the old tip).
-- The branch files not touched by main (`ARCHITECTURE.md`, spec, constraints, walkthrough 228,
-  packaging doc, `README.md`, `setup.sh`, the contract module, `plan_evaluator_report.md`) are
-  byte-identical between the old and new tips. The only conflict was the matrix tail.
-
-No claim of this branch is contradicted by #428 or #422 (see Logic & Architecture). No finding at
-MAJOR or above.
+On this tree: `cargo test --locked -p soos-gui -p soos-invariants -- --test-threads=4` passes
+(1070 tests, 0 failed, including `companion_wording_contract` CWD1–CWD5, `readme_contract`,
+`test_rmc_s4_remote_is_a_leaf_crate`, the OBT and GAK suites); `cargo clippy --locked -p soos-gui
+-p soos-invariants --all-targets -- -D warnings` and `cargo fmt --all -- --check` pass. No CRITICAL
+or MAJOR finding. No documentation fix was needed after the rebase.
 
 ## 2. Test Changes
 
 Mechanical listing on `target/candid_diff.patch`:
 
-- Test files touched: `tests/invariants/src/companion_wording_contract.rs` (new, 5 tests) and
-  `tests/invariants/src/lib.rs` (one `mod companion_wording_contract;` declaration added, nothing
-  removed).
-- Removed or changed checks (`^-.*assert|#[test]...`): one hit, patch line 17, the removed
-  `AI/ARCHITECTURE.md` "Unlock (opt-in)" row, which matches only the word "assertion" in prose.
-  It is not a test. No pre-existing assertion, test or test module changed.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
-- Inline test modules (`mod tests`): none touched.
+- Test files touched: one new file, `crates/gui/tests/remote_android_edit_tests.rs` (GAK1–GAK6).
+- Removed or changed assertions (`^-` with `assert`, `#[test]`, `proptest!`, `should_panic`): **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Inline `mod tests` added or removed: **none**.
+
+`crates/gui/tests/feature_control_tests.rs` is not in the diff:
+`test_obt_disable_refuses_unsupported_layouts` (an `[extra]` table, a quoted `"true"`, invalid TOML)
+is byte-identical to main and passes, because `[extra]` is not `[android]`. The OBT9 matrix row is
+not modified; the new component section states that OBT9 still holds for every table other than one
+`[android]` table, which matches the code and the ADR amendment.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- Claims checked against the code: `RemoteSwitch::key` (`crates/gui/src/feature_control.rs`)
-  maps Unlock, Funnel, Push, CameraView and OfflineAlerts only, with no `password_alerts` arm, so
-  the setup text "the failed-password alerts have no switch there" is true. `keys_to_clear` turns
-  off `camera_view_funnel` with Funnel or the camera view and `offline_alerts` with Push, matching
-  the README "also sets ... to `false`" sentence and the setup "also turns off the features that
-  need them".
-- Conflict with #428 (native Android tour): no branch-added line says any app has no tour. The
-  only branch line naming a tour is the README "feature switches of the first-run tour" in
-  `soos-gui`, which is pre-existing text rewrapped and names the `soos-gui` tour. #428's
-  `strings.xml` and `app.js` failed-password step say to turn the alerts off in `remote.toml`, not
-  in `soos-gui`, which agrees with this branch. `android_tour_contract` ATR8 (§2k no longer says the
-  app has no tour) passes on the rebased tree.
-- Conflict with #422 (alerts acknowledgement feedback): the branch says nothing about the
-  acknowledgement flow; no overlap.
-- The spec's out-of-scope note ("the Android app's own opt-in heartbeat wording") stays accurate:
-  #428 still calls the PC offline alerts the app's own opt-in check.
-- Matrix: one `companion-wording` component header, CWD1–CWD5 once each, no duplicate row id in
-  the whole file, main's ATR1–ATR9 and AAF1–AAF4 present once and unchanged, the new component
-  appended after ATR9.
+Scenarios attempted:
+
+- **Funnel under `[android]`** (on, already off, absent): refused with `FunnelRequiredByAndroid`
+  before the line walk, so nothing is written and `try-restart` is never called (GAK3, GAK5). This
+  matches the `soos-remote` error "[android] requires allow_funnel" (`crates/remote/src/config.rs`).
+  A top-level dotted key `android.package = ...` also creates the `android` key, so the pre-check
+  still refuses Funnel there. PASS.
+- **Safe switches never produce a file `soos-remote` refuses**: the only cross-key rules a disable
+  can violate run from dependent to prerequisite. `Push` clears `offline_alerts` ("offline_alerts
+  requires push_notifications"); `CameraView` clears `camera_view_funnel` ("requires camera_view");
+  `Unlock` and `OfflineAlerts` are not prerequisites of anything; `[android]` needs `rp_id` and
+  `allow_funnel`, neither of which a safe switch touches. `password_alerts` is never touched. GAK2
+  re-checks each result with the mirrored rule checker. PASS.
+- **Line preservation**: non-target lines are pushed unchanged (`out.push_str(line)`), the
+  `[android]` header and every table line included; GAK2 asserts line-by-line equality and that the
+  output ends with the original table text. PASS.
+- **Header spoofing**: `[android]x`, `[android]]`, `[android.extra]`, `[[android]]`, `["android"]`,
+  `[extra]` before or after `[android]`, and a second `[android]` all reach `UnsupportedLayout`
+  (the `in_table` guard rejects any header after the first). `[android] # c ]` is accepted and is
+  valid TOML. PASS.
+- **Multi-line string hiding a header or a key**: a `"""` string containing `[android]` turns on
+  table mode, so a later target line is refused; a string containing `allow_unlock = true` at top
+  level would be rewritten, but the verification parse then sees the string value changed and
+  returns `VerifyFailed` (pre-existing OBT9 guard, unchanged). PASS.
+- **Verification covers the table**: `android` is a top-level key of the parsed table, so the
+  "every other key equal" check proves the table was not altered. PASS.
 
 ### PAM Concurrency & Deadlines
 
-No `crates/pam` change. PASS (not applicable).
+No change under `crates/pam`, no daemon or IPC change. N/A — PASS.
 
 ### Panic Safety & Fail-Closed
 
-No production Rust change. The only shell change is text inside the `usage()` heredoc and one
-double-quoted `info` string: no `$`, backtick or unescaped quote added, so `--help` does no
-expansion. PASS.
+`is_android_header` uses `strip_prefix`, `find`, `get` and `saturating_add` only; no `unwrap`,
+`expect`, indexing or unchecked arithmetic in the new production code. Every refusal returns an
+error before `write_user_file_atomically`. No path turns an error into a success. PASS.
 
 ### Test Integrity & Anti-Weakening
 
-The CWD tests read the real files and would fail on the old wording (walkthrough 228 records each
-red run; CWD5 checks the detector on synthetic old and new text). CWD2 ties the setup claim to
-the GUI code, so a future `password_alerts` switch breaks the test instead of leaving the help
-wrong. No existing test weakened. PASS.
+No pre-existing assertion changed (section 2). The new tests can fail against plausible wrong
+implementations: accepting any table (GAK4 fails), editing inside `[android]` (GAK4), letting
+Funnel through (GAK3/GAK5), dropping the `offline_alerts` cascade (GAK2 rule checker), mangling
+the table (GAK2 suffix and parsed-table equality). GAK1 proves the rule checker rejects the broken
+variants, so it is not vacuous. The checker mirrors `soos-remote` rules instead of calling
+`parse_config_with_android`, because RMC-S4 forbids depending on `soos-remote`; this is documented
+and the mirrored rules match `config.rs`. PASS.
 
 ### Memory, Bounds & Secrets
 
-No runtime code, no new log line, no credential or biometric data. PASS.
+The output buffer is bounded by the input length plus at most one byte per rewritten line
+(`false` vs `true`); the input is still read through the existing bounded reader. Error messages
+are fixed strings and carry no file content; nothing is logged. The write is still the atomic
+0600, symlink-refusing `write_user_file_atomically` (GAK5 checks mode 0600). PASS.
 
 ### Supply Chain & Automation
 
-`scripts/setup.sh` changes text only; no new command, dependency, workflow or action. PASS.
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. N/A — PASS.
 
 ### English-Only Policy
 
-All added text is English. PASS.
+All code, comments, messages and docs in the diff are English. PASS.
+
+### Consistency With #424 And #428 (After The Rebase)
+
+- `README.md` (from #424) says Funnel, remote unlock, the camera view, push and offline alerts each
+  have an off switch in `soos-gui`, and that an `[android]` table needs `allow_funnel`. Both stay
+  true: the switch exists and refuses with a specific message when `[android]` is configured. No
+  #424 text claims that the GUI cannot change a file with `[android]`, so nothing had to be updated.
+- `Docs/REMOTE_COMPANION.md` §5 (this branch) now lists `offline_alerts` and the `[android]`
+  behaviour, consistent with #424's §2k wording and with #428's native tour text, which both say
+  `allow_funnel = false` goes with `camera_view_funnel = false` and no `[android]` table
+  (`crates/remote/assets/app.js`, `android/app/src/main/res/values/strings.xml`).
+- `Docs/GUI_APPLICATION.md` §1e row and paragraph match the code; `AI/ARCHITECTURE.md` and
+  `scripts/setup.sh` say nothing about the GUI and tables.
+- `companion_wording_contract` (CWD1–CWD5) and `readme_contract` pass on this tree. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `README.md:297` — with three tours now (`soos-gui`, web app, native Android
-  app after #428), "the feature switches of the first-run tour" could say "the `soos-gui`
-  first-run tour" for clarity. The sentence already says "in `soos-gui`", so it is not wrong.
-- **[SUGGESTION]** `README.md:296` — "offline alerts" here are the server `offline_alerts` key;
-  the Android app's own "PC offline alerts" switch (in the app's Settings) is a different feature.
-  An optional follow-up could name both to avoid confusion.
+- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md:2726` — the OBT9 criterion text still reads "refuses
+  tables". It is qualified by the new `gui-android-safe-keys` section ("OBT9 still holds for every
+  table other than one `[android]` table") and the test it cites is unchanged, so this is not
+  wrong; a later matrix pass could add "other than one `[android]` table" to the OBT9 cell.
+- **[SUGGESTION]** `README.md:56` — "all but the failed-password alerts can be turned off in
+  soos-gui" does not mention that Internet access needs the `[android]` table removed first. The
+  security section (line 303) states the `[android]` requirement, so the README is not
+  contradicted; an owner may want the short sentence to say it too.
 
 ## 5. Final Verdict
-
-Tests: `cargo test --locked -p soos-invariants -- --test-threads=4` on the rebased tree, 787
-passed, 0 failed, 0 ignored.
 
 **VERDICT: APPROVED**

@@ -373,6 +373,12 @@ fn remote_key_command(key: &str, value: bool) -> String {
     )
 }
 
+/// Why Internet access stays on while the native Android app is configured (GitHub #429):
+/// `soos-remote` refuses an `[android]` table without `allow_funnel = true` (exit 78), so the
+/// GUI never turns Funnel off in such a file.
+const FUNNEL_ANDROID_NOTE: &str = "Not while remote.toml has an [android] table: soos-remote \
+     requires allow_funnel = true for the Android app, so remove the [android] table first.";
+
 /// What `soos-remote` needs before a key can be turned on (it refuses to start otherwise).
 fn remote_prerequisites(switch: RemoteSwitch) -> &'static str {
     match switch {
@@ -482,7 +488,12 @@ pub fn toggle_route(snapshot: &FeatureSnapshot, feature: Feature, turn_on: bool)
             }
             let has_keys = matches!(snapshot.remote_config, RemoteConfigState::Keys(_));
             if snapshot.running_as_root || !has_keys {
-                ToggleRoute::Command(remote_key_command(switch.key(), false))
+                let mut text = remote_key_command(switch.key(), false);
+                if switch == RemoteSwitch::Funnel {
+                    text.push(' ');
+                    text.push_str(FUNNEL_ANDROID_NOTE);
+                }
+                ToggleRoute::Command(text)
             } else {
                 ToggleRoute::Action(FeatureAction::DisableRemote(switch))
             }

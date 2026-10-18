@@ -1540,12 +1540,20 @@ A missing file, an unknown key or an invalid value exits with status 78 (`EX_CON
 unit does not retry (`RestartPreventExitStatus=78`); runtime failures exit 1 and are restarted.
 The service also refuses to start when its real or effective uid is 0.
 
-`soos-gui` can turn `allow_unlock`, `allow_funnel`, `push_notifications` and `camera_view` **off**
-from its feature tour (`Docs/GUI_APPLICATION.md` §1e, GitHub #379): it rewrites only the
-`key = true` line to `key = false` (and `camera_view_funnel` with `allow_funnel` or
-`camera_view`), verifies the result with a TOML parse, writes it atomically with mode 0600 and
-runs `systemctl --user try-restart soos-remote.service`. Turning a key back on is shown as the
-exact edit, because each widens exposure and has prerequisites only the service validates.
+`soos-gui` can turn `allow_unlock`, `allow_funnel`, `push_notifications`, `camera_view` and
+`offline_alerts` **off** from its feature tour (`Docs/GUI_APPLICATION.md` §1e, GitHub #379): it
+rewrites only the `key = true` line to `key = false` (and `camera_view_funnel` with
+`allow_funnel` or `camera_view`, `offline_alerts` with `push_notifications`), verifies the result
+with a TOML parse, writes it atomically with mode 0600 and runs
+`systemctl --user try-restart soos-remote.service`. Turning a key back on is shown as the exact
+edit, because each widens exposure and has prerequisites only the service validates.
+
+With an `[android]` table (GitHub #429), the GUI edits the top-level keys above it and copies the
+table byte for byte, so remote unlock, push alerts, offline alerts and the camera view can still
+be turned off. Internet access is refused with a specific message: `[android]` requires
+`allow_funnel = true` (exit 78 otherwise), so remove the `[android]` table first, then set
+`allow_funnel = false`. Any other table, or a key of the switch inside a table, is refused and
+nothing is written.
 
 ## 6. HTTP surface
 

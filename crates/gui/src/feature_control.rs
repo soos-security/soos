@@ -499,9 +499,21 @@ pub fn read_remote_config(path: &Path) -> RemoteConfigState {
 /// Why `remote.toml` was not edited.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RemoteEditError {
-    /// Tables are not part of the `soos-remote` schema.
-    #[error("remote.toml uses a layout the GUI does not edit (tables)")]
+    /// A table other than one `[android]` table (another table, a sub-table, an array of
+    /// tables, a quoted header), or a key of the switch inside a table.
+    #[error(
+        "remote.toml uses a layout the GUI does not edit (a table other than [android], or \
+         the key inside a table)"
+    )]
     UnsupportedLayout,
+    /// Internet access (`allow_funnel`) cannot be turned off while `[android]` is configured:
+    /// `soos-remote` requires `allow_funnel = true` with an `[android]` table (exit 78).
+    #[error(
+        "Internet access cannot be turned off while remote.toml has an [android] table: \
+         soos-remote requires allow_funnel = true for the Android app. Remove the [android] \
+         table first, then set allow_funnel = false"
+    )]
+    FunnelRequiredByAndroid,
     /// The key has a value other than `true` / `false` on its line.
     #[error("remote.toml sets `{0}` to a value that is not true or false")]
     UnsupportedValue(&'static str),
@@ -545,34 +557,69 @@ fn bool_with_comment(rest: &str) -> Option<(bool, &str)> {
     }
 }
 
-/// Turns `keys` off in `remote.toml` text by rewriting each `key = true` line to
+/// Top-level key of the native Android app binding of `soos-remote` (ADR 2026-10-13).
+const ANDROID_TABLE: &str = "android";
+
+/// `true` when `trimmed` (a line without its leading whitespace) is exactly the `[android]`
+/// table header, optionally spaced inside the brackets and followed by a `#` comment.
+fn is_android_header(trimmed: &str) -> bool {
+    let Some(inner) = trimmed.strip_prefix('[') else {
+        return false;
+    };
+    let Some(close) = inner.find(']') else {
+        return false;
+    };
+    let (name, rest) = (inner.get(..close), inner.get(close.saturating_add(1)..));
+    let (Some(name), Some(rest)) = (name, rest) else {
+        return false;
+    };
+    let rest = rest.trim();
+    name.trim() == ANDROID_TABLE && (rest.is_empty() || rest.starts_with('#'))
+}
+
+/// Turns `keys` off in `remote.toml` text by rewriting each top-level `key = true` line to
 /// `key = false`. Returns `Ok(None)` when nothing changes; never adds a key and never touches
-/// another line. The result is verified by a TOML parse: every target key reads `false` or is
-/// absent and every other key is unchanged.
+/// another line. The only table allowed is one `[android]` table (GitHub #429): the lines above
+/// it are edited, the table itself is copied byte for byte. The result is verified by a TOML
+/// parse: every target key reads `false` or is absent and every other key, `[android]`
+/// included, is unchanged.
 ///
 /// # Errors
 ///
-/// [`RemoteEditError`] when the text is not valid TOML, uses tables, sets a target key to a
-/// value the edit does not handle, or the edited text does not verify.
+/// [`RemoteEditError`] when the text is not valid TOML, uses a table other than `[android]`
+/// or has a target key inside a table, targets `allow_funnel` while `[android]` is configured
+/// (`soos-remote` requires it), sets a target key to a value the edit does not handle, or the
+/// edited text does not verify.
 pub fn disable_remote_keys(
     text: &str,
     keys: &[&'static str],
 ) -> Result<Option<String>, RemoteEditError> {
     let original: toml::Table = text.parse().map_err(|_| RemoteEditError::Invalid)?;
+    if original.contains_key(ANDROID_TABLE) && keys.contains(&"allow_funnel") {
+        return Err(RemoteEditError::FunnelRequiredByAndroid);
+    }
     let mut out = String::with_capacity(text.len());
     let mut changed = false;
+    let mut in_table = false;
     for line in text.split_inclusive('\n') {
         let (body, newline) = match line.strip_suffix('\n') {
             Some(body) => (body, "\n"),
             None => (line, ""),
         };
-        if body.trim_start().starts_with('[') {
-            return Err(RemoteEditError::UnsupportedLayout);
+        let trimmed = body.trim_start();
+        if trimmed.starts_with('[') {
+            if in_table || !is_android_header(trimmed) {
+                return Err(RemoteEditError::UnsupportedLayout);
+            }
+            in_table = true;
+            out.push_str(line);
+            continue;
         }
         let target = split_key_line(body).and_then(|(indent, key, rest)| {
             keys.iter().find(|k| **k == key).map(|k| (indent, *k, rest))
         });
         match target {
+            Some(_) if in_table => return Err(RemoteEditError::UnsupportedLayout),
             Some((indent, key, rest)) => match bool_with_comment(rest) {
                 Some((true, comment)) => {
                     out.push_str(indent);

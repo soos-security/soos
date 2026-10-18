@@ -226,8 +226,20 @@ the header band reopens it at any time on its overview page (every feature with 
 | Face unlock | `pkexec /usr/bin/touch /etc/soos/disabled` | `pkexec /usr/bin/rm -f -- /etc/soos/disabled` |
 | Presence auto-unlock | `pkexec /usr/bin/touch /etc/soos/presence.disable` | `pkexec /usr/bin/rm -f -- /etc/soos/presence.disable`; shown command when `daemon.toml` disables it; unavailable while face unlock is off |
 | Phone companion | `systemctl --user disable --now soos-remote.service` | `systemctl --user enable --now soos-remote.service` (masked unit: unmask command) |
-| Remote unlock, Internet access, push alerts, camera view, offline alerts | `remote.toml` key set to `false` (with `camera_view_funnel` when it depends on it, and `offline_alerts` when push alerts are turned off, because `soos-remote` refuses offline alerts without push), then `systemctl --user try-restart soos-remote.service` | shown key and restart command, with the prerequisites `soos-remote` checks |
+| Remote unlock, Internet access, push alerts, camera view, offline alerts | `remote.toml` key set to `false` (with `camera_view_funnel` when it depends on it, and `offline_alerts` when push alerts are turned off, because `soos-remote` refuses offline alerts without push), then `systemctl --user try-restart soos-remote.service`; a file ending with an `[android]` table is edited above it, but Internet access is refused there (see below) | shown key and restart command, with the prerequisites `soos-remote` checks |
 | Wi-Fi lock | `pkexec soos-admin network-lock uninstall` | `pkexec soos-admin network-lock install` only when the rfkill rule is known to be absent; otherwise the `--rfkill` command is shown |
+
+  **`remote.toml` with an `[android]` table** (GitHub #429): the edit
+  (`feature_control::disable_remote_keys`) changes only top-level `key = true` lines and copies
+  one `[android]` table (header optionally spaced inside the brackets, optional `#` comment) byte
+  for byte; the TOML verification also checks that `[android]` is unchanged. Remote unlock, push
+  alerts, offline alerts and the camera view (with their dependent keys) can therefore be turned
+  off. Internet access is refused with `RemoteEditError::FunnelRequiredByAndroid` ("Internet
+  access cannot be turned off while remote.toml has an [android] table …"), because
+  `soos-remote` requires `allow_funnel = true` while `[android]` is configured (exit 78); the
+  shown "off" command for Internet access says so too. Any other table, a sub-table, an array of
+  tables, a quoted header or a key of the switch inside a table is still refused
+  (`RemoteEditError::UnsupportedLayout`), and nothing is written or restarted on a refusal.
 
   The GUI process never writes a root-owned file: root changes run under `pkexec` (Polkit
   administrator authentication) with fixed argument vectors and absolute programs
