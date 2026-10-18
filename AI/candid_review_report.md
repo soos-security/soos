@@ -1,69 +1,139 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `feat/lockscreen-installer`
-- **Base (merge-base)**: `d543bbd`
-- **Reviewed-Diff-Fingerprint**: `7fecdff83626311a99153303e54ff4ebb58e6c2e1e30b1286e528114c19dcd6d`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_lockscreen_installer.md`, `AI/walkthroughs/233_lockscreen_installer.md`, `Docs/LOCKSCREEN_WIDGET.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `packaging/arch/PKGBUILD`, `packaging/rpm/soos.spec`, `scripts/install.sh`, `scripts/setup.sh`, `scripts/uninstall.sh`, `tests/invariants/src/lib.rs`, `tests/invariants/src/lockscreen_installer_contract.rs`
+- **Target Branch**: `feat/ir-active-cues`
+- **Base (merge-base)**: `3f76090` (origin/main after #430)
+- **Reviewed-Diff-Fingerprint**: `e638fa05e55619c8166ff4ca254273e0e4b034e6995ee4e1a99f2b5075216895`
+- **Audited Files**: `AI/BACKLOG.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_ir_active_cues.md`, `AI/auditor_constraints_ir_active_cues.md`, `AI/tester_contract_ir_active_cues.md`, `AI/walkthroughs/232_ir_active_cues.md`, `Docs/VISION_CRATE.md`, `crates/vision/src/ir_active.rs`, `crates/vision/src/lib.rs`, `crates/vision/tests/ir_active_cues_tests.rs`, `tests/fixtures/mod.rs`, `tests/invariants/src/ir_active_contract.rs`, `tests/invariants/src/lib.rs`
 
 ## 1. Executive Summary
 
-Re-review after the rebase of `feat/lockscreen-installer` (GitHub #432, PR 6 of #352) from merge-base `3f76090` onto `origin/main` `d543bbd`, which added #445 (`soos-daemon --check-config`, setup validation of the `daemon.toml` it creates, DCC1–DCC11) and #440 (setup daemon start bounds of 90 s, SET40–SET42). The branch's own change is unchanged by the rebase: for every file except `AI/VERIFICATION_MATRIX.md`, the sorted set of added and removed lines of `git diff 3f76090 7baf609` (pre-rebase) equals that of `git diff d543bbd b375e31` (post-rebase); the matrix differs only by a blank line and a `---` line that now separate the appended `lockscreen-installer` section from the `daemon-check-config` section (cosmetic, consistent with the rest of the file). No semantic conflict with #440 or #445 was found. No CRITICAL or MAJOR finding; the three MINOR items and two suggestions of the previous review still apply unchanged, plus one new documentation SUGGESTION.
+The branch adds `soos_vision::ir_active`, a pure, zero-I/O, veto-only evaluation of a lit/unlit
+IR frame pair (static pair, response ratio, saturation, reflectance band, inverse-square relief,
+corneal glint), synthetic fixtures in `soos-test-fixtures::ir_strobe`, 24 contract tests, 4 static
+invariants, and documentation (ADR, matrix IRA29–IRA37, backlog, `Docs/VISION_CRATE.md` §2.4.5,
+walkthrough 232). There is no consumer: `soos-daemon`, `soos-policy` and `crates/pam` are
+untouched, so no authentication path changes. The diff is add-only for every test file. No
+CRITICAL, MAJOR or MINOR finding.
 
-Re-run evidence (this review, mandated environment, `CARGO_TARGET_DIR=~/.cache/soos-targets/lockscreen-installer`): `cargo test --locked -p soos-invariants -- --test-threads=3` → 805 passed, 0 failed, 0 ignored (includes LKI1–LKI10, SET40–SET42, DCC1–DCC10, LKG7); `bash -n` on `scripts/install.sh`, `scripts/setup.sh`, `scripts/uninstall.sh` → ok (shellcheck is not installed on this host).
+Re-run by this reviewer (`LIBONNXRUNTIME_NO_PKG_CONFIG=1`, dedicated `CARGO_TARGET_DIR`,
+`CARGO_INCREMENTAL=0`, debug info off, `CARGO_BUILD_JOBS=3`, `--test-threads=3`):
 
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
+- `cargo test -p soos-vision --test ir_active_cues_tests`: 24 passed.
+- `cargo test -p soos-vision`: every target green (no failure).
+- `cargo test -p soos-invariants ir_active`: 4 passed (787 filtered, 791 total, matching the walkthrough).
+- `cargo clippy -p soos-vision -p soos-invariants -p soos-test-fixtures --all-targets -- -D warnings`: clean.
+- `cargo fmt --check -p soos-vision`: clean.
+- A throw-away binary outside the repository printed `ir_active_statistics` and the verdict for every
+  fixture; every value of the walkthrough §6 table (face response, ratio, saturated fraction, lit
+  mean, relief, glints, result) matches the code's output.
 
-- Test files touched: `tests/invariants/src/lib.rs` (12 added lines: doc comment plus `#[cfg(all(test, unix))] mod lockscreen_installer_contract;`), `tests/invariants/src/lockscreen_installer_contract.rs` (new file). Both byte-identical in content to the pre-rebase branch.
-- Removed/changed checks (`^-` lines with `assert`, `#[test]`, `proptest!`, `should_panic`): **none**.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
+## 2. Test Changes
+
+Mechanical listing from `target/candid_diff.patch`:
+
+- Test files touched: `crates/vision/tests/ir_active_cues_tests.rs` (new), `tests/fixtures/mod.rs`
+  (additions only: `ActivePresentation`, `ActivePair`, `active_pair` inside `ir_strobe`),
+  `tests/invariants/src/ir_active_contract.rs` (new), `tests/invariants/src/lib.rs` (one module
+  declaration added).
+- Removed or changed assertion / `#[test]` / proptest lines (`^-` grep): **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
 - Inline `mod tests` changes: **none**.
-- The 22 removed lines of the patch are all in `AI/DECISIONS.md` (three ADR amendments), `Docs/LOCKSCREEN_WIDGET.md`, `Docs/PACKAGING_AND_PROVISIONING.md` and `scripts/setup.sh` (`root_preflight` path list, `write_state` printf); each is the same line the pre-rebase branch replaced, so no main-side text of #440 or #445 is lost. No pre-existing assertion removed or changed; `setup_contract.rs` and `daemon_check_config_contract.rs` (main) are untouched by the branch.
+- `git diff $(git merge-base origin/main HEAD) HEAD -- tests 'crates/*/tests' android/app/src/test`
+  contains no removed line: no pre-existing assertion was removed or changed. The existing
+  `ir_strobe` consumers (`soos-camera-v4l` strobe tests) use functions the diff does not touch.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Phase order after the rebase (`setup.sh:2083-2092`): access → presence → lock widget → camera view (daemon). The #445 check (`setup.sh:1925`) sits between `JOURNAL+=(daemon_toml_created)` and the restart, unchanged (DCC9 green). Scenario: `--lock-widget off` plus camera view on, `--check-config` refuses → `phase_preview` returns 1 → `fail_and_rollback "camera view (daemon)"` replays the journal in reverse, removing `lockwidget.disable` (`lock_widget_flag_created`) and the created `/etc/soos` like the presence flag; exit 1 skips the user half (`run_lockscreen_step` only for 0 or 3). PASS.
-- Scenario: the daemon stays down even without `daemon.toml` (`PREVIEW_DAEMON_DOWN`, exit 70) → `finish_with_state` keeps the lock-widget flag and records it in the state like presence; the user half is skipped. Consistent with the documented "nothing else rolled back". PASS.
-- Timeouts (#440): the branch adds no `systemctl` call on `soos-daemon.service`; its only new bounded calls are `gnome-extensions list --enabled` / `enable` under `QUERY_TIMEOUT_S` = 10 s in the user half, which is a read-mostly user call, not a unit start, so SET40's `UNIT_START_TIMEOUT_S` rule does not apply and stays green. The rollback entry `daemon_toml_created` keeps its 90 s `try-restart`. PASS.
-- Default state file: with the widget on and no flag, `lock_keys` is empty and the format-1 content is byte-identical, so the #445 Docker harness F1/F2 (`tests/docker/setup_root_preview_test.sh`) sees the same state; its fake checkout has no `packaging/` tree, so the new `system_up_to_date` comparisons are skipped and the stub `install.sh` behaviour is unchanged; no locker exists in the container, so `run_lockscreen_step` returns at once. PASS.
-- LKG7 change-set guard (`lockscreen_gnome_contract.rs:453`): diffed against the new merge-base, the branch touches no `packaging/gnome-shell/` file, so the guard returns early; it also touches no `crates/`, so it would pass even if it ran. #445's `crates/daemon/` change is on main and outside the branch diff. PASS.
-- `install.sh` / `uninstall.sh` / packaging: main did not modify them between `3f76090` and `d543bbd`; branch hunks unchanged. PASS.
-- The previous MINOR finding on the `--sysconfdir` kill-switch mismatch is still present (see §4).
+
+- Box far outside the frame: clamping gives a window narrower than 16 px → `InvalidGeometry`. PASS.
+- Inverted, NaN or infinite box / landmark: rejected before any cast (`face_window`, `finite_point`
+  over all five landmarks). PASS.
+- Eye-corner square centred outside the crop: `square` returns `None` when `x0 > x1` →
+  `InvalidGeometry` (fail closed, never an empty region silently counted). PASS.
+- Swapped pair: signed difference gives a negative face response → `NoResponse`. PASS (test).
+- Negative or near-zero background response: denominator `max(·, 1)` keeps the ratio finite and
+  never inflates it beyond `face_response`; the absolute `min_face_response ≥ 20` still applies. PASS.
+- Edge band computed as face sum minus inner window sum: the 16 px minimum side gives band 2 and an
+  inner window of 12, never empty; checked explicitly anyway. PASS.
+- Cue order matches the ADR, the `Docs/VISION_CRATE.md` table and the doc comment; the static pair
+  is checked after input validation and before any statistic, as documented. PASS.
+- Single source of truth: defaults are the `IR_ACTIVE_*` constants; `validate()` lower bounds
+  (response > 0, ratios ≥ 1, `min_glint_pixels ≥ 1`, `max_glint_fraction > 0`) make it impossible
+  to switch the response, relief or glint cue off with a valid configuration, as documented. The
+  saturation cue and the reflectance band can be widened to no-ops by a valid configuration; the
+  docs only claim the three cues above, so the claim is accurate (see SUGGESTION 2). PASS.
+- Scope: no daemon, policy, protocol, PAM or config key change; matches GitHub #431 split item 2. PASS.
 
 ### PAM Concurrency & Deadlines
-- No file under `crates/pam` changed; no PAM stack edit. PASS (not applicable).
+
+- `crates/pam` is not in the diff; no thread, runtime or blocking call is added anywhere. PASS (N/A).
 
 ### Panic Safety & Fail-Closed
-- No Rust production code changed. New shell functions are called in `if`/`||` contexts; `phase_lock_widget` failure → `fail_and_rollback "lock widget"`; the user step never changes `rc`. No path turns an error into authentication success. PASS.
+
+- No `unwrap`, `expect`, `panic!`, `unreachable!` or direct indexing in `ir_active.rs`; every slice is
+  taken with `slice::get` through `row_slice` with checked multiplication. PASS.
+- Casts: `f32 → usize` only on values clamped to `[0, width]`; `f32 → i64` only on finite landmarks
+  already proven inside a window of at most 1024 px (eye corners at most `0.30 d` beyond it). PASS.
+- Integer sums: at most 1024 × 1024 × 255 per region in `i64` / `u64`; glint counts converted to
+  `u32` with `try_from`. PASS.
+- Every non-finite statistic becomes `InvalidFrames` (`to_f32`), so the threshold comparisons never
+  see NaN; `prop_ira_active_arbitrary_input_never_panics` also checks that any `Ok` is consistent
+  with every threshold. PASS.
+- `IrActiveCuesClear` has a private field and no constructor besides the evaluation; no `is_live`. PASS.
 
 ### Test Integrity & Anti-Weakening
-- §2 listing reviewed: additions only, identical to the pre-rebase branch. LKI tests run the real scripts against stages and stubs and would fail for root enable, locker execution, config writes or a missing journal entry. PASS.
+
+- Each attack fixture is asserted against its exact rejection reason, and
+  `test_ira_active_each_cue_alone_vetoes_the_shaded_head` tightens one threshold at a time and
+  expects that cue's reason, so a stub returning a fixed error or a silently skipped cue would fail.
+  PASS.
+- The bona fide test asserts the statistics against the thresholds and
+  `eye_region_pixels > glint_pixels`. PASS.
+- No pre-existing test modified (section 2). PASS.
 
 ### Memory, Bounds & Secrets
-- Unchanged from the previous review: bounded `gnome-extensions` calls, 64 KiB match window, `set -C` flag creation, symlink refusals in `root_preflight` and `phase_lock_widget`, no secret, frame or embedding printed. PASS.
+
+- Frame bound 4096 × 4096 checked before any work; crop bound 1024 × 1024 checked before
+  allocation; the two crop copies are `Zeroizing<Vec<u8>>` with exact capacity (no reallocation). PASS.
+- `Crop::rows` collects at most one borrowed `(&[u8], &[u8])` pair per crop row (at most 1024
+  entries, no pixel copy). PASS.
+- No logging, no I/O (invariant `test_ira_active_module_is_zero_io_and_silent` and manual read);
+  rejection and config error messages carry no value; statistics are aggregates only. PASS.
+- No `unsafe`; `#![forbid(unsafe_code)]` kept in `soos-vision`. PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, `deny.toml`, `.github/` or hook change. PASS.
+
+- No `Cargo.toml`, `Cargo.lock`, `deny.toml`, `.github/`, `scripts/` or hook change; `zeroize`,
+  `soos-frame` and `soos-inference-ort` were already dependencies of `soos-vision`. PASS (N/A).
 
 ### English-Only Policy
-- All added text is English. PASS.
 
-### Traceability (DECISIONS and matrix)
-- `AI/DECISIONS.md`: no duplicated ADR heading; the 2026-10-18 entries appear once each, in order: Android tour (#427), `--check-config` (#441), lock-screen installer (#432).
-- `AI/VERIFICATION_MATRIX.md`: no duplicated row id; one `lockscreen-installer` component section (LKI1–LKI12) after `daemon-check-config`; SET40–SET42 present once.
+- No accented Latin characters in the patch; code, comments and docs are in English. PASS.
+
+### Factual Accuracy of Documentation
+
+- ADR, `Docs/VISION_CRATE.md` §2.4.5, backlog and walkthrough thresholds (20, 1.5, 250, 5 %,
+  [50, 200], 1.2, 240, 120, 1, 25 %), bounds (16 px, 8 px, 64 px, 1024 × 1024, 4096 × 4096), region
+  geometry (50 % ring, 15 % band, `0.25 d`, `0.30 d` / `0.08 d`, `max(2, 0.15 d)`) and cue order
+  match `ir_active.rs`. The §2.4.1 cross-reference exists. IRA29–IRA37 follow IRA1–IRA28 without
+  collision; walkthrough 232 follows 231. The matrix statement that the branch is not registered in
+  `scripts/sync_issue.py` is true (no match). The walkthrough statistics table matches the code
+  output (section 1). PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `scripts/setup.sh:510` — `LOCK_WIDGET_FLAG` follows `--sysconfdir`, but `packaging/gnome-shell/soos-lockscreen@soos/extension.js` hard-codes `/etc/soos/lockwidget.disable`; with `--sysconfdir` other than `/etc`, `--lock-widget off` creates a file the extension never reads. Warn when `SYSCONFDIR != /etc` (as the camera-view step already reports `manual (not applied)`), or document the restriction. (Carried over.)
-- **[MINOR]** `Docs/LOCKSCREEN_WIDGET.md` and `Docs/PACKAGING_AND_PROVISIONING.md:105` — "nothing enabled or printed" with the widget off, while `setup.sh:1095` still prints the off notice; align with the ADR wording ("prints no locker line"). (Carried over.)
-- **[MINOR]** `scripts/setup.sh:1130` — the DONE line promises "the card shows from the next lock" even when GNOME Shell may still need a log-out; consider appending the log-out hint. (Carried over; owner row LKI12.)
-- **[SUGGESTION]** `Docs/PACKAGING_AND_PROVISIONING.md:89` — the **Rollback** paragraph lists the lock-widget flag but still says the rollback happens "when access, presence or an interrupt fails"; it also runs on a lock-widget failure and on a camera-view failure (including the #445 `--check-config` refusal). Name those phases.
-- **[SUGGESTION]** `Docs/PACKAGING_AND_PROVISIONING.md` §3.0 — "a later `--uninstall` can reverse exactly what setup did" refers to a `setup.sh --uninstall` that does not exist yet. (Carried over.)
-- **[SUGGESTION]** `scripts/uninstall.sh` — the snippet removal checks only that `share/soos/lockscreen` is not a link, not `share/soos` itself (single named `rm -f`, low impact). (Carried over.)
+- **[SUGGESTION]** `crates/vision/src/ir_active.rs:591` — `Crop::rows` allocates a small `Vec` of
+  row slice pairs per region; iterating rows directly would avoid the allocation. Bounded, no
+  correctness impact.
+- **[SUGGESTION]** `crates/vision/src/ir_active.rs:211` — a valid configuration can neutralise the
+  saturation and reflectance cues (`max_saturated_fraction = 1`, band `[0, 255]`). This matches the
+  documentation, which only promises that the response, relief and glint cues cannot be switched
+  off; the consumer PR (split item 4) should decide whether stricter bounds are wanted.
+
+Owner hardware checks IRA36 and IRA37 remain pending (recorded in the matrix and backlog).
 
 ## 5. Final Verdict
-
-The rebase preserved the branch's own changes, composes correctly with #440 and #445 (phases, journal, rollback, timeouts, SET/DCC/LKG7 contracts), changed no pre-existing assertion and introduced no duplicate in DECISIONS or the matrix; the invariant suite is green (805 passed).
 
 **VERDICT: APPROVED**
