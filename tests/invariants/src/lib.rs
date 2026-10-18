@@ -467,6 +467,14 @@ mod android_native_contract;
 #[cfg(all(test, unix))]
 mod android_heartbeat_contract;
 
+/// Acknowledgement feedback of the alerts card in the native Android app: the pure
+/// `AlertsFeedback` helper and its JVM tests, every refresh clearing the feedback first, the
+/// carried refusal of the follow-up refresh, the login-required text routed to the screen
+/// message, the unchanged Acknowledge rule in parity with the web app, documentation (GitHub
+/// #420, part of #357, follow-up of #404; rows AAF1-AAF4).
+#[cfg(all(test, unix))]
+mod android_alerts_feedback_contract;
+
 /// Phone onboarding tour of the `soos-remote` web app: the single marked `localStorage` block
 /// (one key `soos-remote-tour-v1`, one fixed value, every access in one `try`/`catch`), no
 /// other storage API, fixed English text with the `soos-gui` wording, no data read, no request

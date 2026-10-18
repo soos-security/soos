@@ -1093,6 +1093,16 @@ in the web app for now. The app is sideloaded only (no store) and its applicatio
   type, more than 32 entries or a body over 16 KiB is treated as unreadable ("Alerts could not be
   loaded"). Every text on the card is a fixed string of the app: no server text, status number or
   exception text is ever displayed.
+  Every refresh clears the acknowledgement message (GitHub #420): opening the screen, *Refresh*,
+  pull to refresh, sign-in, sign-out and *Lock PC* all reload the view without the previous
+  message, so "Acknowledged." never stays under a newer view. A refused acknowledgement keeps its
+  fixed text under the fresh view it loads (for example the `stale_view` text). If the
+  acknowledgement is refused with `login_required` and the refresh finds the session signed out,
+  the alerts card is hidden and the screen message says "Your session ended. Sign in again."
+  The *Acknowledge* button follows the web app's rule: it is shown while counts are pending and
+  the view has an epoch, whatever the state (a `starting` or `unavailable` state still
+  acknowledges; without any data the view has no epoch and no count). The decision is the pure
+  helper `alerts/AlertsFeedback.kt`, covered by JVM unit tests (matrix AAF1–AAF4).
 - **Sign-in over Funnel.** The app uses Android Credential Manager (Android 14 or later, no
   Google Play services library in the app). It runs the existing login ceremony: login options,
   then the passkey prompt with user verification, then login verify. The server still uses the
@@ -1241,6 +1251,11 @@ password at the lock screen or in `sudo`, then:
 3. Repeat over Funnel after a passkey sign-in.
 4. Restart `soos-remote` between reading and acknowledging: the app reports the stale view, shows
    the fresh one, and the next *Acknowledge* works.
+5. Acknowledgement messages (matrix AAF4): after "Acknowledged.", tap *Refresh* (and, separately,
+   pull to refresh): the message disappears. Over Funnel, with the PC offline alerts off, let the
+   app show pending counts, then leave it untouched for more than 15 minutes so the web session
+   expires (or restart `soos-remote`), and tap *Acknowledge*: the alerts card disappears and the
+   screen says "Your session ended. Sign in again."
 
 ## 2k. Feature tour (phone web app)
 
