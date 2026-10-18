@@ -167,6 +167,21 @@ broken system build on `main` is a red status. Triage: the job prints the `onnxr
 fix forward in a dedicated `fix/` pull request (or bump the base digest in both Arch Dockerfiles).
 The job is never made `continue-on-error`. Enforced by `soos-invariants::system_onnxruntime_contract::*`.
 
+**Release dry run (GitHub #444, ADR 2026-10-18 "Release Dry Run Publishes Nothing").** After the
+system harness, the same job installs the host toolchain of `rust-toolchain.toml` and runs
+`tests/docker/release_dry_run_test.sh` (step `timeout-minutes: 40`): `scripts/release_dry_run.sh`
+twice on `HEAD` (run 2 `--offline`) must give a byte-identical `soos-<version>.tar.gz`,
+`soos-<version>-vendor.tar.zst` and `SHA256SUMS`; then, in the same Arch image under `docker run
+--network none` with only the run-1 directory mounted read-only (no repository, no `.git`, no
+cargo registry, empty `CARGO_HOME`, `ORT_SKIP_DOWNLOAD=1`), `SHA256SUMS` is verified, both
+tarballs are unpacked and the release workspace is built with `--no-default-features --features
+system-onnxruntime` from the vendored sources; `soos-daemon` must link `libonnxruntime.so.1` and
+`libpam_soos.so` must not. Running inside this job keeps it advisory on pull requests (the job name
+is already in `ADVISORY_CHECKS`) and required on `main`. The repository is public: the job uploads
+no artifact, saves no cache and creates no tag or release; every produced file is discarded with
+the runner ([RELEASING.md](RELEASING.md)). Enforced by
+`soos-invariants::release_dry_run_contract::*`.
+
 ### Performance Design
 - **Parallel jobs**: clippy, test, security and lint run concurrently; the critical path is the
   test job instead of the sum of all steps. The previous serial pipeline took ~8.5 minutes, of

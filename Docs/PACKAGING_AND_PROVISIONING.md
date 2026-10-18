@@ -406,9 +406,13 @@ ORT_SKIP_DOWNLOAD=1 cargo build --locked --offline --release --workspace --no-de
 - Trust: a system build relies on the distribution-signed library instead of the SHA-256-pinned
   prebuilt archive (pyke-built ONNX Runtime 1.28.0 from `cdn.pyke.io`); the model SHA-256 and shape attestation are unchanged.
 - The packaging recipes and `scripts/build_*.sh` in this repository still use the default
-  `download-binaries` build; switching them, signed releases and the vendor tarball are later PRs of
-  #361. CI proves the build offline in a clean Arch container (job `system-onnxruntime`,
+  `download-binaries` build; switching them and signed releases are later PRs of #361. CI proves
+  the build offline in a clean Arch container (job `system-onnxruntime`,
   `Docs/CI_CD_AND_SECURITY.md`).
+- Source and vendor tarballs: `scripts/release_dry_run.sh` builds `soos-<version>.tar.gz` and
+  `soos-<version>-vendor.tar.zst` (with `SHA256SUMS`) reproducibly from `HEAD`; unpacked together
+  they build with the command above and no network. It publishes nothing; the release steps that
+  publish are owner-only ([RELEASING.md](RELEASING.md), GitHub #444).
 
 ## 8. Daemon Service Sandbox and Configuration Validation (GitHub #199, #202, #203)
 

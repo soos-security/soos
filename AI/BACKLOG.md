@@ -2040,6 +2040,35 @@ On physical hardware lock screens (GDM):
   - Acceptance: deploy, `--check-only` and tamper detection work with neither `python3` nor `curl` on PATH; malformed entries rejected before the target directory exists
   - TDD: `test_download_models_deploys_and_verifies_without_python`, `test_download_models_parses_repository_manifest_without_python`, `test_download_models_rejects_malformed_or_unsafe_entries`, `test_download_models_preflight_requires_curl_for_remote_sources`
 
+### GitHub #444 — chore(release): reproducible source and vendor tarballs with a release dry run that never publishes (part of #361)
+
+> **Branch**: `chore/release-dry-run`  
+> **Architecture ref**: ADR 2026-10-18 "Release Dry Run Publishes Nothing" (amends item (6) of ADR 2026-10-13 "Distribution Builds: System ONNX Runtime")  
+> **VERIFICATION_MATRIX**: RDR1–RDR6, RDR-S1–RDR-S8, RDR-O1–RDR-O4 (owner, pending)
+
+#### Problem Statement
+
+Epic #361 item 2 asks for signed tags, source and vendor tarballs and a release workflow. Nothing on `main` built a source tarball, a vendor tarball or `SHA256SUMS`, and the signing, tag and upload steps need the owner's key and decisions. The repository is public, so this step must build and check everything without publishing anything.
+
+#### Sub-issues
+
+- [x] **#444.1** — Reproducible release dry run
+  - `scripts/release_dry_run.sh` (`--dry-run`, `--offline`, `--out-dir`, `--check-vendor`): `soos-<version>.tar.gz` (`git archive` of HEAD, mtime = commit time, `gzip -n`), `soos-<version>-vendor.tar.zst` (`cargo vendor --locked --offline` + `.cargo/config.toml`, sorted, owner 0/0, fixed mtime, `zstd -12`), `SHA256SUMS`; version from `[workspace.package]` of `HEAD:Cargo.toml`
+  - Acceptance: two runs on one commit are byte-identical; every vendored `.cargo-checksum.json` package checksum equals `Cargo.lock`; nothing is tagged, signed, uploaded or published
+  - TDD: `test_rdr1_two_runs_are_byte_identical_and_normalized`, `test_rdr_s2_check_vendor_accepts_matching_set`, `test_rdr_s2_check_vendor_rejects_mismatches`, `test_rdr_s3_version_comes_from_head_workspace_package`, `test_rdr_s3_dry_run_plan_uses_workspace_package_version_and_commit_time`, `test_rdr_s4_usage_errors_exit_2`, `test_rdr_s5_script_pins_determinism_and_step_order`, `test_rdr_s1_script_and_harness_never_publish_sign_or_upload`
+
+- [x] **#444.2** — Offline build from the tarballs in CI, no artifact
+  - `tests/docker/release_dry_run_test.sh` in the `system-onnxruntime` job: two runs `cmp`-identical, then `--network none` in `tests/docker/Dockerfile.system-ort` with only the tarballs (no repository, no `.git`, no cargo registry) builds `--release --workspace --no-default-features --features system-onnxruntime`
+  - Acceptance: advisory on pull requests (existing `ADVISORY_CHECKS` entry), required on `main` (`ci-success-main`); no `upload-artifact`, cache save, tag or release
+  - TDD: `test_rdr_s6_harness_builds_offline_from_tarballs_only`, `test_rdr_s7_ci_runs_dry_run_in_advisory_system_job_without_upload`
+
+- [x] **#444.3** — Documentation and owner-only checklist
+  - `Docs/RELEASING.md` (dry run usage, offline build from the tarballs, owner-only checklist: OpenPGP key, version, signed tag, signed `SHA256SUMS`, GitHub Release, packaging sources, channels), pointers from `Docs/PACKAGING_AND_PROVISIONING.md` §7.5 and `Docs/CI_CD_AND_SECURITY.md`, ADR
+  - TDD: `test_rdr_s8_adr_and_docs`
+
+- [ ] **#444.4** — Owner-only release steps (deferred; not automated)
+  - OpenPGP release key, signed `v*` tag, GitHub Release upload, packaging `source=()`/`Source0` URLs, AUR/COPR/PPA/OBS (matrix RDR-O1–RDR-O4)
+
 ## Active-IR Anti-Spoofing (epic #353)
 
 > GitHub-only sub-issues of epic #353 (owner feature intake of 2026-10-12). Their branches are not registered in `scripts/sync_issue.py`. Split item 1 (#378, emitter control and strobe classification) is recorded in `AI/DECISIONS.md` and matrix IRA1–IRA28.
