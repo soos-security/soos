@@ -327,6 +327,93 @@ pub mod readme_web {
         "sw.js",
     ];
 
+    /// Fixture-only page that marks the web app's feature tour as seen in the capture browser,
+    /// then loads `/` (GitHub #448). The first-run tour (ADR 2026-10-17, GitHub #414) opens on
+    /// a fresh browser profile and would cover the captured page; the capture script opens
+    /// this path first. `soos-remote` itself gains no flag, route or mode.
+    pub const TOUR_SEEN_PATH: &str = "/readme/tour-seen";
+    /// The tour flag of `crates/remote/assets/app.js` (`TOUR_STORAGE_KEY` = `TOUR_STORAGE_SEEN`).
+    pub const TOUR_STORAGE_KEY: &str = "soos-remote-tour-v1";
+    /// The only value of [`TOUR_STORAGE_KEY`].
+    pub const TOUR_STORAGE_SEEN: &str = "seen";
+    /// Body of [`TOUR_SEEN_PATH`]: sets the tour flag (a blocked storage is ignored) and
+    /// replaces itself with `/`. Static text, no identity, no remote reference.
+    pub const TOUR_SEEN_PAGE: &str = "<!doctype html><html lang=\"en\"><head>\
+         <meta charset=\"utf-8\"><title>soos README capture</title></head><body><script>\
+         try { window.localStorage.setItem(\"soos-remote-tour-v1\", \"seen\"); } catch (e) {}\
+         window.location.replace(\"/\");</script></body></html>";
+
+    /// The one synthetic capture instant of the README web captures (GitHub #448):
+    /// 2026-10-01T09:41:00Z. With `--clock fixed`, the fixture server builds every body from it
+    /// and [`CAPTURE_PATH`] freezes the page clock at it, so every scene and theme shows the
+    /// same date and times and a rerun gives the same pictures.
+    pub const FIXED_CAPTURE_UNIX_MS: u64 = 1_790_847_660_000;
+    /// Fixture-only page that serves `index.html` of the assets with the page clock frozen at
+    /// [`FIXED_CAPTURE_UNIX_MS`] (GitHub #448). The asset files are never changed: the fixture
+    /// inserts `<base href="/">` and [`CAPTURE_CLOCK_SCRIPT`] into the bytes it serves.
+    pub const CAPTURE_PATH: &str = "/readme/capture";
+    /// Inline script run before `app.js` on [`CAPTURE_PATH`]: `Date.now()` and `new Date()`
+    /// return [`FIXED_CAPTURE_UNIX_MS`]; `new Date(value)` is unchanged.
+    pub const CAPTURE_CLOCK_SCRIPT: &str = "(function () { \
+         const FIXED_MS = 1790847660000; const RealDate = window.Date; \
+         class FixedDate extends RealDate { \
+         constructor(...args) { if (args.length === 0) { super(FIXED_MS); } else { super(...args); } } \
+         static now() { return FIXED_MS; } } \
+         window.Date = FixedDate; })();";
+    /// Marker of `index.html` after which the `<base>` element is inserted.
+    const CAPTURE_HEAD_MARKER: &str = "<head>";
+    /// Marker of `index.html` before which the clock script is inserted.
+    const CAPTURE_APP_SCRIPT_MARKER: &str = "<script src=\"app.js\"></script>";
+
+    /// `index.html` as served on [`CAPTURE_PATH`]: `<base href="/">` right after the first
+    /// `<head>` and `<script>`[`CAPTURE_CLOCK_SCRIPT`]`</script>` right before the
+    /// `app.js` script element; `None` when either marker is missing or appears twice.
+    pub fn capture_page(index_html: &str) -> Option<String> {
+        if index_html.matches(CAPTURE_HEAD_MARKER).count() != 1
+            || index_html.matches(CAPTURE_APP_SCRIPT_MARKER).count() != 1
+        {
+            return None;
+        }
+        let with_base = index_html.replacen(
+            CAPTURE_HEAD_MARKER,
+            &format!("{CAPTURE_HEAD_MARKER}\n  <base href=\"/\">"),
+            1,
+        );
+        Some(with_base.replacen(
+            CAPTURE_APP_SCRIPT_MARKER,
+            &format!("<script>{CAPTURE_CLOCK_SCRIPT}</script>\n  {CAPTURE_APP_SCRIPT_MARKER}"),
+            1,
+        ))
+    }
+
+    /// Which clock the fixture server builds its bodies from.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FixtureClock {
+        /// The system clock at each request (the behaviour of [`serve`]).
+        Real,
+        /// Always [`FIXED_CAPTURE_UNIX_MS`].
+        Fixed,
+    }
+
+    impl FixtureClock {
+        /// Parses `real` or `fixed` (the `--clock` value of the example).
+        pub fn parse(name: &str) -> Option<Self> {
+            match name {
+                "real" => Some(FixtureClock::Real),
+                "fixed" => Some(FixtureClock::Fixed),
+                _ => None,
+            }
+        }
+
+        /// The instant used for one request.
+        pub fn now_unix_ms(self) -> u64 {
+            match self {
+                FixtureClock::Real => now_unix_ms(),
+                FixtureClock::Fixed => FIXED_CAPTURE_UNIX_MS,
+            }
+        }
+    }
+
     /// A canned state of the phone companion.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum WebScene {
@@ -366,6 +453,10 @@ pub mod readme_web {
             /// Body.
             body: String,
         },
+        /// A fixed, fixture-only HTML page ([`TOUR_SEEN_PAGE`]).
+        Page(&'static str),
+        /// `index.html` of the assets passed through [`capture_page`].
+        CapturePage,
         /// A complete server-sent events prelude (status, alerts and battery events).
         EventStream(String),
         /// Anything else.
@@ -475,6 +566,8 @@ pub mod readme_web {
         }
         match path {
             "/" => FixtureResponse::Asset("index.html"),
+            TOUR_SEEN_PATH => FixtureResponse::Page(TOUR_SEEN_PAGE),
+            CAPTURE_PATH => FixtureResponse::CapturePage,
             "/api/auth/state" => json(AUTH_STATE_BODY.to_string()),
             "/api/status" => json(status_body(scene, now_unix_ms)),
             "/api/alerts" => json(alerts_body(scene, now_unix_ms)),
@@ -547,13 +640,19 @@ pub mod readme_web {
         Some((parts.next()?.to_string(), parts.next()?.to_string()))
     }
 
-    fn handle(mut stream: TcpStream, scene: WebScene, assets: &Path, deadline: Instant) {
+    fn handle(
+        mut stream: TcpStream,
+        scene: WebScene,
+        assets: &Path,
+        deadline: Instant,
+        clock: FixtureClock,
+    ) {
         let _ = stream.set_read_timeout(Some(FIXTURE_IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(FIXTURE_IO_TIMEOUT));
         let Some((method, path)) = read_request_line(&mut stream) else {
             return;
         };
-        let result = match route(scene, &method, &path, now_unix_ms()) {
+        let result = match route(scene, &method, &path, clock.now_unix_ms()) {
             FixtureResponse::Asset(name) => match std::fs::read(assets.join(name)) {
                 Ok(bytes) => write_response(&mut stream, "200 OK", content_type(name), &bytes),
                 Err(_) => write_response(&mut stream, "404 Not Found", "text/plain", b"not found"),
@@ -561,6 +660,28 @@ pub mod readme_web {
             FixtureResponse::Json { body, .. } => {
                 write_response(&mut stream, "200 OK", "application/json", body.as_bytes())
             }
+            FixtureResponse::CapturePage => {
+                match std::fs::read_to_string(assets.join("index.html"))
+                    .ok()
+                    .and_then(|index| capture_page(&index))
+                {
+                    Some(page) => write_response(
+                        &mut stream,
+                        "200 OK",
+                        "text/html; charset=utf-8",
+                        page.as_bytes(),
+                    ),
+                    None => {
+                        write_response(&mut stream, "404 Not Found", "text/plain", b"not found")
+                    }
+                }
+            }
+            FixtureResponse::Page(page) => write_response(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                page.as_bytes(),
+            ),
             FixtureResponse::EventStream(prelude) => {
                 let sent = write!(
                     stream,
@@ -594,6 +715,22 @@ pub mod readme_web {
         assets: &Path,
         serve_for: Duration,
     ) -> std::io::Result<()> {
+        serve_with_clock(listener, scene, assets, serve_for, FixtureClock::Real)
+    }
+
+    /// [`serve`] with the bodies built from `clock` ([`FixtureClock::Fixed`] for reproducible
+    /// captures).
+    ///
+    /// # Errors
+    ///
+    /// An I/O error of the listener itself.
+    pub fn serve_with_clock(
+        listener: TcpListener,
+        scene: WebScene,
+        assets: &Path,
+        serve_for: Duration,
+        clock: FixtureClock,
+    ) -> std::io::Result<()> {
         listener.set_nonblocking(true)?;
         let deadline = Instant::now() + serve_for;
         let live = Arc::new(AtomicUsize::new(0));
@@ -610,7 +747,7 @@ pub mod readme_web {
                     let live_worker = Arc::clone(&live);
                     let assets = assets.to_path_buf();
                     workers.push(std::thread::spawn(move || {
-                        handle(stream, scene, &assets, deadline);
+                        handle(stream, scene, &assets, deadline, clock);
                         live_worker.fetch_sub(1, Ordering::AcqRel);
                     }));
                     workers.retain(|worker| !worker.is_finished());
