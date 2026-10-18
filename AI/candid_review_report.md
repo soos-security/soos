@@ -1,88 +1,138 @@
 # Candid Review Report
 
-- **Date**: 2026-10-20
-- **Target Branch**: `fix/webpki-advisories`
-- **Base (merge-base)**: `da320a4`
-- **Reviewed-Diff-Fingerprint**: `4b02338bc89f3ed648cc3e4f81204579414cd2caf3f75717666174e9868c78e4`
-- **Audited Files**: `Cargo.lock`, `AI/walkthroughs/247_webpki_advisories.md`
+- **Date**: 2026-10-18
+- **Target Branch**: `feat/remote-motion`
+- **Base (merge-base)**: `3f76090` (equal to the current `origin/main`)
+- **Reviewed-Diff-Fingerprint**: `09d020e858c3c4b6b4ace52f5ad9461b6863a11a0c30765cddac8ff79549782c`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_motion.md`,
+  `AI/auditor_constraints_remote_motion.md`, `AI/tester_contract_motion.md`,
+  `AI/walkthroughs/235_remote_web_motion.md`, `Docs/REMOTE_COMPANION.md`, `Docs/UI_MOTION.md`,
+  `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `tests/invariants/src/lib.rs`,
+  `tests/invariants/src/remote_motion_contract.rs`
 
 ## 1. Executive Summary
 
-Lockfile-only security bump for RUSTSEC-2026-0381/0382/0383 (CVE-2026-111943, emSign distrust):
-`rustls-webpki` 0.103.15 -> 0.103.16, `webpki-roots` 1.0.9 -> 1.0.10, `webpki-root-certs`
-1.0.9 -> 1.0.10, plus walkthrough 247. Every claim checked against the published crate sources,
-the local advisory database and the workspace code holds. No findings of any severity.
+Presentation-only change to the `soos-remote` web app: motion tokens, a gated `linear()` spring, state-word
+keyframes, the star turn, a pending star bound to the request flags, `@starting-style` entries, a list stagger,
+a View Transition for the CSS-overlay camera full screen, and one reduced-motion block that removes every
+animation and transition. No Rust production code, route, header, CSP, asset file, element id or label
+changes. No PAM, IPC, daemon or secret-handling code is touched. Tests are additive only (one new invariant
+module). Scoped tests and clippy are green. No CRITICAL or MAJOR finding.
+
+Commands re-run by the reviewer (with `LIBONNXRUNTIME_NO_PKG_CONFIG=1`,
+`CARGO_TARGET_DIR=~/.cache/soos-targets/remote-motion`, `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_BUILD_JOBS=3`): `cargo test -p soos-invariants -- --test-threads=3`
+(800 passed, 0 failed), `cargo test -p soos-remote -- --test-threads=3` (all 43 test binaries ok, 0 failed),
+`cargo clippy -p soos-invariants --all-targets -- -D warnings` and
+`cargo clippy -p soos-remote --all-targets -- -D warnings` (clean), `node --check crates/remote/assets/app.js`
+(syntax ok).
 
 ## 2. Test Changes
 
-Mechanical listing on `target/candid_diff.patch`:
+Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: none.
-- Removed/changed assertions (`assert`, `#[test]`, `proptest!`, `should_panic`): none.
-- New escape hatches (`#[ignore]`, `cfg(any())`, tolerance, epsilon): none.
-- Inline `mod tests` changes: none.
-
-No test was added, modified or removed.
+- Test files touched: `tests/invariants/src/lib.rs` (adds `mod remote_motion_contract;` under
+  `#[cfg(all(test, unix))]` with a doc comment, 11 added lines, nothing removed) and the new file
+  `tests/invariants/src/remote_motion_contract.rs` (1973 added lines).
+- Removed or changed assertion lines (`^-` with `assert`, `#[test]`, `proptest!`, `should_panic`): **none**
+  in any test file. The only `^-` hit of the grep is the pre-existing ADR line in `AI/DECISIONS.md`, whose
+  word diff shows one appended implementation note and no removed text.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Inline test modules added or removed: **none**.
+- `git diff 3f76090 HEAD -- tests 'crates/*/tests' android/app/src/test` contains only the two additions above.
+  No pre-existing assertion was removed, weakened or changed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- Advisory ranges verified in `~/.cargo/advisory-dbs/.../RUSTSEC-2026-038{1,2,3}.md`:
-  `webpki-roots` and `webpki-root-certs` patched `>= 1.0.10`; `rustls-webpki` patched
-  `>= 0.103.16, < 0.104.0-alpha.1`. The new versions are the lowest patched releases. PASS.
-- Checksums: SHA-256 of the cached `.crate` files for all six versions (old and new) match the
-  `checksum` lines in the diff exactly. PASS.
-- Manifests: `rustls-webpki` 0.103.15 vs 0.103.16 `Cargo.toml` identical except `version`;
-  `webpki-roots`/`webpki-root-certs` differ only in `version` and `rust-version` 1.70 -> 1.71
-  (well under workspace MSRV 1.92). Dependency lists in the lockfile entries unchanged. PASS.
-- Source behaviour: `rustls-webpki` 0.103.16 adds `DISTRUSTED_SPKIS` (eight emSign SPKIs),
-  checks the path head and the trust anchor, and adds `Error::CertDistrusted`; `webpki-roots`
-  1.0.10 and `webpki-root-certs` 1.0.10 only remove `emSign ECC Root CA - G3` (no anchor added).
-  rustls 0.23.46 maps unknown webpki errors through its `_ => CertificateError::Other(..)` arm. PASS.
-- Push sender: no `TlsConfig`, `root_certs`, `RootCerts` or `disable_verification` anywhere in
-  `crates/`; `rustls-platform-verifier` absent from `Cargo.lock`. `send_error_outcome`
-  (`crates/push-sender/src/lib.rs:227`) maps any non-resolver error to `Outcome::Retry`, so a
-  `CertDistrusted` failure is handled like any other TLS failure, never as success. PASS.
+- `syncPending()`: every write of `lockRequestedAt` / `unlockRequestedAt` (confirm, set, deadline, answer,
+  failure, `unlockFailed`, unlock set and deadline) is followed on the next line by `syncPending();` (checked
+  line by line). The pending star therefore cannot outlive the existing 5 s timers. Sign-out during a pending
+  request keeps the star until the existing timer resets the flag: bounded. PASS.
+- `render()` still writes the state text, `dataset.state`, the state class and `statTile.dataset.state` before
+  any motion; the state class is rewritten each poll with an identical value, so the per-class keyframe does not
+  replay (one keyframe name per class, six classes matching the six `LABELS` keys). PASS.
+- Camera full screen: `enterCameraFullscreen` sets `cameraFull` first; the overlay-only path (no
+  `requestFullscreen` / `webkitRequestFullscreen`) runs `applyCameraFull` inside `withViewTransition` and returns;
+  that early return skips only the element-fullscreen request that cannot exist on that path. The
+  `exitCameraFullscreen(true)` early return likewise skips only the `exitFullscreen` block, unreachable when
+  element fullscreen is unavailable. `applyCameraFull` reads the current flag, so a stop/error/stall
+  (`endCameraView` -> `exitCameraFullscreen()` with `animate` undefined -> direct) racing a queued transition
+  callback ends in the correct state; a skipped transition still runs its update callback and its rejected
+  promises are caught. Escape, the close button and the tap pass `true`; `cameraFullscreenChanged` and
+  `endCameraView` do not. PASS.
+- Stagger: `firstShow` is read from `hidden` before the reveal, the class is toggled before the list is
+  rebuilt, and the next poll removes it, so a refresh never replays it. PASS.
+- `.push button` (specificity 0,1,1) does not override `button:active:not(:disabled)` (0,2,1): the press still
+  works in the notifications card. The star `<svg class="stat-star">` is the outer SVG element, so
+  `transform-origin: center` turns it about its box centre; `rotate` (angle) and the pending `transform`
+  keyframe compose. PASS.
+- Engines without `linear()` keep the cubic-bezier fallback thanks to the `@supports` gate around the
+  `:root` override. PASS.
 
 ### PAM Concurrency & Deadlines
 
-No change to `crates/pam` or its dependency graph (these crates reach the workspace only via
-`ureq` in `soos-push-sender` and the `ort-sys` build script). PASS.
+Not applicable: no file under `crates/pam`, `crates/daemon` or `crates/protocol` changes. PASS.
 
 ### Panic Safety & Fail-Closed
 
-No production code changed. The new verification error strictly reduces trust (fail-closed). PASS.
+No Rust production code changes. In `app.js`, `withViewTransition` falls back to the direct class change on any
+throw and never leaves a promise unhandled; no new path writes a security state (no optimistic "Unlocked"; the
+unlock still goes `window.confirm` -> passkey -> flag -> request, guarded by RMO-S9). PASS.
 
 ### Test Integrity & Anti-Weakening
 
-See section 2: zero test changes. PASS.
+- Section 2: additive only, no assertion touched.
+- Mutation probes run by the reviewer on the working tree, then reverted with `git checkout` (tree verified
+  clean, fingerprint unchanged): removing the `syncPending();` after the lock `.catch` reset made
+  `test_rmo_s10_pending_star_follows_the_request_flags` fail; removing `animation: none !important` from the
+  reduce block made `test_rmo_s5_single_reduced_motion_block_removes_motion` fail; turning the Escape exit into
+  a non-animated `exitCameraFullscreen()` made `test_rmo_s8_app_hooks_and_guarded_view_transition` fail. The
+  new tests can fail against plausible wrong implementations. `test_rmo_helper_self_test` covers the parser.
+- `unwrap`/`expect` in the module are test-only, under the module-level `allow` used by the other invariant
+  modules. PASS.
 
 ### Memory, Bounds & Secrets
 
-No code or logging change; `rustls`/`ureq` log targets remain unchanged. PASS.
+No allocation, I/O, logging or storage is added. The View Transition snapshot is the browser's own rendering,
+not readable by script; no frame is captured, cached or logged. No `.style.` write, `requestAnimationFrame`,
+Web Animations API, new asset, id or route. PASS.
 
 ### Supply Chain & Automation
 
-- `deny.toml` untouched; still `ignore = []`.
-- `cargo deny --locked check` re-run on this worktree: `advisories ok, bans ok, licenses ok, sources ok`.
-- `cargo metadata --locked`: accepted.
-- `git diff --stat origin/main -- Cargo.lock`: 6 insertions / 6 deletions, exactly the three
-  version + checksum pairs; no unrelated churn (the `getrandom` re-resolution mentioned in the
-  walkthrough is absent from the diff). Source stays the crates.io registry. PASS.
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change; no library is added. PASS.
 
 ### English-Only Policy
 
-Walkthrough 247 is in English; numbering follows 246 with no collision; the
-"not registered in `scripts/sync_issue.py`" wording matches the walkthrough 211 precedent. PASS.
+All code, comments, docs and the commit message are English; the only non-ASCII characters are typographic
+symbols. The commit subject has one scope and stays under 72 characters. PASS.
+
+### Factual Accuracy of Doc Claims (checked against the code)
+
+- PTR-S8 does pin `transition: none !important` in the reduce block's universal rule
+  (`tests/invariants/src/remote_tour_contract.rs`, `test_ptr_s8_style_uses_brand_and_motion_tokens`), as the
+  ADR note, `Docs/UI_MOTION.md` §8 and `Docs/REMOTE_COMPANION.md` state.
+- "Nine keyframes" (six state words, `soos-pending-turn`, `soos-nudge`, `soos-rise-in`), the 16 px button star
+  with `clip-path: path()` / `currentColor`, the 22-stop `linear()`, the 6 px card rise and 8 px banner slide,
+  delays 1-4 x and 5 x `--t-stagger`, and the overlay-only View Transition all match `style.css` / `app.js`.
+- RMO12 counts (CSP, eleven assets, 29 ids, nine labels) are enforced by a green test against the tree.
 
 ## 4. Detailed Findings & Action Items
 
-None.
-
-Note (not a finding): the walkthrough's `cargo test` count (869 passed) was not re-run by this
-reviewer; the lockfile change alters no API used by the workspace, and CI re-runs the suites.
+- **[SUGGESTION]** `crates/remote/assets/style.css` (`@starting-style` block, `.card.camera`) — during the
+  260 ms entry the camera card carries a transient `transform`, which would briefly make it the containing
+  block of the fixed full-screen stage if full screen were entered within that window. Practically unreachable
+  (the stage only opens after a passkey ceremony); no change required.
+- **[SUGGESTION]** `AI/DECISIONS.md` (Motion System ADR, item 6) — the appended note records that the web reduce
+  block removes all fades (the 0 ms end of the "at most 120 ms" ceiling). It is an annotation, not a change of
+  the decision; acceptable as written.
+- **[SUGGESTION]** `AI/walkthroughs/235_remote_web_motion.md` — `origin/main` ends at walkthrough 231; numbers
+  232-234 are presumably taken by parallel branches. Confirm no collision at merge time.
 
 ## 5. Final Verdict
 
 **VERDICT: APPROVED**
+
+Merge stays gated by the owner's prototype approval (UIM7) and the owner device check (RMO13 / UIM10), both
+recorded as pending matrix rows.
