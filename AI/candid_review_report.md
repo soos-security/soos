@@ -1,103 +1,108 @@
 # Candid Review Report
 
 - **Date**: 2026-10-18
-- **Target Branch**: `fix/lockwidget-flag-path`
-- **Base (merge-base)**: `cb071cd`
-- **Reviewed-Diff-Fingerprint**: `0639e197520a061c9b53ed338dc81234e835594d6c32ce2b44addcddfb956edc`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/242_lockwidget_flag_path.md`, `Docs/LOCKSCREEN_WIDGET.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `scripts/setup.sh`, `scripts/uninstall.sh`, `tests/invariants/src/lockscreen_installer_contract.rs`
+- **Target Branch**: `chore/readme-web-captures`
+- **Base (merge-base)**: `1043be6`
+- **Reviewed-Diff-Fingerprint**: `a3ff8aa40f4bed3ea3cb98f596f9020d34dd548a146acee66d71063758a65833`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/241_readme_web_captures.md`,
+  `Docs/README_ASSETS.md`, `Docs/assets/MANIFEST.toml`,
+  `Docs/assets/screenshots/web-unlocked-light.png`, `Docs/assets/screenshots/web-unlocked-dark.png`,
+  `Docs/assets/screenshots/web-locked-alerts-light.png`, `Docs/assets/screenshots/web-locked-alerts-dark.png`,
+  `README.md`, `scripts/capture_readme_web.sh`, `tests/fixtures/mod.rs`,
+  `tests/fixtures/tests/readme_tour_seen_tests.rs`
 
 ## 1. Executive Summary
 
-This review was rerun after the rebase onto `origin/main` `cb071cd`. That base adds #446 (doc follow-ups) on top of the
-previous base `ed0bb84` (#447, release dry run). The review covers the raw diff from `cb071cd` to the working tree, frozen
-in `target/candid_diff.patch`.
-
-The rebase did not change the branch's own work. `git range-diff ed0bb84..origin/fix/lockwidget-flag-path cb071cd..HEAD`
-reports the fix commit as identical (`ac4d7b4 = 3884c12`). A diff of the two per-commit patches differs only in their
-`index` lines. Before this rewrite, the review-report commit `f504156` had the same report blob as the pushed `5520cc3`.
-Every other difference between `5520cc3` and `HEAD` is #446's content (`AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
-walkthrough 238, `Docs/REMOTE_COMPANION.md`, `README.md`).
-
-The diff implements GitHub #451:
-- `scripts/setup.sh` pins `LOCK_WIDGET_READ_FLAG="/etc/soos/lockwidget.disable"`, which is the GNOME extension's
-  `KILL_SWITCH_PATH`. It reports the lock-widget step `[DONE]` only when `<sysconfdir>/soos/lockwidget.disable` is that
-  path. In every other case it reports `[SKIP]`, with "not applied" and the exact `sudo touch` or `sudo rm -f` command.
-- The GNOME success line now mentions the log-out.
-- `scripts/uninstall.sh` never follows a symbolic link in place of `<prefix>/share/soos`.
-- Docs, matrix rows LWF1–LWF6 and walkthrough 242 are added.
-
-Results: `bash -n` passes on both scripts, and `cargo test --locked -p soos-invariants` reports 828 passed and 0 failed.
-There are no CRITICAL or MAJOR findings.
+GitHub #448 (part of #356) commits the four phone web app README captures, refreshes the asset
+manifest, adds a fixture-only `/readme/tour-seen` page that sets the web app's own first-run tour
+flag before loading `/`, opens that page first from `scripts/capture_readme_web.sh` (with `TZ=UTC`),
+documents the change and adds matrix row RAC20 while keeping RAC18 Pending. The change is confined
+to documentation, assets, the test-fixtures crate and a dev-only script. No production crate,
+`crates/remote`, CI or packaging file is touched. No CRITICAL or MAJOR finding.
 
 ## 2. Test Changes
 
 Mechanical listing from `target/candid_diff.patch`:
-- **Test files touched**: only `tests/invariants/src/lockscreen_installer_contract.rs`, with 277 added lines and no
-  removed lines. The patch appends a new `#451` section after the last existing test (`test_lki10_...`).
-- **Removed or changed assertions** (`^-` with `assert`, `#[test]` or `proptest!`): none.
-- **New escape hatches** (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): none.
-- **Inline `mod tests` changes**: none.
 
-No pre-existing assertion changed. The new tests LWF1–LWF6 can fail against plausible wrong implementations:
-- LWF1 cross-checks `setup.sh` against `extension.js` `KILL_SWITCH_PATH`, and checks that no other component reads the
-  flag.
-- LWF2 rejects any `[DONE] lock widget` line, and any "no GNOME card" claim, under a non-`/etc` sysconfdir.
-- LWF3 proves the `[DONE]` path still works when the read path matches.
-- LWF5 uses a real symbolic link and checks that the targets stay byte-for-byte unchanged.
+- Test/fixture files touched: `tests/fixtures/mod.rs` (fixture library, additions only),
+  `tests/fixtures/tests/readme_tour_seen_tests.rs` (new file).
+- Removed or changed assertions (`^-` lines with `assert`, `#[test]`, `proptest!`, `should_panic`): **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Inline `mod tests` changes: **none**.
+
+The diff of `tests/fixtures/mod.rs` has zero removed lines; the four hunks only add constants, the
+`FixtureResponse::Page` variant, one route arm and one serve arm. No existing test was modified.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Rebase interaction with #446.** Both PRs edit `AI/DECISIONS.md` and `AI/VERIFICATION_MATRIX.md`, on different lines.
-  #446 changed ADR 2026-10-02 and matrix row OBT9. This branch changes only the 2026-10-18 lock-screen ADR line and
-  appends a new LWF section. The diff against `cb071cd` touches neither #446 hunk, and `README.md` and
-  `Docs/REMOTE_COMPANION.md` are not in the diff, so no #446 change is reverted. The walkthrough numbers do not collide:
-  238 belongs to #446 and 242 to this branch. → PASS.
-- **Rebase interaction with #447.** #447 was already in the old base. `scripts/release_dry_run.sh` builds the source
-  tarball with `git archive` of `HEAD`, so the changed `setup.sh` and `uninstall.sh` are shipped as tracked files, with no
-  pinned file list or checksum to update. Both PRs edit `Docs/PACKAGING_AND_PROVISIONING.md`, but the
-  `release_dry_run_contract` needles in that file still pass (828/828). → PASS.
-- **Scenario: non-`/etc` sysconfdir.** Tried `off` twice, a plain run, `on`, a plain run again, and a dry run. The flag is
-  still created or removed and journaled under `<sysconfdir>`, but every phase, plan and summary line says "not applied"
-  with the read path and the command. The command matches the requested state: `lock_widget_requested` uses
-  `lock_widget_will_be_off`, and the plan note is computed once, before the `case`. → PASS.
-- **Scenario: `--sysconfdir /etc/` (trailing slash).** The comparison is a string comparison, so this path is reported
-  "not applied" although it is the read path. That is a false negative in the conservative direction: setup never falsely
-  claims `[DONE]`. → SUGGESTION.
-- The rollback paragraph says a lock-widget or camera-view failure triggers rollback. This matches `fail_and_rollback`,
-  which is called for "lock widget" and "camera view (daemon)" (setup.sh, around lines 2154 and 2160). → PASS.
+- Route: `route()` returns `NotFound` for any non-`GET` method before the match, and the new arm
+  matches the exact string `/readme/tour-seen`; `?x=1`, trailing slash, `/readme` and `/readme/` are
+  `NotFound` (asserted for every scene). PASS.
+- Adding a variant to `FixtureResponse`: the only exhaustive match is `serve`, which gains the
+  `Page` arm; the crate compiles and clippy is clean. PASS.
+- Flag correctness: `crates/remote/assets/app.js:2252-2262` defines `TOUR_STORAGE_KEY =
+  "soos-remote-tour-v1"`, `TOUR_STORAGE_SEEN = "seen"` and reads `getItem(KEY) === SEEN`; the page
+  writes the same pair on the same loopback origin, and the test pins both constants against
+  `app.js`, so a renamed key fails the test. The images confirm no tour overlay. PASS.
+- `TZ=UTC` is applied only to the browser invocation; the fixture server and strip step are
+  unchanged. PASS.
+- RAC18 stays `⬜ Pending` (owner visual check), RAC20 added as Verified with two existing test
+  names; `matrix_citations` passes. PASS.
+- MANIFEST SHA-256 values match the committed PNG files (`fe0ad0e99436…`, `f28624f28fda…`,
+  `f05c0742e68f…`, `a4930aac8a62…`); `readme_assets_contract` passes. PASS.
 
 ### PAM Concurrency & Deadlines
-No `crates/pam` change. The only external call touched is `gnome-extensions enable`, whose message text changed. The call
-stays wrapped in `run_bounded "${QUERY_TIMEOUT_S}"`. → PASS (not applicable).
+- No change in `crates/pam` or any runtime crate. Not applicable. PASS.
 
 ### Panic Safety & Fail-Closed
-No Rust production code changes. In the scripts, the new branches only downgrade `[DONE]` to `[SKIP]`, and no path claims
-a protection or state that was not applied. The symbolic-link refusal on the flag itself is kept, before the `case`. →
-PASS.
+- New library code has no `unwrap`/`expect`/indexing; the `Page` arm propagates the
+  `write_response` `io::Result`. Test-only `unwrap` is under the suite's documented `allow`. No
+  path to `Allow`/`PAM_SUCCESS` exists in the diff. PASS.
 
 ### Test Integrity & Anti-Weakening
-See section 2. The diff only adds tests, and the LKI rows are unchanged. → PASS.
+- The new tests fail against plausible wrong implementations: a route that ignores the method or
+  accepts a prefix/query, a page with the wrong key or value, a missing `try`, a second storage
+  write, a non-HTML content type, or a script that opens `/` directly. PASS.
+- Ran: `cargo test --locked -q -p soos-test-fixtures` (all green, including the 2 new tests),
+  `cargo test --locked -q -p soos-invariants` (792 passed, 0 failed), `cargo fmt --all -- --check`,
+  `cargo clippy -p soos-test-fixtures --all-targets -- -D warnings` (clean), `bash -n` on the script.
 
-### Memory, Bounds & Secrets
-- **`uninstall.sh` with `<prefix>/share/soos` as a symbolic link.** `SOOS_SHARE_LINKED=true` skips both the Arch snippet
-  removal and the hyprlock snippet removal, along with every `rmdir`, and prints a warning. A link at the `pam/` or
-  `lockscreen/` subdirectory is also refused. `share/soos` is referenced nowhere else in the script. → PASS.
-- No secrets, frames or embeddings appear in the new output. Only fixed paths and commands are printed. → PASS.
+### Memory, Bounds & Secrets — including image privacy
+- The page is a static `&'static str`; no allocation growth. The test asserts it carries no `@`,
+  URL scheme, `//`, `src=`/`href=`, `fetch(`, `ts.net`, loopback host, `user`, `login` or the demo
+  host. PASS.
+- **Image privacy (each PNG opened and inspected visually)**:
+  - `web-unlocked-light.png` / `web-unlocked-dark.png`: soos logo, "REMOTE" badge, "Unlocked /
+    Active session / Updated 1 s ago", Lock/Unlock buttons, "No failed password attempts", offline
+    history with one synthetic interval "Oct 18, 08:32 AM – 04:32 PM · 8 h · Sleep".
+  - `web-locked-alerts-light.png` / `web-locked-alerts-dark.png`: "Locked / Active session, idle
+    for 11 min", "2 failed password attempts, last at 05:29 PM (sudo)" (05:30 PM in dark),
+    detail "sudo, your account, 2 wrong passwords", Acknowledge button.
+  - No real photo or face, no real login or user name (only "your account"), no host name, IP
+    address, e-mail, passkey id or push endpoint is visible. Only the fixture's synthetic data
+    appears. The first-run tour covers none of the four captures. PASS.
+  - PNG chunk scan: every file contains only `IHDR`, `IDAT`, `IEND` (no `tEXt`/`iTXt`/`zTXt`/
+    `eXIf`/`tIME`), 780×1688 pixels. PASS.
 
 ### Supply Chain & Automation
-The diff touches no `Cargo.*`, `deny.toml`, `.github/` or hook files. The script changes use only coreutils and add no
-downloads. → PASS.
+- No `Cargo.toml`/`Cargo.lock`/`deny.toml`/`.github/`/`packaging/` change; `git diff
+  origin/main...HEAD -- crates/` is empty, so `soos-remote` is unchanged; nothing under `.github/`
+  or `packaging/` references the capture tooling, and RAC15 `test_rac_capture_tooling_is_dev_only`
+  passes. The script stays `set -euo pipefail`, offline, loopback-only (RAC16 passes). PASS.
 
 ### English-Only Policy
-All code, comments, docs and test messages in the diff are English. → PASS.
+- All added code, comments, docs, alt text and the walkthrough are in English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `scripts/setup.sh:519` — `LOCK_WIDGET_FLAG` is built from the raw `--sysconfdir` value, so `/etc/` or
-  `/etc/.` is reported "not applied" even though it is the read path. This is fail-safe (never a false `[DONE]`) and
-  follows the same rule as `DAEMON_READ_CONFIG`. A possible follow-up is to normalize trailing slashes in `--sysconfdir`.
-  No action is required for this PR.
+- **[MINOR]** `Docs/assets/screenshots/web-locked-alerts-{light,dark}.png` — the alert clock time
+  differs between the light (05:29 PM) and dark (05:30 PM) captures because each capture uses its
+  own wall clock across a minute boundary. Cosmetic only; a future rerun could pin the capture
+  clock per scene so both variants match.
+- **[SUGGESTION]** `scripts/capture_readme_web.sh` — the captures embed the capture date and UTC
+  time of day (Oct 18, ~17:30 UTC). This is not personal data and the time zone is hidden by
+  `TZ=UTC`, but a fixed synthetic capture clock would make the images fully reproducible.
 
 ## 5. Final Verdict
 
