@@ -2,6 +2,7 @@
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+pub mod check_config;
 pub mod config;
 pub mod consensus;
 pub mod dispatcher;

@@ -437,6 +437,61 @@ fn validate_log_level(level: &str) -> Result<(), DaemonError> {
         .map_err(|e| DaemonError::Config(format!("log_level is not a valid filter: {e}")))
 }
 
+/// Where a loaded configuration came from (GitHub #441).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigOrigin {
+    /// Read from this file (`--config`, or the system path when it exists).
+    File(PathBuf),
+    /// No file at this system path: [`DaemonConfig::runtime_default`] applies.
+    RuntimeDefault(PathBuf),
+}
+
+/// Why a configuration was refused, by class (GitHub #441).
+///
+/// The error inside is the very [`DaemonError`] the daemon start reports.
+#[derive(Debug)]
+pub enum ConfigLoadFailure {
+    /// The file could not be opened or read: missing (a dangling symbolic link included), not a
+    /// regular file, or unreadable.
+    Unavailable(DaemonError),
+    /// The file was read but refused: larger than the bound, not UTF-8, does not parse, or does
+    /// not validate.
+    Invalid(DaemonError),
+}
+
+impl ConfigLoadFailure {
+    /// The startup error of this failure.
+    #[must_use]
+    pub const fn error(&self) -> &DaemonError {
+        match self {
+            Self::Unavailable(err) | Self::Invalid(err) => err,
+        }
+    }
+
+    /// Converts the failure into the startup error.
+    #[must_use]
+    pub fn into_error(self) -> DaemonError {
+        match self {
+            Self::Unavailable(err) | Self::Invalid(err) => err,
+        }
+    }
+
+    /// Classifies a bounded-reader failure of `path`.
+    fn from_read_error(
+        path: &Path,
+        err: &soos_camera_v4l::daemon_config::DaemonConfigError,
+    ) -> Self {
+        use soos_camera_v4l::daemon_config::DaemonConfigError as ReadError;
+        let error = config_read_error(path, err);
+        match err {
+            ReadError::NotFound | ReadError::NotARegularFile | ReadError::Unreadable(_) => {
+                Self::Unavailable(error)
+            }
+            ReadError::TooLarge { .. } | ReadError::Malformed => Self::Invalid(error),
+        }
+    }
+}
+
 /// Maps a bounded-reader failure to the startup error naming the file (never its content).
 fn config_read_error(
     path: &Path,
@@ -807,16 +862,42 @@ impl DaemonConfig {
         path_opt: Option<&Path>,
         system_path: &Path,
     ) -> Result<Self, DaemonError> {
-        if let Some(path) = path_opt {
-            return Self::load_from_path(path);
-        }
+        Self::load_classified(path_opt, system_path)
+            .map(|(config, _origin)| config)
+            .map_err(ConfigLoadFailure::into_error)
+    }
 
-        match soos_camera_v4l::daemon_config::read_daemon_config_text(system_path) {
-            Ok(content) => Self::from_toml_str(&content),
-            Err(soos_camera_v4l::daemon_config::DaemonConfigError::NotFound) => {
-                Ok(Self::runtime_default())
+    /// The loader of [`DaemonConfig::load_or_default_with_system_path`], reporting where the
+    /// configuration came from and the class of a refusal (GitHub #441).
+    ///
+    /// The daemon start and `soos-daemon --check-config` both go through this function, so they
+    /// accept and refuse exactly the same files with the same error text: an explicit
+    /// `path_opt` is always read; otherwise `system_path` is read and only a missing file means
+    /// [`DaemonConfig::runtime_default`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigLoadFailure::Unavailable`] when the file is missing, not a regular file or
+    /// unreadable; [`ConfigLoadFailure::Invalid`] when it is too large, not UTF-8, or does not
+    /// parse and validate.
+    pub fn load_classified(
+        path_opt: Option<&Path>,
+        system_path: &Path,
+    ) -> Result<(Self, ConfigOrigin), ConfigLoadFailure> {
+        let path = path_opt.unwrap_or(system_path);
+        let content = match soos_camera_v4l::daemon_config::read_daemon_config_text(path) {
+            Ok(content) => content,
+            Err(soos_camera_v4l::daemon_config::DaemonConfigError::NotFound)
+                if path_opt.is_none() =>
+            {
+                return Ok((
+                    Self::runtime_default(),
+                    ConfigOrigin::RuntimeDefault(system_path.to_path_buf()),
+                ));
             }
-            Err(err) => Err(config_read_error(system_path, &err)),
-        }
+            Err(err) => return Err(ConfigLoadFailure::from_read_error(path, &err)),
+        };
+        let config = Self::from_toml_str(&content).map_err(ConfigLoadFailure::Invalid)?;
+        Ok((config, ConfigOrigin::File(path.to_path_buf())))
     }
 }

@@ -4053,3 +4053,11 @@ mod tests {
         }
     }
 }
+
+/// `soos-daemon --check-config` in the setup root half: the created `daemon.toml` is checked by
+/// the installed daemon before the restart and removed again, without a restart, when refused;
+/// the setup render matches the checked fixture; the real-root Docker cases are wired (GitHub
+/// #441, part of #362; ADR 2026-10-18 "`soos-daemon --check-config` and Setup Validation of the
+/// Created `daemon.toml`"; spec AI/architect_spec_daemon_check_config.md; rows DCC8-DCC10).
+#[cfg(all(test, unix))]
+mod daemon_check_config_contract;

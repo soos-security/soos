@@ -1,54 +1,46 @@
 # Plan Evaluation Report
-- **Date**: 2026-10-17
-- **Issue**: GitHub-only (no backlog id) — companion off-switch and opt-in wording aligned with the setup defaults (GitHub #423, part of epic #362; #409 candid review S-1, S-2, S-4)
-- **Branch**: `chore/companion-wording`
-- **Base commit**: `74782b8`
-- **Plan evaluated**: `AI/architect_spec_companion_wording.md` §0–§4
-- **Mode**: self-check by the implementing agent (wording-only change; phases 1–4 condensed as allowed by the
-  dev-workflow skill for a docs-only change). The independent candid review still runs separately.
+- **Date**: 2026-10-18
+- **Issue**: GitHub #441 (part of epic #362, no backlog id) — `soos-daemon --check-config` and validation of the setup-written `daemon.toml`
+- **Branch**: `feat/daemon-check-config`
+- **Base commit**: `3f76090`
+- **Plan evaluated**: `AI/architect_spec_daemon_check_config.md` §0–§4
+- **Mode**: self-check by the implementing agent (orchestrated run, phases 1–4 by one agent). The independent candid review still runs separately before any push.
 
 ## 1. Coverage Matrix
 
-| #423 acceptance line | Spec element | Status |
+| #441 / triage acceptance line | Spec element | Status |
 |---|---|---|
-| `setup.sh --help` stops claiming every feature has a `soos-gui` switch; names the password-alerts path | §2 item 1, CWD1 | Covered |
-| Closing summary line of `setup.sh` likewise | §2 item 2, CWD1 | Covered |
-| `Docs/REMOTE_COMPANION.md` §2b example without "opt-in", code default and setup value stated | §2 item 3, CWD3 | Covered |
-| `AI/ARCHITECTURE.md` "Push sender" and "Unlock" headers reworded, default-false kept | §2 item 4, CWD3 | Covered |
-| README security sentence names push and offline-alert switches | §2 item 5, CWD4 | Covered |
-| Static invariant against the false GUI claim | CWD1, CWD2, CWD5 | Covered |
-| Matrix rows, walkthrough 228, no ADR | §4 | Covered |
+| `--check-config [--config <path>]` in `main.rs` | §2.4 | Covered |
+| Same loader, bounds and unknown-key policy as the start | §2.1 (start path rewritten on top of `load_classified`), F4 | Covered |
+| Opens no socket, camera, model or Tokio runtime; never logs secrets | §2.4 (exit before the runtime), §2.2 (first line only, no file content) | Covered |
+| Exit 0 valid, sysexits non-zero otherwise, bounded English one-line diagnostic | §2.2, §2.3 | Covered |
+| Tests: valid, setup `[preview]` render, oversized, bad TOML, unknown key, symlink/permission, default path absent | DCC1–DCC7 | Covered |
+| `setup.sh` root half runs the installed `soos-daemon --check-config --config <file>` before the restart; failure removes the file, exit 1, no restart | §2.5, DCC8–DCC10 | Covered |
+| Existing `daemon.toml` never edited (AS-U2), TOML editor deferred | §2.5 last bullet | Covered |
+| Additive invariants, matrix rows, ADR, `Docs/DAEMON.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, walkthrough | §3, §4 | Covered |
 
 ## 2. Facts Verified
 
 | Fact | Check | Actual | Match |
 |---|---|---|---|
-| GUI switches | `crates/gui/src/feature_control.rs` `RemoteSwitch::key` | `allow_unlock`, `allow_funnel`, `push_notifications`, `camera_view`, `offline_alerts` | Yes |
-| GUI clears dependants | `RemoteSwitch::keys_to_clear` | Funnel → `camera_view_funnel`; Push → `offline_alerts`; Camera view → `camera_view_funnel` | Yes |
-| `--password-alerts off` cascades | `scripts/setup.sh` `resolve_features`, `FEATURE_PREREQS` | push and offline alerts written off ("needs password alerts"); only `--push on` with it exits 2 (SET22) | Yes |
-| Code defaults | `crates/remote/src/config.rs` | `allow_funnel`, `allow_unlock`, `password_alerts`, `push_notifications`, `offline_alerts` default `false` | Yes |
-| Manual install never enables the push sender | `scripts/install_remote.sh` line 70 | "installed, never enabled by this script" | Yes |
-| Constrained text in `setup.sh` | SET2, SET3, SET21, `setup_user_phase_contract.rs:811` | option lines, marker comment and banned words untouched | Yes |
-| README contracts | `readme_contract.rs` RDM10, RDM12 | new sentence makes no independent opt-out or opt-in claim | Yes |
-| Same false claim elsewhere | grep of `README.md`, `Docs/`, `AI/`, `scripts/` | also `Docs/PACKAGING_AND_PROVISIONING.md` "Defaults" ("each switchable off later in soos-gui") | Added to scope (P-1) |
-| Matrix prefix `CWD` unused | grep `AI/VERIFICATION_MATRIX.md` | 0 hits | Yes |
-| Walkthrough 228 free | `ls AI/walkthroughs` | absent (number assigned by the lead) | Yes |
+| Start path | `config.rs` `load_or_default_with_system_path` | explicit path always read; system path `NotFound` → defaults | Yes |
+| Reader errors | `daemon_config.rs` `DaemonConfigError` | `NotFound`, `NotARegularFile`, `Unreadable`, `TooLarge`, `Malformed` | Yes |
+| Unknown keys | `grep deny_unknown crates/daemon/src` | none: ignored at start; `[camera]` extras warn | Yes |
+| No owner/mode rule on `daemon.toml` | `config.rs` | none (symbolic links followed by the reader) | Yes |
+| Installed daemon path | `setup.sh` `system_up_to_date`, install stubs | `${PREFIX}/libexec/soos/soos-daemon` | Yes |
+| Docker stand-in ignores argv and binds the socket | `setup_root_preview_test.sh` `write_stub_daemon` | yes: a `--check-config` call would block until the 10 s bound → every creation case would fail | Yes (harness change required, §3) |
+| `print_stdout`/`print_stderr` denied | workspace lints | denied; `writeln!` to a locked handle is the idiom | Yes |
 
-## 3. Pillar Analysis
+## 3. Findings
 
-- **Architecture alignment**: no runtime change; the text now matches `feature_control.rs`, `config.rs` and
-  the `setup.sh` behaviour.
-- **Test integrity**: no existing test file is edited except the module registration in `lib.rs` (addition
-  only).
-- **Truthfulness**: CWD2 pins the premise (no `password_alerts` switch), so the help cannot silently become
-  wrong in the other direction.
-- **Supply chain**: std only in the new test module.
-
-## 4. Findings
-
-| # | Severity | Finding | Resolution |
+| Id | Severity | Finding | Resolution |
 |---|---|---|---|
-| P-1 | MINOR | `Docs/PACKAGING_AND_PROVISIONING.md` repeats the S-4 claim | Fixed in the same change; asserted by CWD3 |
-| P-2 | INFO | `AI/ARCHITECTURE.md` §13 prose still says "Funnel (opt-in …)" and "Live camera view (opt-in …)" | Out of scope by request (only the two table headers); listed as a follow-up |
+| F-1 | Major | The Docker stand-in daemon would hang on `--check-config` and break cases A1, C1, C2, D | Stand-in answers `--check-config` without binding (test double only, no assertion change); reported as a setup-only test change |
+| F-2 | Minor | Popping the journal entry before `return 1` is required, else the rollback `try-restart` restarts the daemon | §2.5 pops it; DCC8 asserts no `systemctl` call |
+| F-3 | Minor | A `toml` error quotes the source line; printing it would echo file content | `bounded_diagnostic` keeps the first line only (DCC3, DCC6) |
+| F-4 | Minor | Default-path test on a host that has `/etc/soos/daemon.toml` (the owner's) is not hermetic | Library test with an injected system path; binary tests always pass `--config` |
+| F-5 | Info | Mode-000 permission case is meaningless as root (CAP_DAC_OVERRIDE) | The test checks readability first and asserts 66 only when the file is really unreadable |
+
+## 4. Verdict
 
 VALIDATION_VERDICT: APPROVED

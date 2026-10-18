@@ -1,0 +1,6 @@
+# Written by scripts/setup.sh (soos-setup): live camera view of the phone companion.
+# Docs/DAEMON.md section 1.5; edit or remove it as an administrator.
+[preview]
+enabled = true
+allowed_uids = [1000]
+remote_view = true
