@@ -2514,6 +2514,17 @@ One-command source install `scripts/setup.sh` (ADR 2026-10-13 "One-Command Setup
 
 ---
 
+## Component: `presence-flag-path` (GitHub #453, part of #362, refs #323, no backlog id, `fix/presence-flag-path`, walkthrough 243)
+
+| ID | Acceptance criterion | Evidence | Status |
+|---|---|---|---|
+| PFP1 | `setup.sh` pins `PRESENCE_READ_FLAG="/etc/soos/presence.disable"`, equal to soos-daemon's `DEFAULT_KILL_SWITCH_DIR` joined with `PRESENCE_DISABLE_FLAG` (watched by `main.rs` with no path option) and to soos-gui's `SOOS_ETC_DIR` joined with `PRESENCE_DISABLE_FLAG`; the applied/not-applied decision compares `<sysconfdir>/soos/presence.disable` with it; no other shipped source under `crates/*/src`, `packaging/` or `scripts/` names the flag | `soos-invariants::setup_contract::test_pfp1_presence_read_path_matches_the_daemon` | ✅ Verified |
+| PFP2 | With a `--sysconfdir` other than `/etc`, a dry run, `--presence off` (twice), a plain run, `--presence on` and a plain run never print a `[DONE] presence` line: one `[SKIP] presence` line, one plan line and the summary say "not applied", name `/etc/soos/presence.disable` and the exact `sudo touch` / `sudo rm -f` command, and no line claims auto-unlock was turned off or on | `soos-invariants::setup_contract::test_pfp2_non_etc_sysconfdir_never_reports_the_presence_flag_applied` | ✅ Verified |
+| PFP3 | When `<sysconfdir>/soos/presence.disable` is the read path, `--presence off` and `on` are reported `[DONE]` (turned off / turned on) and never "not applied" | `soos-invariants::setup_contract::test_pfp3_read_path_presence_flag_is_reported_done` | ✅ Verified |
+| PFP4 | The presence row of `Docs/PACKAGING_AND_PROVISIONING.md` §3.0 names the read path and "not applied"; the ADR records the fix; matrix rows and walkthrough 243 present | `soos-invariants::setup_contract::test_pfp4_documentation_and_traceability` | ✅ Verified |
+
+---
+
 ## Component: `setup-user-phase` (GitHub #400 = PR 2 of #362, no backlog id, `feat/setup-user-phase`, walkthrough 213; development branch, not merged until the owner approves)
 
 Phone companion profile of `scripts/setup.sh` (ADR 2026-10-15 "Setup User Phase: Phone Companion Profile With Default-On Features", owner decisions of 2026-10-15 on #400, spec `AI/architect_spec_setup_user_phase.md` §10–§11, auditor constraints `AI/auditor_constraints_setup_user_phase.md`, `Docs/PACKAGING_AND_PROVISIONING.md` §3.0). Behavioral rows run the real script without root against a fake root, a fake HOME, stub commands and a restricted `PATH`.

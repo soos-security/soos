@@ -2156,3 +2156,254 @@ fn test_set_target_dir_foreign_owner_refused_before_build() {
     );
     assert_eq!(before, h.snapshot(), "a refused preflight writes nothing");
 }
+
+// ---------------------------------------------------------------------------
+// Presence flag read path (GitHub #453, part of #362; ADR 2026-10-15 "Setup User Phase" item
+// (7); rows PFP1-PFP4)
+// ---------------------------------------------------------------------------
+
+/// The one presence kill switch soos-daemon reads (`DEFAULT_KILL_SWITCH_DIR` joined with
+/// `PRESENCE_DISABLE_FLAG`), also the file soos-gui reads and toggles.
+const PRESENCE_READ_FLAG_PATH: &str = "/etc/soos/presence.disable";
+
+/// Value of `pub const <name>: &str = "<value>";` in a Rust source.
+fn str_const(source: &str, name: &str) -> String {
+    let needle = format!("pub const {name}: &str = \"");
+    let start = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("{name} not declared"))
+        + needle.len();
+    let end = source[start..].find('"').expect("closing quote");
+    source[start..start + end].to_string()
+}
+
+fn output_lines(out: &Output) -> Vec<String> {
+    text(out).lines().map(str::to_string).collect()
+}
+
+/// A non-/etc `--sysconfdir` run never reports the presence step as applied: no
+/// `[DONE] presence` line, exactly one `[SKIP] presence` line and one `[PLAN] presence` line
+/// saying "not applied" with the path the daemon reads and the exact administrator command,
+/// the summary repeating it, and no line claiming auto-unlock was turned off or on.
+fn assert_presence_not_applied(out: &Output, command: &str) {
+    let lines = output_lines(out);
+    let t = text(out);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("[DONE] presence")),
+        "a flag the daemon never reads is never reported done:\n{t}"
+    );
+    for prefix in ["[SKIP] presence: ", "[PLAN] presence: "] {
+        let found: Vec<&String> = lines.iter().filter(|l| l.starts_with(prefix)).collect();
+        assert_eq!(found.len(), 1, "one `{prefix}` line:\n{t}");
+        for needle in ["not applied", PRESENCE_READ_FLAG_PATH, command] {
+            assert!(found[0].contains(needle), "missing {needle}: {}", found[0]);
+        }
+    }
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Presence: ") && l.contains("not applied") && l.contains(command)),
+        "the summary prints the manual step:\n{t}"
+    );
+    for claim in ["auto-unlock turned off", "auto-unlock turned on"] {
+        assert!(!t.contains(claim), "no line claims `{claim}`:\n{t}");
+    }
+}
+
+/// PFP1: the read path is pinned on every side: `setup.sh` names the file soos-daemon reads
+/// (its `DEFAULT_KILL_SWITCH_DIR` and `PRESENCE_DISABLE_FLAG`, with no path option in
+/// `main.rs`) and soos-gui toggles; the applied/not-applied decision compares the written
+/// flag with it; and no other shipped source reads `presence.disable`.
+#[test]
+fn test_pfp1_presence_read_path_matches_the_daemon() {
+    let script = read_repo(SETUP);
+    assert!(
+        script
+            .lines()
+            .any(|l| l == format!("readonly PRESENCE_READ_FLAG=\"{PRESENCE_READ_FLAG_PATH}\"")),
+        "setup.sh pins the presence read path"
+    );
+    assert!(
+        setup_code().contains("\"${PRESENCE_FLAG}\" != \"${PRESENCE_READ_FLAG}\""),
+        "the decision is a comparison with the read path"
+    );
+
+    let presence = read_repo("crates/daemon/src/presence/mod.rs");
+    let daemon_path = format!(
+        "{}/{}",
+        str_const(&presence, "DEFAULT_KILL_SWITCH_DIR"),
+        str_const(&presence, "PRESENCE_DISABLE_FLAG")
+    );
+    assert_eq!(
+        daemon_path, PRESENCE_READ_FLAG_PATH,
+        "setup.sh and soos-daemon agree"
+    );
+    let main = read_repo("crates/daemon/src/main.rs");
+    assert!(
+        main.contains("PresenceSwitch::new(PathBuf::from(DEFAULT_KILL_SWITCH_DIR))"),
+        "soos-daemon watches the constant directory, never a configurable one"
+    );
+
+    let gui = read_repo("crates/gui/src/feature_control.rs");
+    let gui_path = format!(
+        "{}/{}",
+        str_const(&gui, "SOOS_ETC_DIR"),
+        str_const(&gui, "PRESENCE_DISABLE_FLAG")
+    );
+    assert_eq!(
+        gui_path, PRESENCE_READ_FLAG_PATH,
+        "setup.sh and soos-gui agree"
+    );
+
+    // Every shipped source naming the flag is a known reader (daemon, GUI) or the installer
+    // scripts; a new reader must make setup.sh learn its read path.
+    let known = [
+        "crates/daemon/src/presence/mod.rs",
+        "crates/daemon/src/presence/switch.rs",
+        "crates/daemon/src/presence/worker.rs",
+        "crates/gui/src/feature_control.rs",
+        "crates/gui/src/onboarding.rs",
+        "scripts/setup.sh",
+        "scripts/uninstall.sh",
+    ];
+    let root = workspace_root();
+    let mut stack: Vec<PathBuf> = vec![root.join("packaging"), root.join("scripts")];
+    for entry in fs::read_dir(root.join("crates")).unwrap().flatten() {
+        stack.push(entry.path().join("src"));
+    }
+    let mut readers = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if fs::read_to_string(&path).is_ok_and(|b| b.contains("presence.disable")) {
+                let rel = path.strip_prefix(&root).unwrap().display().to_string();
+                readers.push(rel);
+            }
+        }
+    }
+    readers.sort();
+    for rel in &readers {
+        assert!(
+            known.contains(&rel.as_str()),
+            "{rel} names presence.disable: setup.sh must learn its read path"
+        );
+    }
+    assert!(
+        readers
+            .iter()
+            .any(|r| r == "crates/daemon/src/presence/mod.rs"),
+        "the scan sees the daemon: {readers:?}"
+    );
+}
+
+/// PFP2: with a `--sysconfdir` other than `/etc` (the harness's fake root), a dry run,
+/// `--presence off` (twice), a plain run, `--presence on` and a plain run never report the
+/// presence step as applied and print the exact command for `/etc/soos/presence.disable`.
+#[test]
+fn test_pfp2_non_etc_sysconfdir_never_reports_the_presence_flag_applied() {
+    let h = Harness::new("pfp_elsewhere");
+    let touch = format!("sudo touch {PRESENCE_READ_FLAG_PATH}");
+    let remove = format!("sudo rm -f {PRESENCE_READ_FLAG_PATH}");
+
+    let out = h.run(&["--dry-run", "--presence", "off"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let plans: Vec<String> = output_lines(&out)
+        .into_iter()
+        .filter(|l| l.starts_with("[PLAN] presence: "))
+        .collect();
+    assert_eq!(plans.len(), 1, "{}", text(&out));
+    for needle in ["not applied", PRESENCE_READ_FLAG_PATH, touch.as_str()] {
+        assert!(plans[0].contains(needle), "missing {needle}: {}", plans[0]);
+    }
+
+    for args in [
+        &["--yes", "--presence", "off"][..],
+        &["--yes", "--presence", "off"][..],
+        &["--yes"][..],
+    ] {
+        let out = h.run(args);
+        assert_eq!(code(&out), 0, "{args:?}: {}", text(&out));
+        assert_presence_not_applied(&out, &touch);
+    }
+    for args in [&["--yes", "--presence", "on"][..], &["--yes"][..]] {
+        let out = h.run(args);
+        assert_eq!(code(&out), 0, "{args:?}: {}", text(&out));
+        assert_presence_not_applied(&out, &remove);
+    }
+}
+
+/// PFP3: when `<sysconfdir>/soos/presence.disable` is the file the daemon reads (the read path
+/// pointed at the fake root in the harness copy of the script), `--presence off` and `on` are
+/// reported done and never "not applied".
+#[test]
+fn test_pfp3_read_path_presence_flag_is_reported_done() {
+    let h = Harness::new("pfp_applied");
+    let flag = h.root.join("etc/soos/presence.disable");
+    let path = h.repo.join(SETUP);
+    let original = format!("readonly PRESENCE_READ_FLAG=\"{PRESENCE_READ_FLAG_PATH}\"");
+    let script = fs::read_to_string(&path).unwrap();
+    assert!(script.contains(&original), "read path line present");
+    fs::write(
+        &path,
+        script.replace(
+            &original,
+            &format!("readonly PRESENCE_READ_FLAG=\"{}\"", flag.display()),
+        ),
+    )
+    .unwrap();
+
+    let out = h.run(&["--yes", "--presence", "off"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!(
+            "[DONE] presence: auto-unlock turned off ({})",
+            flag.display()
+        )),
+        "{t}"
+    );
+    assert!(!t.contains("not applied: soos-daemon reads"), "{t}");
+    assert!(flag.is_file());
+
+    let out = h.run(&["--yes", "--presence", "on"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        t.contains("[DONE] presence: auto-unlock turned on ("),
+        "{t}"
+    );
+    assert!(!t.contains("not applied: soos-daemon reads"), "{t}");
+    assert!(!flag.exists());
+}
+
+/// PFP4: the documentation and the traceability agree with the code: the presence row of
+/// `Docs/PACKAGING_AND_PROVISIONING.md` names the read path and "not applied", the ADR records
+/// the fix, the matrix carries PFP1-PFP4 and walkthrough 243 exists.
+#[test]
+fn test_pfp4_documentation_and_traceability() {
+    let pkg = read_repo("Docs/PACKAGING_AND_PROVISIONING.md");
+    let row = pkg
+        .lines()
+        .find(|l| l.starts_with("| presence | root |"))
+        .expect("presence row");
+    for needle in ["not applied", PRESENCE_READ_FLAG_PATH, "GitHub #453"] {
+        assert!(row.contains(needle), "presence row: {needle}");
+    }
+    let adr = read_repo("AI/DECISIONS.md");
+    assert!(adr.contains("GitHub #453"), "the ADR records the fix");
+    let matrix = read_repo("AI/VERIFICATION_MATRIX.md");
+    for row in 1..=4 {
+        assert!(
+            matrix.contains(&format!("| PFP{row} |")),
+            "matrix row PFP{row}"
+        );
+    }
+    assert!(workspace_root()
+        .join("AI/walkthroughs/243_presence_flag_path.md")
+        .is_file());
+}
