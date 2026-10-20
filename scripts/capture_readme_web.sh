@@ -18,6 +18,9 @@
 # server builds every body from that same instant (--clock fixed), so every
 # scene and theme shows the same date and times. Every browser run has a pinned time zone
 # and locale (BROWSER_ENV, --lang=en-US, --accept-lang=en-US; GitHub #458).
+# Every browser run is bounded: it runs in the background and await_browser waits at most
+# BROWSER_TIMEOUT_S seconds (coreutils timeout), then stops it (SIGTERM, SIGKILL after
+# BROWSER_KILL_AFTER_S seconds) and fails the whole script with status 124.
 #
 # Optional and never a CI requirement: nothing is installed or downloaded.
 # The browser binary is taken from $CHROME or found on PATH. Run
@@ -39,6 +42,12 @@ SETTLE_MS=4000
 # never depend on the capture host (GitHub #458); --lang/--accept-lang below pin the browser's
 # own locale and Accept-Language the same way.
 BROWSER_ENV=(TZ=UTC LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US)
+# Upper bound of one browser run. A normal run ends within seconds (SETTLE_MS of virtual time),
+# but headless Chrome was seen to hang without ever writing the screenshot. Four runs per
+# scene, each at most BROWSER_TIMEOUT_S + BROWSER_KILL_AFTER_S seconds, stay within the
+# fixture server's 240 s lifetime (--serve-ms 240000): 4 x (45 + 5) = 200 s.
+BROWSER_TIMEOUT_S=45
+BROWSER_KILL_AFTER_S=5
 
 browser="${CHROME:-}"
 if [[ -z "$browser" ]]; then
@@ -59,7 +68,43 @@ cargo build --locked -q -p soos-test-fixtures --example readme_web_fixture_serve
 
 work="$(mktemp -d)"
 server_pid=""
+browser_pid=""
+
+# Stops the browser run in the background, if any: SIGTERM, then SIGKILL when it is still
+# running BROWSER_KILL_AFTER_S seconds later.
+stop_browser() {
+    if [[ -z "$browser_pid" ]]; then
+        return 0
+    fi
+    kill -TERM "$browser_pid" 2> /dev/null || true
+    if ! timeout "${BROWSER_KILL_AFTER_S}s" tail --pid="$browser_pid" --sleep-interval=0.2 -f /dev/null; then
+        kill -KILL "$browser_pid" 2> /dev/null || true
+    fi
+    wait "$browser_pid" 2> /dev/null || true
+    browser_pid=""
+}
+
+# Waits for the browser run started in the background ($browser_pid) for at most
+# BROWSER_TIMEOUT_S seconds. On expiry the run is stopped and the script fails loudly with
+# status 124 (a killed Chrome may itself exit 0); a failing run fails the script too.
+await_browser() {
+    local label="$1"
+    if ! timeout "${BROWSER_TIMEOUT_S}s" tail --pid="$browser_pid" --sleep-interval=0.2 -f /dev/null; then
+        echo "capture_readme_web.sh: the browser run ($label) did not finish within ${BROWSER_TIMEOUT_S} s; stopping it" >&2
+        stop_browser
+        exit 124
+    fi
+    local status=0
+    wait "$browser_pid" || status=$?
+    browser_pid=""
+    if [[ "$status" -ne 0 ]]; then
+        echo "capture_readme_web.sh: the browser run ($label) failed with status $status" >&2
+        exit "$status"
+    fi
+}
+
 cleanup() {
+    stop_browser
     if [[ -n "$server_pid" ]]; then
         kill "$server_pid" 2> /dev/null || true
         wait "$server_pid" 2> /dev/null || true
@@ -101,10 +146,15 @@ for scene in "${SCENES[@]}"; do
         # profile, then loads / (GitHub #448), so the tour never covers the capture.
         # BROWSER_ENV (TZ=UTC, en_US locale) keeps the capture host's time zone and locale out
         # of the clock times and dates shown.
-        env "${BROWSER_ENV[@]}" "$browser" "${flags[@]}" "http://127.0.0.1:$port/readme/tour-seen" > /dev/null 2>&1
+        # Each run starts in the background and is bounded by await_browser.
+        env "${BROWSER_ENV[@]}" "$browser" "${flags[@]}" "http://127.0.0.1:$port/readme/tour-seen" > /dev/null 2>&1 &
+        browser_pid=$!
+        await_browser "tour-seen page, $scene, $variant"
         # Same profile, page clock frozen at the fixed capture instant: the screenshot.
         env "${BROWSER_ENV[@]}" "$browser" "${flags[@]}" --screenshot="$raw" \
-            "http://127.0.0.1:$port/readme/capture" > /dev/null 2>&1
+            "http://127.0.0.1:$port/readme/capture" > /dev/null 2>&1 &
+        browser_pid=$!
+        await_browser "screenshot, $scene, $variant"
         cargo run --locked -q -p soos-test-fixtures --example readme_web_fixture_server -- \
             --strip-png "$raw" "$OUT/web-$scene-$variant.png"
         echo "==> $OUT/web-$scene-$variant.png"

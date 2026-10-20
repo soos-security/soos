@@ -104,6 +104,15 @@ scripts/capture_readme_assets.sh   # refresh MANIFEST.toml afterwards
   locale gave a 24 h "09:38" before the pin), and a rerun gives byte-identical PNGs (checked on the capture host with the same
   Chrome build; another browser version or font set may render differently). The fixture server
   lives up to 240 s per scene (two browser runs per theme).
+- **Bounded browser runs**: headless Chrome was seen to hang on some runs without ever writing the
+  screenshot. Every browser run therefore starts in the background and `await_browser` waits at
+  most `BROWSER_TIMEOUT_S` = 45 s for it (coreutils `timeout` around `tail --pid`; a normal run
+  takes about 21 s on the capture host); on expiry `stop_browser` sends SIGTERM, then SIGKILL after
+  `BROWSER_KILL_AFTER_S` = 5 s, and the script fails with status 124 and names the run (a killed
+  Chrome may itself exit 0, so its status is never trusted after a timeout). A browser run that
+  fails also fails the script, and the exit trap stops a run still going. Four bounded runs per
+  scene (4 × 50 s = 200 s) fit in the server's 240 s lifetime. Rerun the script after a timeout;
+  the PNGs already written are byte-identical to a clean run's (RAC24).
 - **First-run tour**: the web app's feature tour (ADR 2026-10-17, GitHub #414/#418) opens on a fresh
   browser profile and would cover the page. The browser therefore first opens the fixture page
   `/readme/tour-seen` (`soos_test_fixtures::readme_web::TOUR_SEEN_PAGE`), which sets the app's own
