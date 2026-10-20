@@ -1,87 +1,109 @@
 # Candid Review Report
 
 - **Date**: 2026-10-20
-- **Target Branch**: `fix/webpki-advisories`
+- **Target Branch**: `feat/remote-motion` (PR #436, GitHub #433 = PR 2 of #358), head `ac7413e` on `origin/main` `da320a4`
 - **Base (merge-base)**: `da320a4`
-- **Reviewed-Diff-Fingerprint**: `4b02338bc89f3ed648cc3e4f81204579414cd2caf3f75717666174e9868c78e4`
-- **Audited Files**: `Cargo.lock`, `AI/walkthroughs/247_webpki_advisories.md`
+- **Reviewed-Diff-Fingerprint**: `d23230e4018500a7016ca73b029e631a387099b95ebfa7b4bd7f4362c69952a3`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_motion.md`, `AI/auditor_constraints_remote_motion.md`, `AI/tester_contract_motion.md`, `AI/walkthroughs/235_remote_web_motion.md`, `Docs/README_ASSETS.md`, `Docs/REMOTE_COMPANION.md`, `Docs/UI_MOTION.md`, `Docs/assets/MANIFEST.toml`, `Docs/assets/screenshots/web-unlocked-dark.png`, `Docs/assets/screenshots/web-unlocked-light.png`, `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `scripts/capture_readme_web.sh`, `tests/fixtures/tests/readme_capture_timeout_tests.rs`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_motion_contract.rs`
 
 ## 1. Executive Summary
 
-Lockfile-only security bump for RUSTSEC-2026-0381/0382/0383 (CVE-2026-111943, emSign distrust):
-`rustls-webpki` 0.103.15 -> 0.103.16, `webpki-roots` 1.0.9 -> 1.0.10, `webpki-root-certs`
-1.0.9 -> 1.0.10, plus walkthrough 247. Every claim checked against the published crate sources,
-the local advisory database and the workspace code holds. No findings of any severity.
+This independent review covers the full raw diff (`target/candid_diff.patch`, 3409 lines) against the merge base
+`da320a4`. It focuses on the three commits added after the CHANGES_REQUESTED review of `c3d3609`
+(`c5700fa`, `860be80`, `ac7413e`). `crates/` and `tests/invariants/` have not changed since that review, so its
+verdict on the motion code still holds: class-only hooks, one guarded `startViewTransition`, security truth
+written first, a single reduced-motion block, and unchanged CSP, routes, assets and ids. The hunks were re-read.
 
-## 2. Test Changes
+Every previous finding is resolved:
+- MAJOR (UIM7 cites no resolvable evidence): the row now cites `Docs/prototypes/ui_motion_prototype.html`
+  and `ui_motion_spec_contract::test_uim_s4_prototype_is_self_contained_and_on_brand`.
+  `matrix_citations::test_matrix_claimed_rows_cite_at_least_one_resolvable_evidence` passes.
+- MINOR (stale unlocked captures): both PNGs were regenerated and show the star turned 45°. The `sha256sum` of
+  every PNG under `Docs/assets/screenshots/` equals its `MANIFEST.toml` entry (`186c80a2…` dark, `db661b7d…`
+  light). The locked-alerts and GUI hashes did not change.
+  `test_rac_docs_assets_are_listed_in_the_manifest_with_matching_sha256` passes.
+- MINOR (duplicate `---`): a scan of the matrix finds no two `---` lines separated only by blank lines.
+- SUGGESTION (unbounded browser runs): implemented in `ac7413e` with RAC24.
 
-Mechanical listing on `target/candid_diff.patch`:
+`cargo test --locked -p soos-invariants -p soos-remote -p soos-test-fixtures -- --test-threads=3`
+exited 0: 1333 passed, 0 failed, 0 ignored (53 test binaries). `bash -n scripts/capture_readme_web.sh` passes.
 
-- Test files touched: none.
-- Removed/changed assertions (`assert`, `#[test]`, `proptest!`, `should_panic`): none.
-- New escape hatches (`#[ignore]`, `cfg(any())`, tolerance, epsilon): none.
+## 2. Test Changes (mechanical listing)
+
+- Test files touched: `tests/fixtures/tests/readme_capture_timeout_tests.rs` (new, RAC24),
+  `tests/invariants/src/lib.rs` (adds only `mod remote_motion_contract;`), `tests/invariants/src/remote_motion_contract.rs` (new, RMO1–RMO12).
+- Removed or changed assertions (`^-` lines with assert, #[test], proptest or should_panic): one hit, the
+  `AI/DECISIONS.md` line of ADR 2026-10-13. A word diff shows a pure addition (an implementation note for
+  item (6)), and the line is prose, not a test. No test assertion was removed or changed.
+- New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance, epsilon): none.
 - Inline `mod tests` changes: none.
 
-No test was added, modified or removed.
+No pre-existing assertion changed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- Advisory ranges verified in `~/.cargo/advisory-dbs/.../RUSTSEC-2026-038{1,2,3}.md`:
-  `webpki-roots` and `webpki-root-certs` patched `>= 1.0.10`; `rustls-webpki` patched
-  `>= 0.103.16, < 0.104.0-alpha.1`. The new versions are the lowest patched releases. PASS.
-- Checksums: SHA-256 of the cached `.crate` files for all six versions (old and new) match the
-  `checksum` lines in the diff exactly. PASS.
-- Manifests: `rustls-webpki` 0.103.15 vs 0.103.16 `Cargo.toml` identical except `version`;
-  `webpki-roots`/`webpki-root-certs` differ only in `version` and `rust-version` 1.70 -> 1.71
-  (well under workspace MSRV 1.92). Dependency lists in the lockfile entries unchanged. PASS.
-- Source behaviour: `rustls-webpki` 0.103.16 adds `DISTRUSTED_SPKIS` (eight emSign SPKIs),
-  checks the path head and the trust anchor, and adds `Error::CertDistrusted`; `webpki-roots`
-  1.0.10 and `webpki-root-certs` 1.0.10 only remove `emSign ECC Root CA - G3` (no anchor added).
-  rustls 0.23.46 maps unknown webpki errors through its `_ => CertificateError::Other(..)` arm. PASS.
-- Push sender: no `TlsConfig`, `root_certs`, `RootCerts` or `disable_verification` anywhere in
-  `crates/`; `rustls-platform-verifier` absent from `Cargo.lock`. `send_error_outcome`
-  (`crates/push-sender/src/lib.rs:227`) maps any non-resolver error to `Outcome::Retry`, so a
-  `CertDistrusted` failure is handled like any other TLS failure, never as success. PASS.
+- `scripts/capture_readme_web.sh` runs under `set -euo pipefail`. Its `stop_browser` and `await_browser`
+  functions were extracted and run against stand-in browsers (timeout 2 s, kill-after 1 s):
+  - A run that exits 0 after 0.3 s: the script continues and returns in about 0.4 s. Bash reaps the background
+    child on SIGCHLD, so `tail --pid` does not wait on a zombie. `wait` gets status 0. PASS.
+  - A run that exits before `tail` starts: the script continues in 9 ms. PASS.
+  - A run that exits 7: the message names the run and the script exits 7. The EXIT trap does nothing because the pid is already cleared. PASS.
+  - A hang that honours SIGTERM: message, SIGTERM, and the script exits 124 at about 2 s. PASS.
+  - A hang that ignores SIGTERM: SIGKILL after the grace period, exit 124 at about 3 s, and no orphan left
+    (`pgrep` finds nothing afterwards). PASS.
+  - `exit 124` runs `cleanup` again: `stop_browser` sees an empty `browser_pid` and returns. PASS.
+- Process identity: `env … "$browser"` execs the browser. Both Chrome launchers on this host
+  (`/usr/bin/google-chrome-stable`, `/opt/google/chrome/google-chrome`) `exec` the real binary, so `$!` is
+  the Chrome browser process that receives SIGTERM and SIGKILL. PASS (see the SUGGESTION on process groups).
+- Budget: the 45 s bound is at least 5 × `SETTLE_MS` (4000 ms), and 4 × (45 + 5) = 200 s fits within
+  `--serve-ms 240000`. A timeout exits the script at once, so at most one run per scene reaches the bound. PASS.
+- RAC15 (`test_rac_capture_tooling_is_dev_only`), RAC20 (`readme_tour_seen_tests`), RAC21
+  (`readme_fixed_clock_tests`), RAC22 (`test_rac_web_capture_pins_the_browser_locale`; both runs keep the prefix
+  `env "${BROWSER_ENV[@]}" "$browser" "${flags[@]}"`) and RAC23 all pass. PASS.
 
 ### PAM Concurrency & Deadlines
-
-No change to `crates/pam` or its dependency graph (these crates reach the workspace only via
-`ureq` in `soos-push-sender` and the `ort-sys` build script). PASS.
+- Nothing changed under `crates/pam`. N/A.
 
 ### Panic Safety & Fail-Closed
-
-No production code changed. The new verification error strictly reduces trust (fail-closed). PASS.
+- No Rust production code changed. The script fails closed: a browser run that times out or fails stops the
+  script before `--strip-png` writes that run's output, and the exit status of a killed Chrome is never trusted. PASS.
 
 ### Test Integrity & Anti-Weakening
+- RAC24 fails against each plausible wrong implementation tried:
+  - a run in the foreground (no trailing `&`);
+  - a missing `browser_pid=$!`, or no `await_browser` right after a run;
+  - no `timeout` in `await_browser`;
+  - no `exit 124` or no `stop_browser` on expiry;
+  - a run status that is swallowed;
+  - a missing SIGTERM or SIGKILL step;
+  - a `cleanup` that does not stop the browser;
+  - a bound outside the settle or server budget.
 
-See section 2: zero test changes. PASS.
+  PASS.
+- RAC24 is a static text check of the script, like RAC22. The runtime behaviour was checked by hand above. PASS.
 
 ### Memory, Bounds & Secrets
-
-No code or logging change; `rustls`/`ureq` log targets remain unchanged. PASS.
+- The regenerated PNGs (780×1688) contain only `IHDR`, `IDAT` and `IEND` chunks. They show the synthetic unlocked
+  scene ("Unlocked", "No failed password attempts", one synthetic offline period on Oct 1). They contain no user
+  name, host name, e-mail, path or face, and `strings` finds nothing identifying. PASS.
 
 ### Supply Chain & Automation
-
-- `deny.toml` untouched; still `ignore = []`.
-- `cargo deny --locked check` re-run on this worktree: `advisories ok, bans ok, licenses ok, sources ok`.
-- `cargo metadata --locked`: accepted.
-- `git diff --stat origin/main -- Cargo.lock`: 6 insertions / 6 deletions, exactly the three
-  version + checksum pairs; no unrelated churn (the `getrandom` re-resolution mentioned in the
-  walkthrough is absent from the diff). Source stays the crates.io registry. PASS.
+- No `Cargo.*`, `deny.toml`, `.github/` or hook file changed. The script stays optional, installs nothing and
+  uses only coreutils `timeout` and `tail`. PASS.
 
 ### English-Only Policy
-
-Walkthrough 247 is in English; numbering follows 246 with no collision; the
-"not registered in `scripts/sync_issue.py`" wording matches the walkthrough 211 precedent. PASS.
+- The script comments and messages, the test, matrix row RAC24 and `Docs/README_ASSETS.md` are in English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-None.
-
-Note (not a finding): the walkthrough's `cargo test` count (869 passed) was not re-run by this
-reviewer; the lockfile change alters no API used by the workspace, and CI re-runs the suites.
+- **[SUGGESTION]** `scripts/capture_readme_web.sh:79-82`: SIGTERM and SIGKILL reach only the Chrome browser
+  pid. Chrome's helper processes normally exit after a SIGKILL once their IPC channel closes. Killing the
+  process group (`setsid` on start, then `kill -- -"$pid"`) would make sure of it. Optional: the current
+  behaviour meets RAC24.
+- **[SUGGESTION]** `scripts/capture_readme_web.sh:49`: a normal run takes about 21 s on the capture host
+  (`Docs/README_ASSETS.md`), which is about half the 45 s bound. A slower host may hit a false timeout. The
+  script names the run that timed out, so the failure is visible and the script can be rerun. Optional.
 
 ## 5. Final Verdict
 

@@ -537,6 +537,17 @@ mod android_tour_contract;
 #[cfg(all(test, unix))]
 mod lockscreen_installer_contract;
 
+/// Web motion system of the `soos-remote` app: tokens and the gated spring in `:root`, token-only
+/// timing values, compositor and colour transitions only, keyframes and loops, the single
+/// reduced-motion block, brand kept, `@starting-style` entries, class-only `app.js` hooks with one
+/// guarded `startViewTransition`, security truth first, the pending star bound to the request
+/// flags, the first-render list stagger and the unchanged CSP, assets, ids and labels (GitHub
+/// #433, PR 2 of #358; ADR 2026-10-13 "Motion System for soos-gui and soos-remote";
+/// `Docs/UI_MOTION.md` §6; tester contract `AI/tester_contract_motion.md` Part B.1; spec
+/// AI/architect_spec_remote_motion.md; rows UIM8, RMO1-RMO12, RMO13 being the owner's device check).
+#[cfg(all(test, unix))]
+mod remote_motion_contract;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

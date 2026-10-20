@@ -102,6 +102,13 @@ Static checks (the project has no JavaScript runtime in CI); reuse the one-level
 Owner rows (pending until the owner check PR): iPhone Safari home-screen app, Android Chrome and Firefox, with
 reduced motion on and off (UIM10).
 
+**Delivered** by `feat/remote-motion` (GitHub #433, walkthrough 235) as `remote_motion_contract.rs`
+(`test_rmo_s1` … `test_rmo_s12` for items 1–12, plus `test_rmo_helper_self_test`; matrix RMO1–RMO12, owner row
+RMO13 = UIM10). Readings recorded there: item 8 pins one `document.startViewTransition(` call and every mention of
+`startViewTransition` inside the helper, which equals the §6 snippet (the snippet names it twice: the `typeof`
+guard and the call); item 11 stops the stagger at the sixth item, later items sharing its 5 × `--t-stagger` delay
+(§4); item 5 is met at its strict end (no transition remains, PTR-S8 pins `transition: none !important`).
+
 ### B.2 `feat/gui-motion`: `crates/gui/tests/motion_tests.rs` and headless `egui::Context` tests (rows UIM9 and new GMO* rows)
 
 1. **Tokens**: `theme.rs` exposes every constant of `Docs/UI_MOTION.md` §2 and §3 with the documented values

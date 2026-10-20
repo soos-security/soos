@@ -1,48 +1,62 @@
 # Plan Evaluation Report
 - **Date**: 2026-10-18
-- **Issue**: GitHub #444 (part of epic #361, no backlog id) — reproducible source and vendor tarballs with a release dry run that never publishes
-- **Branch**: `chore/release-dry-run`
+- **Issue**: GitHub-only sub-issue #433 (part of epic #358) — web motion system of the `soos-remote` app (UIM8)
+- **Branch**: `feat/remote-motion`
 - **Base commit**: `3f76090`
-- **Plan evaluated**: `AI/architect_spec_release_dry_run.md` §0–§4
-- **Mode**: self-check by the implementing agent (tooling, CI and documentation change; no runtime crate). The independent candid review still runs separately.
+- **Plan evaluated**: `AI/architect_spec_remote_motion.md` §0–§4
+- **Mode**: self-check by the implementing agent. The independent candid review runs separately before any push.
 
 ## 1. Coverage Matrix
 
-| #444 acceptance line | Spec element | Status |
+| Acceptance line | Spec element | Status |
 |---|---|---|
-| `scripts/release_dry_run.sh`, local only, bounded options, `--dry-run` plan | §2.1, RDR-S3, RDR-S4 | Covered |
-| `soos-<workspace version>.tar.gz` from HEAD with `git archive`, mtime = commit time | §2.1 step 3, RDR-S3, RDR-S5 | Covered |
-| `soos-<ver>-vendor.tar.zst` from `cargo vendor --locked` + `.cargo/config.toml` snippet, sorted, owner 0, fixed mtime, fixed zstd level | §2.1 steps 5 and 7, RDR-S5 | Covered |
-| `SHA256SUMS` over both files in `target/release-dry-run/` | §2.1 step 8 | Covered |
-| No gpg, no gh release, no network after the fetch step | §2.1 "Never", RDR-S1, RDR-S5 | Covered |
-| Invariant: no publish/sign/upload command | RDR-S1 | Covered |
-| Invariant: vendored set equals Cargo.lock by `.cargo-checksum.json` package checksum | §2.2, RDR-S2 | Covered (behavioural) |
-| Invariant: version from `[workspace.package]` | RDR-S3 | Covered (behavioural + static) |
-| Two runs byte-identical; offline build from the tarballs only in the clean Arch system-ORT image, `--network none`, `ORT_SKIP_DOWNLOAD=1`, no `.git`, no registry | §2.3, RDR-S6 | Covered |
-| Advisory on PRs like `system-onnxruntime`, no artifact upload | §1.1, §2.4, RDR-S7 | Covered with a recorded deviation (steps in the existing job, see §3) |
-| ADR, matrix rows, backlog entry, `Docs/RELEASING.md` owner-only checklist, packaging pointer, walkthrough | §4, RDR-S8 | Covered |
-| Optional SBOM | — | Not done (optional; no new tool) |
+| Tokens and spring of `Docs/UI_MOTION.md` §2–§3 (Part B.1 item 1) | D-1 | Covered |
+| W1 state word, dot, star turn | D-2, D-3 | Covered |
+| W2 press, release spring, pending star bound to the request flags (items 4, 10) | D-4, D-12 | Covered |
+| W3 native confirmation | D-12 (unchanged) | Covered |
+| W4 `@starting-style` entries, instant hide (item 7) | D-5 | Covered |
+| W5 banner slide, cross-fade, two-cycle nudge (item 4) | D-6 | Covered |
+| W6 `stagger-once` (item 11) | D-7, D-13 | Covered |
+| W7 notification button fade | D-8 | Covered |
+| W8 View Transition on the overlay path only (item 8) | D-9, D-14 | Covered |
+| W9 code input | D-10 | Covered |
+| Reduced motion (item 5) | D-11 | Covered |
+| Token use, properties, brand, unchanged surface, security truth (items 2, 3, 6, 9, 12) | D-1–D-15, §3 | Covered |
 
 ## 2. Facts Verified
 
 | Fact | Check | Actual | Match |
 |---|---|---|---|
-| Workspace version | `Cargo.toml` `[workspace.package]` | `0.1.0` | Yes |
-| Registry-only lock | `grep -c 'checksum = ' Cargo.lock`, `grep -c 'source = "git' Cargo.lock` | 489, 0 | Yes |
-| Vendored set size | local `cargo vendor --locked --offline` | 489 directories, 538 MiB | Yes |
-| Advisory list pinned | `portable_crates_contract` MAC5 `assert_eq!` on the `ADVISORY_CHECKS` line | exactly two names | Yes |
-| Job assertions are `contains` | `test_sort_s5_ci_job_runs_offline_arch_harness` | needles only | Yes |
-| Job duration | `gh run view 39137537240` | 8 min 27 s of 75 | Yes |
-| zstd determinism | level 12, `-T1` vs `-T3` | byte-identical | Yes |
+| Exactly one `@starting-style` block allowed | `remote_tour_contract::css_at_block` (PTR-S8) | asserts one occurrence | Plan uses one block (D-5) |
+| Reduced block universal rule pinned | PTR-S8 | `transition: none !important` | D-11 keeps it, adds `animation` |
+| `.tour` rule count | PTR-S8 | base rule + entry rule = 2 | D-5 adds no `.tour` rule |
+| `--t-medium`, `--ease-enter`, `--rise` declared once | PTR-S8, UIM-S2 | already in the Scale `:root` | D-1 does not repeat them |
+| Five `:has()` rules only | RXB-S7 | five pinned fallbacks | no new `:has()` (D-3 uses `data-state`) |
+| One `@media (hover: hover)` block | PTR-S8 | `css_at_block` | no new hover block |
+| Brand parser one at-rule level | `remote_brand_contract::parse_css` | nested at-rule is an error | `@supports`, `@keyframes`, `@starting-style` all top level |
+| `transform: none` overrides | `button:disabled`, tour replay, reduce block | on `transform` | D-4 keeps the press on `transform` |
+| Fixed stage inside a transformed card | CSS containing block rule | any non-`none` transform | D-5 declares no rest transform |
+| Element fullscreen on iPhone | `enterCameraFullscreen` | overlay only when no `requestFullscreen` | D-14 View Transition there only |
+| No `.style.`, `.animate(`, `requestAnimationFrame` | RLC camera test, PTR-S9 | forbidden | D-15 |
+| `theme.rs` motion constants | grep `crates/gui/src/theme.rs` | absent (GUI PR later) | pinned table, live check when present |
+| Prefix `RMO` unused | grep `AI/VERIFICATION_MATRIX.md`, tests | 0 hits | Yes |
+| Walkthrough 235 free | `ls AI/walkthroughs` | absent (number assigned by the lead) | Yes |
 
-## 3. Findings
+## 3. Pillar Analysis
+
+- **Architecture alignment**: presentation only; ADR 2026-10-13 motion items (1)–(7) followed; CSP, routes and the
+  eleven-file asset set unchanged.
+- **Security**: state text, classes, `data-state` and `disabled` are written before any motion class; the pending
+  loop is bounded by the existing 5 s confirmation timers; no optimistic state.
+- **Test integrity**: existing tests unmodified; the new module carries its own parser copy (Part B.1).
+- **Supply chain**: std only in the new test module; no new web asset or library.
+
+## 4. Findings
 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
-| X-1 | Major | A separate job in `ADVISORY_CHECKS` breaks MAC5 (immutable test); a separate job outside it blocks `pr_loop.sh` | Steps in the existing advisory `system-onnxruntime` job (§1.1); reported to the owner in the PR body |
-| X-2 | Minor | zstd level 19 takes > 4 min per run (two runs per CI job) | Level 12 pinned (13 s, 48 MB) |
-| X-3 | Minor | `TAR_OPTIONS`, `GZIP`, `ZSTD_CLEVEL`, `ZSTD_NBTHREADS` and the umask change the bytes | Unset / fixed in the script, pinned by RDR-S5 |
-| X-4 | Minor | Reading the version from the work tree could mismatch the archived HEAD | Version read from `git show HEAD:Cargo.toml` |
-| X-5 | Minor | Writing the cargo snippet into `.cargo/config.toml` while `cargo vendor` runs | Snippet captured to a staging file first, then moved |
+| P-1 | MINOR | §8 allows opacity and colour fades of at most `--t-fast` under reduced motion, PTR-S8 pins `transition: none !important` | Reduced motion is fully instant (strict end of §8); documented in `Docs/UI_MOTION.md` §8 |
+| P-2 | INFO | Part B.1 item 8 says `startViewTransition` "appears exactly once"; the normative helper names it twice (the `typeof` guard and the call) | RMO-S8 pins one call `document.startViewTransition(` and every mention inside the helper |
+| P-3 | INFO | Item 11 "staggers only `li:nth-child(-n+6)`" vs §4 "items beyond the sixth enter with the sixth" | Delays stop at 5 × `--t-stagger` (the sixth); later items share it (D-7) |
 
 VALIDATION_VERDICT: APPROVED

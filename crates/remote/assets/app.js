@@ -627,8 +627,18 @@ function accept(view) {
   renderUpdated();
 }
 
+// Motion hook (Docs/UI_MOTION.md W2): the pending star shows while a lock or unlock request
+// waits for its confirmation. It follows the two request flags and nothing else, so it lasts
+// at most LOCK_CONFIRM_UI_MS / UNLOCK_CONFIRM_UI_MS; every write of a flag is followed by a call.
+function syncPending() {
+  lockButton.classList.toggle("is-pending", lockRequestedAt !== 0);
+  unlockButton.classList.toggle("is-pending", unlockRequestedAt !== 0);
+  statTile.classList.toggle("is-pending", lockRequestedAt !== 0 || unlockRequestedAt !== 0);
+}
+
 function confirmLock() {
   lockRequestedAt = 0;
+  syncPending();
   if (lockConfirmTimer !== null) {
     clearTimeout(lockConfirmTimer);
     lockConfirmTimer = null;
@@ -638,6 +648,7 @@ function confirmLock() {
 
 function confirmUnlock() {
   unlockRequestedAt = 0;
+  syncPending();
   if (unlockConfirmTimer !== null) {
     clearTimeout(unlockConfirmTimer);
     unlockConfirmTimer = null;
@@ -754,7 +765,11 @@ function renderAlerts(view) {
     alertsSection.hidden = true;
     return;
   }
+  const firstShow = alertsSection.hidden;
   alertsSection.hidden = false;
+  // Motion hook (Docs/UI_MOTION.md W6): the list staggers on its first render after the card
+  // appears, never on a refresh.
+  alertsHistory.classList.toggle("stagger-once", firstShow);
   const wrong = typeof view.unacknowledged_wrong_password === "number" ? view.unacknowledged_wrong_password : 0;
   const lockedOut = typeof view.unacknowledged_locked_out === "number" ? view.unacknowledged_locked_out : 0;
   const notMonitored = view.lock_screen === "not_configured";
@@ -1007,6 +1022,7 @@ function requestLock() {
   lockButton.disabled = true;
   setText(feedbackNode, "Lock requested…");
   lockRequestedAt = Date.now();
+  syncPending();
   if (lockConfirmTimer !== null) {
     clearTimeout(lockConfirmTimer);
   }
@@ -1014,6 +1030,7 @@ function requestLock() {
     lockConfirmTimer = null;
     if (lockRequestedAt !== 0) {
       lockRequestedAt = 0;
+      syncPending();
       setText(feedbackNode, "The desktop did not confirm the lock (LockedHint unchanged)");
       if (latest !== null) {
         render(latest, true);
@@ -1032,6 +1049,7 @@ function requestLock() {
         return;
       }
       lockRequestedAt = 0;
+      syncPending();
       if (lockConfirmTimer !== null) {
         clearTimeout(lockConfirmTimer);
         lockConfirmTimer = null;
@@ -1052,6 +1070,7 @@ function requestLock() {
     })
     .catch(function () {
       lockRequestedAt = 0;
+      syncPending();
       if (lockConfirmTimer !== null) {
         clearTimeout(lockConfirmTimer);
         lockConfirmTimer = null;
@@ -1065,6 +1084,7 @@ function requestLock() {
 
 function unlockFailed(status, result) {
   unlockRequestedAt = 0;
+  syncPending();
   if (unlockConfirmTimer !== null) {
     clearTimeout(unlockConfirmTimer);
     unlockConfirmTimer = null;
@@ -1106,6 +1126,7 @@ function requestUnlock() {
       return getAssertion(options.body, true).then(function (credential) {
         setText(feedbackNode, "Unlock requested…");
         unlockRequestedAt = Date.now();
+        syncPending();
         if (unlockConfirmTimer !== null) {
           clearTimeout(unlockConfirmTimer);
         }
@@ -1113,6 +1134,7 @@ function requestUnlock() {
           unlockConfirmTimer = null;
           if (unlockRequestedAt !== 0) {
             unlockRequestedAt = 0;
+            syncPending();
             setText(feedbackNode, "The desktop did not confirm the unlock (LockedHint unchanged)");
             if (latest !== null) {
               render(latest, true);
@@ -1388,7 +1410,10 @@ function renderPush(view) {
     pushSection.hidden = true;
     return;
   }
+  const firstShow = pushSection.hidden;
   pushSection.hidden = false;
+  // Motion hook (W6): the device list staggers on its first render after the card appears.
+  pushDevices.classList.toggle("stagger-once", firstShow);
   while (pushDevices.firstChild) {
     pushDevices.removeChild(pushDevices.firstChild);
   }
@@ -1714,7 +1739,9 @@ function buildCameraCard() {
     }
   });
   orientationButton.addEventListener("click", toggleCameraOrientation);
-  closeButton.addEventListener("click", exitCameraFullscreen);
+  closeButton.addEventListener("click", function () {
+    exitCameraFullscreen(true);
+  });
   stopButton.addEventListener("click", function () {
     stopCameraView("Camera view stopped");
   });
@@ -1752,17 +1779,55 @@ function fullscreenElement() {
   return document.fullscreenElement || document.webkitFullscreenElement || null;
 }
 
+// Presentation only. The caller writes `cameraFull` first; `apply` reads the CURRENT flag
+// (never a captured argument), so a quick exit and re-entry cannot leave a stale overlay.
+function withViewTransition(apply) {
+  const reduce = typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce || typeof document.startViewTransition !== "function") {
+    apply();
+    return;
+  }
+  try {
+    const transition = document.startViewTransition(apply);
+    // A skipped transition rejects these promises: never leave them unhandled.
+    [transition.ready, transition.updateCallbackDone, transition.finished].forEach(function (p) {
+      if (p && typeof p.catch === "function") {
+        p.catch(function () {});
+      }
+    });
+  } catch (_) {
+    apply();
+  }
+}
+
+// The full-screen classes of the current `cameraFull` flag (the View Transition callback).
+function applyCameraFull() {
+  const c = buildCameraCard();
+  c.stage.classList.toggle("camera-full", cameraFull);
+  document.documentElement.classList.toggle("camera-lock", cameraFull);
+  c.closeButton.hidden = !cameraFull;
+}
+
+function elementFullscreenAvailable(stage) {
+  return typeof (stage.requestFullscreen || stage.webkitRequestFullscreen) === "function";
+}
+
 // Full screen for the open view: the stage becomes a fixed overlay (iPhone Safari has no
-// element fullscreen) and, where available, the element fullscreen of the browser.
+// element fullscreen) and, where available, the element fullscreen of the browser. The
+// overlay-only path grows in a View Transition (Docs/UI_MOTION.md W8); with element
+// fullscreen the browser animates, and the request stays inside the tap's activation.
 function enterCameraFullscreen() {
   const c = buildCameraCard();
   if (cameraController === null || cameraFull) {
     return;
   }
   cameraFull = true;
-  c.stage.classList.add("camera-full");
-  document.documentElement.classList.add("camera-lock");
-  c.closeButton.hidden = false;
+  if (!elementFullscreenAvailable(c.stage)) {
+    withViewTransition(applyCameraFull);
+    return;
+  }
+  applyCameraFull();
   const request = c.stage.requestFullscreen || c.stage.webkitRequestFullscreen;
   if (typeof request === "function") {
     try {
@@ -1778,12 +1843,16 @@ function enterCameraFullscreen() {
   }
 }
 
-function exitCameraFullscreen() {
+// `animate` is true only for a tap or Escape on the CSS overlay; an exit caused by the view
+// ending (endCameraView: stop, error, stall) or by the browser applies the classes directly.
+function exitCameraFullscreen(animate) {
   const c = buildCameraCard();
   cameraFull = false;
-  c.stage.classList.remove("camera-full");
-  document.documentElement.classList.remove("camera-lock");
-  c.closeButton.hidden = true;
+  if (animate === true && !elementFullscreenAvailable(c.stage)) {
+    withViewTransition(applyCameraFull);
+    return;
+  }
+  applyCameraFull();
   if (fullscreenElement() === c.stage) {
     const exit = document.exitFullscreen || document.webkitExitFullscreen;
     if (typeof exit === "function") {
@@ -1803,7 +1872,7 @@ function exitCameraFullscreen() {
 
 function toggleCameraFullscreen() {
   if (cameraFull) {
-    exitCameraFullscreen();
+    exitCameraFullscreen(true);
   } else {
     enterCameraFullscreen();
   }
@@ -2541,7 +2610,7 @@ document.addEventListener("webkitfullscreenchange", cameraFullscreenChanged);
 document.addEventListener("keydown", tourKeydown);
 document.addEventListener("keydown", function (event) {
   if (event.key === "Escape" && cameraFull) {
-    exitCameraFullscreen();
+    exitCameraFullscreen(true);
   }
 });
 buildTourCard();
