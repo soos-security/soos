@@ -1,150 +1,127 @@
 # Candid Review Report
 
-- **Date**: 2026-10-18
-- **Target Branch**: `fix/setup-read-paths`
-- **Base (merge-base)**: `4e0c02a`
-- **Reviewed-Diff-Fingerprint**: `5067a0853030615150e9ab8f5352a5a8755e00e8dd0defd0ec9179623081767c`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/244_setup_read_paths.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `scripts/setup.sh`, `tests/invariants/src/setup_user_phase_contract.rs`
+- **Date**: 2026-10-20
+- **Target Branch**: `test/setup-scanners`
+- **Base (merge-base)**: `6c4ecd4` (equal to `origin/main` after `git fetch origin`; no rebase needed)
+- **Reviewed-Diff-Fingerprint**: `1db57be7ab1e41fc18ba11b9608784e0fa366d8fc9c918e8bec3e6701f9b0510`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/245_setup_scanners.md`,
+  `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_scanner_contract.rs` (new),
+  `tests/invariants/src/setup_user_phase_contract.rs`
+
+Reviewer note: this is an **independent review** by a separate reviewer agent with no prior
+context of the change. It **replaces the author's in-session self-review** previously recorded
+in this file. Only the frozen patch (`target/candid_diff.patch`) and the code it lands in were
+trusted; the walkthrough and commit message were treated as claims to verify.
 
 ## 1. Executive Summary
 
-The branch (GitHub #455) pins the rescue command of the `setup.sh` summary to the only kill switch
-`pam_soos.so` and soos-daemon read (`/etc/soos/disabled`), replaces the trailing-slash stripping of
-`absolute_dir` with a lexical normalisation (empty and `.` components dropped, `..` refused with
-exit 2) applied to every path option including the internal `--artifact-dir`, and resolves a
-post-build `TARGET_DIR` holding a `..` physically (`cd -P -- … && pwd -P`) so the root half never
-receives a value its own parser refuses. Ten new invariant tests (SRP1–SRP10) are add-only. The
-review found no CRITICAL, MAJOR or MINOR defect; two cosmetic test-comment staleness items are
-recorded as SUGGESTION.
-
-Validation run on the reviewed tree: `bash -n scripts/setup.sh` (OK) and
-`cargo test --locked -p soos-invariants -- --test-threads=3` (842 passed, 0 failed, SRP1–SRP10
-included).
+The change is test-only and additive: a new module `setup_scanner_contract.rs` with a small
+shell lexer (quotes, `$'...'`, `${...}`, `$(...)`, backticks, process substitution, here-strings,
+here-documents, arrays, comments, subshells, continuation lines) and five checks SCN1-SCN5 that
+close the documented SET40 (continuation lines) and SET41 (absolute path / quoted name / variable)
+gaps for `scripts/setup.sh`. The existing contract file receives two comment edits only; no
+assertion anywhere is added to, removed from or changed in pre-existing tests. The new checks
+genuinely run on the real `scripts/setup.sh` and were shown to bite on it by mutation (section 3).
+No production code changes. No CRITICAL or MAJOR finding; three MINOR items and one SUGGESTION
+are recorded as known limits of a static scanner.
 
 ## 2. Test Changes
 
-Mechanical listing from `target/candid_diff.patch`:
+Mechanical listing from the frozen patch:
 
-- Test files touched: `tests/invariants/src/setup_user_phase_contract.rs` only.
-- Removed or changed `assert`/`#[test]`/`proptest!`/`#[should_panic]` lines: **none**. The only
-  removed lines of the whole patch are four lines of the old `absolute_dir` body and the old
-  `Rescue:` line of `scripts/setup.sh` (production code).
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Test files touched: `tests/invariants/src/lib.rs` (module registration, `#[cfg(all(test, unix))]`),
+  `tests/invariants/src/setup_scanner_contract.rs` (new), `tests/invariants/src/setup_user_phase_contract.rs`.
+- Removed/changed assertion lines (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
 - Inline `mod tests` changes: **none**.
-- The test file hunk is a single `@@ -1839,3 +1839,466 @@` addition after the last existing test
-  (`test_set_u24_root_preview_docker_job_wired_into_ci`); every SET*, LKI*, LWF*, PFP*, DCC*
-  assertion is untouched. New helpers carry an `srp_` prefix (no collision).
-
-No contract migration is needed.
+- `setup_user_phase_contract.rs` hunks: (1) banner comment `rows SRP1-SRP6` -> `rows SRP1-SRP10`
+  (verified accurate: SRP1-SRP10 exist in that file and in the matrix); (2) comment above the
+  `PRESENCE_READ_FLAG` rewrite updated to say #454 is merged (accurate: `4e0c02a` on main). Both
+  are comment-only; the surrounding code is byte-identical.
+- `setup_contract.rs` (SET40 / SET41) is not in the patch: byte-identical.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- `absolute_dir` exercised directly with `/`, `//`, `/etc/`, `/etc//`, `//etc/./`, `/./`,
-  `/a/b/.`, `/a/..b/c`, `/a/...`, `/a/*/c`, `/a/ b`, `/a/../b`, `/..`: results `/`, `/`, `/etc`,
-  `/etc`, `/etc`, `/`, `/a/b`, `/a/..b/c`, `/a/...`, `/a/*/c`, `/a/ b`, exit 2, exit 2. Only an
-  exact `..` component is refused; glob characters are never used as patterns (the `case` subject
-  and expansions are quoted); the loop consumes at least one character per iteration. The
-  relative-path and newline validation runs first and is unchanged. `usage_error` inside the
-  command substitution exits the parent through `set -euo pipefail`, the same mechanism as the
-  pre-existing absolute-path refusal (SRP5, SRP9 confirm exit 2 with no change). PASS.
-- Every path option goes through the one
-  `--prefix|--sysconfdir|--localstatedir|--runstatedir|--pam-dir|--artifact-dir` branch of the
-  parser, so `..` is refused for all six, the internal `--artifact-dir` included (SRP9 runs the
-  root half directly). PASS.
-- Post-build resolution: the trigger `"/${TARGET_DIR}/" == */../*` matches only an exact `..`
-  component (same rule as `absolute_dir`). `TARGET_DIR` is always absolute
-  (`resolve_target_dir` prefixes `WORKSPACE_ROOT`, itself from `cd … && pwd`), so `CDPATH` cannot
-  redirect `cd` or print to stdout. The `printf 'x'` sentinel keeps a trailing newline in the name,
-  which the newline check then refuses. A failed `cd`, a non-absolute, newline-bearing or
-  `..`-bearing result, or a missing `release/` prints `[FAIL] build` and exits `EXIT_BUILD` (40)
-  before escalation. `TARGET_DIR` and `ARTIFACT_DIR` are both updated, so the later
-  `install_remote.sh` call and the `--system-phase` argument use the same physical directory. When
-  started as root, `run_system_phase` runs after this block, so it also sees the resolved value.
+- Ran the full suite: `cargo test --locked -p soos-invariants -- --test-threads=3` -> 847 passed,
+  0 failed (SCN1-SCN5 included). `cargo clippy --locked -p soos-invariants --all-targets -- -D warnings`
+  clean; `cargo fmt --all -- --check` clean.
+- **Mutation on the real script** (throwaway detached worktree, removed afterwards):
+  - replaced line 2169 with `run_bounded "${UNIT_START_TIMEOUT_S}" true; systemctl \` + newline +
+    `stop "${UNIT}"` -> SCN4 failed with `line 2170: systemctl stop of the daemon unit is not
+    bounded by UNIT_START_TIMEOUT_S`.
+  - replaced the `tailscale version` substitution with `/usr/bin/tailscale serve status` -> SCN2
+    failed (`line 804`) while **SET41 still passed**, which confirms the gap is real and closed.
+  - added `TS_BIN="tailscale"` -> SCN3 failed (`line 805`).
+  The checks therefore read and evaluate `scripts/setup.sh`, not only synthetic snippets. SCN2
+  also asserts the lexer reaches the `tailscale version` substitution, and SCN4 asserts at least
+  six bounded calls and at least SET40's own line count, so a lexer that silently skipped the
+  script would fail. Verified the six bounded calls exist at lines 1853, 1890, 2105, 2109, 2169,
+  2181 as the walkthrough states.
+- Lexer false-pass analysis (could a real bad form slip through?):
+  - Continuation inside a word (`tail\` + newline + `scale`): joined, caught (SCN1/SCN2/SCN3 cases).
+  - Quoted name / absolute path / backticks / `<(...)` / unquoted here-document body: caught.
+  - Verb after options (`systemctl --no-block start`), `enable --now`, absolute `/usr/bin/systemctl`,
+    a `$verb` variable, a mismatched bound, a bound separated by `;`: all rejected in SCN4 snippets.
+  - An option value taken as the verb (e.g. `-t service start`) yields an "unexpected systemctl"
+    violation: fails closed.
+  - Residual forms that still pass are listed as MINOR findings 1-2; they are obfuscations rather
+    than plausible accidental regressions, and the walkthrough documents most of them honestly.
+- Lexer panic analysis (could it panic on valid bash?): every unbalanced or unknown construct ends
+  in an `assert!`/`panic!` with a line number, i.e. fails loudly, never passes silently. Valid
+  bash that would trip it: an arithmetic left shift `(( x << 2 ))` / `$(( x << 2 ))` (read as a
+  here-document with delimiter `2`), a `<< \EOF` delimiter, and a `case ... in pat) ...` inside a
+  `$(...)` (the `)` closes the substitution). None occur in `setup.sh` today (MINOR finding 3).
+  Every loop advances at least one character or returns; indexing is bounded by `i < len` checks
+  or `get`.
+- Traceability: matrix rows SCN1-SCN5 present with correct test paths; walkthrough snippet counts
+  verified (SCN2 10/9, SCN3 15/8, SCN4 13/7 rejected/accepted); SCN5 asserts SET40/SET41 still exist.
   PASS.
-- Previously working `CARGO_TARGET_DIR` values: unset, absolute without `..`, relative without
-  `..`, with trailing or repeated slashes or `.` components are all passed to the root half
-  unchanged and normalised there to an equivalent lexical path; `install.sh` already resolves
-  `--artifact-dir` with `cd … && pwd -P` (`scripts/install.sh` line 631), so the installed binaries
-  are identical. Values with `..` (relative `../shared-target`, absolute `/x/repo/../t`, and `..`
-  behind a link) still install (SRP7, SRP8, the link case asserting the kernel's directory and the
-  absence of the lexical one). No other script or workflow invokes `setup.sh` with a path option
-  (grep of `scripts`, `tests/docker`, `.github`, `packaging`). PASS.
-- Ownership/permission checks: `check_target_dir_owner` (`find -H` before the build) is unchanged
-  and inspects the lexical `TARGET_DIR`, which the kernel resolves to the same directory the
-  post-build `cd -P` lands on. Nothing is skipped and no check is weakened; handing root a
-  symlink-free physical path removes, rather than adds, a later link traversal. `install.sh`'s
-  own artifact checks are unchanged. PASS.
-- Rescue line: `KILL_SWITCH_READ_FLAG="/etc/soos/disabled"` matches `crates/pam/src/config.rs`
-  `DEFAULT_FLAG_DIR` + `disabled` and `crates/daemon/src/presence/mod.rs`
-  `DEFAULT_KILL_SWITCH_DIR` + `GLOBAL_DISABLE_FLAG` (pinned by SRP1, including the single
-  `flag_dir` assignment and the `PresenceSwitch::new(PathBuf::from(DEFAULT_KILL_SWITCH_DIR))` call
-  in `main.rs`). `KILL_SWITCH` stays for the state report only. Setup never writes either file
-  (SRP2). PASS.
-- Behaviour change: `--prefix` and the other options now refuse `..` where they previously
-  accepted it. This is the documented decision of the ADR (item 3) and the help text says so.
-  Accepted, not a finding.
 
 ### PAM Concurrency & Deadlines
 
-No change under `crates/pam` or in any PAM path; the only Rust change is test code. N/A, PASS.
+No change to `crates/pam` or any runtime code. Not applicable. PASS.
 
 ### Panic Safety & Fail-Closed
 
-No production Rust changed. In `setup.sh`, every new failure path exits non-zero before any system
-change (exit 2 at parse time, exit 40 before escalation); no path turns an error into success.
-`unwrap`/`expect`/`panic!` appear only in the new test helpers. PASS.
+Panics are confined to `#[cfg(test)]` contract code with a scoped `#![allow(...)]` carrying a
+`reason`, consistent with other contract modules. The lexer's panics are the intended fail-loud
+behaviour (asserted by SCN1's five unbalanced inputs under `catch_unwind`). PASS.
 
 ### Test Integrity & Anti-Weakening
 
-- Section 2 listing: add-only. PASS.
-- Can the tests fail against plausible wrong implementations? SRP3 (third spelling) fails if `.`
-  or inner `//` are kept; SRP5 fails if `realpath`/`readlink -f` is used (a link to the read
-  directory would become "applied") or if `..` is accepted; SRP8 (link case) fails against a
-  lexical `..` resolution; SRP7/SRP8 fail against the first fix (root half exit 2); SRP9 fails if
-  the `..` refusal is dropped from `--artifact-dir`; SRP1/SRP2 fail if the rescue line uses
-  `${SYSCONFDIR}`/`${KILL_SWITCH}`. PASS.
-- `srp_point_read_paths_at_fake_root` asserts the presence of the `DAEMON_READ_CONFIG` and
-  `LOCK_WIDGET_READ_FLAG` lines but replaces `PRESENCE_READ_FLAG` without asserting it; the line
-  exists on this base (`scripts/setup.sh` line 553), so the substitution is effective today. See
-  SUGGESTION 2.
+Section 2: zero pre-existing assertions changed; the new tests fail against plausible wrong
+implementations (demonstrated by the mutations above and by each scanner's rejected-snippet
+self-test). PASS.
 
 ### Memory, Bounds & Secrets
 
-No secret, frame or embedding involved. The normalisation loop is bounded by the argument length;
-error messages quote only the user-supplied path (with `%q` in the post-build error). PASS.
+Reads one repository file; no process, network or write. No secrets. PASS.
 
 ### Supply Chain & Automation
 
-`scripts/setup.sh` changed: no new external command (`cd`, `pwd` are builtins), no `eval`, no
-`realpath`/`readlink`, no network access, no new dependency, no workflow change. PASS.
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS.
 
 ### English-Only Policy
 
-All code, comments, docs, matrix rows and the walkthrough are in English. PASS.
-
-### Documentation Consistency
-
-`Docs/PACKAGING_AND_PROVISIONING.md` ("Read paths (GitHub #455)"), `AI/DECISIONS.md`,
-`AI/VERIFICATION_MATRIX.md` (SRP1–SRP10) and walkthrough 244 agree with the code: normalisation
-rule, `..` refusal for every option including `--artifact-dir`, `cd -P`/`pwd -P` post-build
-resolution, exit 40 (`EXIT_BUILD=40`), unchanged ownership preflight, rescue path. #454 is
-described as merged (`4e0c02a`) everywhere; no text describes it as open. The walkthrough claim
-that #454 did not touch `setup_user_phase_contract.rs` is consistent with #454's own message
-(PFP1–PFP4 in `setup_contract.rs`). PASS.
+All code, comments, matrix rows and the walkthrough are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `tests/invariants/src/setup_user_phase_contract.rs:1846` — the section banner
-  still says "rows SRP1-SRP6" while the section now holds SRP1–SRP10. Optional: update the comment
-  in a later change (comment only; no assertion involved).
-- **[SUGGESTION]** `tests/invariants/src/setup_user_phase_contract.rs:1890` — the comment "when this
-  checkout already has it" and the unasserted `PRESENCE_READ_FLAG` replacement are stale now that
-  #454 is on the base; asserting the line is present (as for the two other constants) would make
-  SRP3's coverage of the presence comparison explicit. Optional, add-only hardening.
-
-No CRITICAL, MAJOR or MINOR finding.
+- **[MINOR]** `tests/invariants/src/setup_scanner_contract.rs` (`tailscale_tokens` / `tailscale_commands`)
+  — the token search runs on raw words, so a name split by quotes or a backslash inside a word
+  (`$(tail"scale" serve)`, `$(tailscal\e serve)`) still passes SCN2/SCN3. Optional hardening:
+  also search `unquote(word)` per word. Obfuscation only; not blocking.
+- **[MINOR]** same file, SCN3/SCN4 — a Tailscale command or daemon unit reached through a variable
+  the script never assigns (inherited environment) or a differently named variable holding
+  `soos-daemon` is not detected. Documented in walkthrough 245 section 7; the behavioural harness
+  remains the backstop. Not blocking.
+- **[MINOR]** same file, `Lexer::list` — valid bash such as `(( x << 2 ))`, `<< \EOF` or a `case`
+  inside `$(...)` would make the lexer panic (fail loudly, never pass). Absent from `setup.sh`
+  today; a future edit introducing one would get a clear panic message pointing at the line.
+- **[SUGGESTION]** SCN5 checks SET40/SET41 by function name only; that suffices for "kept" but not
+  for "byte-identical". Acceptable as is.
 
 ## 5. Final Verdict
 

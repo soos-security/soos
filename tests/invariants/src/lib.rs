@@ -432,6 +432,14 @@ mod setup_contract;
 #[cfg(all(test, unix))]
 mod setup_user_phase_contract;
 
+/// Additive static scanners for `scripts/setup.sh`: a quote-, substitution- and
+/// here-document-aware lexer that joins continuation lines, so a daemon `systemctl` call split
+/// with a backslash, a Tailscale command by absolute path or quoted name inside a substitution,
+/// and a Tailscale command held in a variable are caught (GitHub #459, part of #362; follow-up
+/// of the reviews of PR #440 and PR #456; rows SCN1-SCN5; SET40 and SET41 unchanged).
+#[cfg(all(test, unix))]
+mod setup_scanner_contract;
+
 /// Distribution build against the system ONNX Runtime: feature tables, MSRV, resolved feature
 /// graphs, daemon CPU execution provider check order, offline Arch CI job, PAM isolation and
 /// documentation (GitHub #375, PR 1 of #361, ADR 2026-10-13 "Distribution Builds: System ONNX
