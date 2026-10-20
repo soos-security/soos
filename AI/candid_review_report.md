@@ -2,73 +2,132 @@
 
 - **Date**: 2026-10-20
 - **Target Branch**: `chore/readme-capture-locale`
-- **Base (merge-base)**: `6c4ecd4`
+- **Base (merge-base)**: `6c4ecd4` (equal to `origin/main` after `git fetch origin`; no rebase needed)
 - **Reviewed-Diff-Fingerprint**: `27fb23cf40112f2760ac6a2610c33f49495cb304557a91955fe0d3dfd3938c2d`
 - **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/246_readme_capture_locale.md`, `Docs/README_ASSETS.md`, `README.md`, `scripts/capture_readme_web.sh`, `tests/fixtures/tests/readme_capture_locale_tests.rs` (new), `tests/fixtures/tests/readme_fixed_clock_tests.rs`
 
 ## 1. Executive Summary
 
-Documentation and dev-only capture tooling change for GitHub #458 (part of #356): the optional web
-capture script pins the browser time zone and locale, the README Screenshots intro names both capture
-scripts, and a new fixture test strengthens the fixed-clock check. No production crate, PAM, daemon or
-`soos-remote` code changes; no committed PNG or manifest changes.
+This is an **independent review that replaces the author's self-review** previously recorded in this
+file: it was produced by a separate reviewer with no authoring context, working only from the frozen
+patch (`target/candid_diff.patch`) and the code it lands in.
+
+Scope (GitHub #458, part of #356): the optional, dev-only web capture script pins the browser time
+zone and locale through one `BROWSER_ENV` array plus `--lang=en-US --accept-lang=en-US`; the README
+"Screenshots" intro now attributes the `soos-gui` captures and the phone web app captures to their
+respective scripts; a new fixture test file adds RAC22 (script contract) and RAC23 (server-level
+fixed-clock check); one comment is added in `readme_fixed_clock_tests.rs`. No production crate, PAM,
+daemon or `soos-remote` code changes; `Docs/assets/` (PNGs and `MANIFEST.toml`) is byte-identical to
+`origin/main`.
 
 ## 2. Test Changes
 
-- `tests/fixtures/tests/readme_capture_locale_tests.rs`: new file, two new tests (RAC22, RAC23).
-- `tests/fixtures/tests/readme_fixed_clock_tests.rs`: three comment lines added above the existing loop;
-  no assertion, `#[test]` or code line removed or changed (mechanical grep of removed assert/test lines: empty).
-- No `#[ignore]`, `should_panic`, tolerance or inline test module added or removed.
+Mechanical listing from the frozen patch:
+
+- Test files touched: `tests/fixtures/tests/readme_capture_locale_tests.rs` (new, 2 tests),
+  `tests/fixtures/tests/readme_fixed_clock_tests.rs` (3 comment lines added).
+- Removed/changed `assert`/`#[test]`/`proptest!`/`should_panic` lines: **none** (grep empty).
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
+- Inline `mod tests` changes: **none**.
+
+The only edit to an existing test file is a comment above the existing equality loop of
+`test_rac_fixed_capture_clock_is_pinned`; that loop and all its assertions are untouched. The
+comment accurately states the loop is weak (`route` is pure, so it compares a body with itself) and
+points to RAC23. No contract migration is needed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Both browser runs use `env "${BROWSER_ENV[@]}"`: checked that no run kept a bare `TZ=UTC` prefix, so the
-  tour-seen run and the screenshot run share the same locale (a mismatch would only matter for
-  `localStorage`, which is locale-independent). PASS.
-- `--lang=en-US` is in the shared `flags=(…)` array, so the dark/light `flags+=` additions keep it. PASS.
-- Effect verified empirically, not assumed: unpinned script under `LANG/LC_ALL=de_DE.UTF-8` changed all four
-  PNGs (24 h clock); pinned script under the same locale plus `TZ=Asia/Tokyo` and under the host default
-  gave byte-identical PNGs, so no regeneration or manifest refresh is needed. PASS.
-- `scripts/capture_readme_web.sh` still contains `http://127.0.0.1:$port/readme/capture`, `--clock fixed`,
-  `--user-data-dir`, `mktemp -d` and none of the RAC16 forbidden words (`env` is not forbidden). PASS.
-- README claim checked against the fixture: the web bodies carry `"account":"owner"`, so a first draft
-  saying "no user name at all" was inaccurate and was reworded to "no login, host name or address" (the
-  RAC9 wording). PASS after fix.
+
+- Script: `BROWSER_ENV=(TZ=UTC LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US)` is a plain bash
+  array; `env "${BROWSER_ENV[@]}" "$browser" "${flags[@]}" …` passes each assignment as a separate,
+  correctly quoted word, and `env` execs the browser with those variables set. Works under the
+  script's `set -euo pipefail` (array non-empty). `bash -n` passes. Both browser runs (tour-seen,
+  then screenshot) use it; the old bare `TZ=UTC` prefixes are gone, and `TZ=UTC` is preserved inside
+  the array. → PASS.
+- Flags: `--accept-lang` is a valid Chrome (headless) switch and sets `Accept-Language` /
+  `navigator.languages`. `--lang` is a valid Chrome switch, but on Linux Chrome derives the default
+  ICU locale mainly from `LANGUAGE`/`LC_ALL`/`LANG`, so the environment pin is what actually decides
+  `toLocaleTimeString([], …)` output there; `--lang` is redundant but harmless (see SUGGESTION). The
+  author's reported evidence (German locale + `TZ=Asia/Tokyo` host gives byte-identical PNGs with the
+  pin, a 24 h clock without it) is consistent with this. → PASS.
+- README claims checked against the fixture data in `tests/fixtures/mod.rs`: the web fixture's only
+  person-like field is `"account":"owner"` in the locked-scene alert history, which is an account
+  *class* rendered by `app.js` (`ALERT_ACCOUNTS.owner` = "your account"), not a login or user name;
+  `DEMO_HOST` is documented as never served. So "canned, identity-free data with no login, host name
+  or address" is true, and the old intro's claim that *all* screenshots use the user `alice` is
+  correctly narrowed to the `soos-gui` captures. "with a pinned `en-US` locale" matches the script.
+  → PASS.
+- `Docs/README_ASSETS.md` §4 text matches the script exactly (variables, values, flags). → PASS.
 
 ### PAM Concurrency & Deadlines
-- Not touched. PASS.
+
+Not applicable: no file under `crates/pam` or any runtime crate changes. → PASS (N/A).
 
 ### Panic Safety & Fail-Closed
-- No production code. Test code uses `unwrap`/`expect` under the same `#![allow]` as sibling suites;
-  slices use `.get(..)` (clippy `indexing_slicing` clean). PASS.
+
+No production code changes; `unwrap`/`expect`/`panic!` appear only in the new integration test file
+under an explicit `#![allow(..., reason = ...)]`, consistent with the other fixture tests. → PASS.
 
 ### Test Integrity & Anti-Weakening
-- RAC22 fails on the `origin/main` script (no `BROWSER_ENV` definition) and passes after the change.
-  A plausible wrong implementation (pin only on the screenshot run, or `--lang` only in the dark branch)
-  fails the "every browser run" and "flags block" checks.
-- RAC23 would fail if the fixed-clock server used the real clock (bodies differ from `route` at the fixed
-  instant and between requests 1.1 s apart), and its instant-dependence check prevents the vacuous
-  self-comparison of the old loop. It passes on the current fixture by design (coverage, stated in the
-  walkthrough). The unlocked-scene alerts body is constant and is asserted as such instead of skipped.
-- Server lifetime 4 s versus about 1.2 s of requests; listeners bound before the threads start: no race. PASS.
+
+- RAC22 mutation checks run by the reviewer (script temporarily swapped, then restored; working tree
+  verified clean afterwards):
+  - `origin/main` script (no `BROWSER_ENV`): test FAILS (line 111, definition count).
+  - `--accept-lang=en-US` removed from the flags: test FAILS (line 155).
+  - one browser run with the `env "${BROWSER_ENV[@]}"` prefix stripped: test FAILS (line 119).
+  The test also forbids a second `--lang=` (`--accept-lang=` does not match `--lang=`), any line
+  starting with `TZ=`, and requires exactly two browser runs (tour-seen and screenshot). Comment-line
+  and `\`-continuation handling is correct, so commented-out code cannot satisfy it.
+- RAC23 is non-vacuous: it first proves the bodies depend on the instant (`route` at +61 s differs for
+  status, offline, locked alerts and the event prelude; the unlocked alerts body has no timestamp and
+  is asserted equal), then checks over real HTTP that two `--clock fixed` servers answer exactly the
+  fixed-instant `route` bodies with `200 OK`, `Content-Type: application/json` and matching
+  `Content-Length` (format confirmed against `write_response`), byte-identical after a >1 s sleep, and
+  that the scenes differ. A server accidentally using `FixtureClock::Real` would fail the equality with
+  the fixed-instant body. The author honestly labels RAC23 as coverage, not a red-phase contract.
+- Server lifetime (4 s) exceeds the request window (~1.1 s plus requests); `serve_with_clock` returns
+  `Ok(())` at its deadline, so the joins terminate. The temporary asset directory is per-PID and
+  removed. → PASS.
 
 ### Memory, Bounds & Secrets
-- Loopback-only listeners, bounded read timeout (3 s), temp directory per process id, removed at the end.
-  No identity or secret in any new text. PASS.
+
+No secrets, frames or embeddings involved; fixture data is synthetic. The test binds loopback only.
+→ PASS.
 
 ### Supply Chain & Automation
-- No `Cargo.*`, workflow or hook change; the script installs and downloads nothing. PASS.
+
+- No `Cargo.*`, `deny.toml`, `.github/` or `.githooks/` change; no new dependency.
+- RAC15 (capture tooling dev-only, no CI enables it): a search of `.github/` for `capture_readme`,
+  `chrome` and `chromium` is empty, and
+  `soos-invariants::readme_assets_contract::test_rac_capture_tooling_is_dev_only` passes. The script
+  still installs and downloads nothing. → PASS.
+- `Docs/assets/` (web and `gui-*` PNGs, `MANIFEST.toml`): `git diff origin/main -- Docs/assets` is
+  empty, and the invariants suite (manifest checks included) passes. → PASS.
 
 ### English-Only Policy
-- All added text is English. PASS.
+
+All added code, comments, docs, matrix rows and the walkthrough are in English. → PASS.
+
+### Verification Run by the Reviewer
+
+- `bash -n scripts/capture_readme_web.sh`: OK.
+- `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/readme-capture-locale CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3 cargo test --locked -p soos-test-fixtures -p soos-invariants -- --test-threads=3`:
+  all green (invariants 842 passed; `readme_capture_locale_tests` 2 passed; `readme_fixed_clock_tests`,
+  `readme_tour_seen_tests`, `readme_fixture_tests`, `fixture_generators_tests` and the fixtures unit
+  tests all passed; 0 failed, 0 ignored).
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR, fixed]** `README.md:69` — "no user name at all" contradicted the fixture's `"account":"owner"`;
-  reworded (commit `2e908e4`).
+- **[SUGGESTION]** `scripts/capture_readme_web.sh:94` — on Linux, Chrome's `--lang` has little or no
+  effect on the default ICU locale (the environment decides); the environment pin is the effective
+  control. Keeping `--lang` is harmless; a future comment could say the environment is the
+  authoritative pin on Linux.
+- **[SUGGESTION]** `Docs/README_ASSETS.md:104` — the edited paragraph leaves one line well over the
+  surrounding wrap width ("…byte-identical PNGs (checked on the capture host with the same");
+  cosmetic reflow only.
 
-No open CRITICAL or MAJOR finding.
+No CRITICAL, MAJOR or MINOR findings.
 
 ## 5. Final Verdict
 
