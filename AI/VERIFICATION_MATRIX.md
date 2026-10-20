@@ -2940,6 +2940,16 @@ Companion off-switch and opt-in wording aligned with the setup defaults (#400 an
 | SRP9 | The root half started directly refuses an `--artifact-dir` with a `..` component with exit 2, before any change | `soos-invariants::setup_user_phase_contract::test_srp9_system_phase_refuses_a_dot_dot_artifact_dir` | ✅ Verified |
 | SRP10 | `Docs/PACKAGING_AND_PROVISIONING.md` documents the resolution of a `CARGO_TARGET_DIR` with `..` (`pwd -P`) and the `--artifact-dir` refusal; matrix rows SRP7–SRP10 and walkthrough 244 record it | `soos-invariants::setup_user_phase_contract::test_srp10_artifact_dir_resolution_documented` | ✅ Verified |
 
+## Component: `setup-scanners` (GitHub #459, part of #362, follow-up of the reviews of PR #440 / #456, no backlog id, `test/setup-scanners`, walkthrough 245)
+
+| ID | Acceptance criterion | Evidence | Status |
+|---|---|---|---|
+| SCN1 | A quote-, substitution- and here-document-aware shell lexer joins backslash continuations into one simple command (also inside a word), keeps a quoted message as one word, lists the commands of `$(...)`, backticks, `<(...)` and unquoted here-documents as substitution commands and never those of a quoted here-document or a comment, and fails loudly on an unbalanced script | `soos-invariants::setup_scanner_contract::test_scn1_lexer_joins_continuations_and_follows_contexts` | ✅ Verified |
+| SCN2 | No Tailscale command other than `tailscale version` inside a command or process substitution by absolute path (`$(/usr/bin/tailscale serve)`), quoted name (`$("tailscale" serve)`) or across a continuation line (gaps of SET41); rejected and accepted synthetic snippets checked first; `setup.sh` passes and its read-only `tailscale version` substitution is seen | `soos-invariants::setup_scanner_contract::test_scn2_no_tailscale_in_substitution_by_path_or_quoted_name` | ✅ Verified |
+| SCN3 | No Tailscale command held in a variable: assignment (`NAME=`, `NAME+=`, `NAME[i]=`, arrays, `local`/`readonly`/`export`/`declare`, `alias`), parameter fallback (`${NAME:-tailscale}`), `printf -v`, `read`/`mapfile` (gap of SET3 and SET41); `tailscale version`, `tailscale_version`, `${x#tailscale }` and printed messages accepted; `setup.sh` passes | `soos-invariants::setup_scanner_contract::test_scn3_no_tailscale_command_held_in_a_variable` | ✅ Verified |
+| SCN4 | With continuation lines joined (gap of SET40), every start/stop/restart (`enable`/`disable --now` included) of the daemon unit by bare or absolute `systemctl`, in a substitution too, is immediately preceded by `run_bounded "${UNIT_START_TIMEOUT_S}"`; read-only queries are bounded by `QUERY_TIMEOUT_S`; a verb in `$1` is only the `unit_query` helper, fed read-only verbs; `UNIT_START_TIMEOUT_S` never bounds `systemctl --user`; `UNIT` is assigned once, to `soos-daemon.service`; the lexer counts at least every call SET40 counts line by line (6 or more) | `soos-invariants::setup_scanner_contract::test_scn4_daemon_unit_bound_survives_continuation_lines` | ✅ Verified |
+| SCN5 | Traceability: matrix rows SCN1-SCN5 and walkthrough 245 present; SET40 and SET41 kept unchanged in `setup_contract.rs` | `soos-invariants::setup_scanner_contract::test_scn5_traceability` | ✅ Verified |
+
 ---
 
 ## Component: `release-dry-run` (GitHub #444, part of #361, no backlog id, `chore/release-dry-run`, walkthrough 239)

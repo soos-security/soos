@@ -1843,7 +1843,7 @@ fn test_set_u24_root_preview_docker_job_wired_into_ci() {
 // ---------------------------------------------------------------------------
 // Read paths: the rescue kill switch and the normalised `--sysconfdir` (GitHub #455, part of
 // #362; follow-up of #402, #452 and #454; ADR 2026-10-18 "Setup Read Paths: the Rescue Kill
-// Switch and One Lexical Normalisation of the Path Options"; rows SRP1-SRP6)
+// Switch and One Lexical Normalisation of the Path Options"; rows SRP1-SRP10)
 // ---------------------------------------------------------------------------
 
 /// The one global kill switch `pam_soos.so` and soos-daemon read.
@@ -1887,7 +1887,7 @@ fn srp_point_read_paths_at_fake_root(h: &Harness) -> String {
         assert!(script.contains(&original), "{name} line present");
         script = script.replace(&original, &format!("readonly {name}=\"{etc}/soos/{rel}\""));
     }
-    // The presence read path of GitHub #453 (PR #454), when this checkout already has it.
+    // The presence read path of GitHub #453 (PR #454, merged before this section).
     let presence = "readonly PRESENCE_READ_FLAG=\"/etc/soos/presence.disable\"";
     script = script.replace(
         presence,
