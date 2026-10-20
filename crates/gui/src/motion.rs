@@ -654,6 +654,64 @@ pub fn fade_in_on_change(ctx: &egui::Context, id: Id, key: u64, duration: f32) -
     cubic_bezier(theme::EASE_ENTER, elapsed / duration)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StableFadeSlot {
+    key: u64,
+    elapsed: f32,
+    duration: f32,
+    /// Time the current key has been on screen, capped at the stable hold.
+    held: f32,
+    pass: u64,
+}
+
+/// Like [`fade_in_on_change`], for content that may flicker at camera rate (a stat tile whose
+/// caption follows face detection, `Docs/UI_MOTION.md` G4): a change fades in only when the
+/// previous key had been on screen for at least twice `duration`. A change during a running fade
+/// keeps that fade running (never restarts it) and a change sooner after a fade is drawn at once,
+/// so a flickering value never falls back to faint: it is fully opaque at most `duration` after
+/// the first change and then requests no repaint. First sight and reduced motion are opaque.
+pub fn fade_in_on_stable_change(ctx: &egui::Context, id: Id, key: u64, duration: f32) -> f32 {
+    let reduced = prefs(ctx).reduced;
+    let (pass, dt) = frame_clock(ctx);
+    let duration = if duration.is_finite() && duration > 0.0 {
+        duration
+    } else {
+        0.0
+    };
+    let hold = 2.0 * duration;
+    let (elapsed, duration) = ctx.data_mut(|d| {
+        let slot = d.get_temp_mut_or_insert_with(id, || StableFadeSlot {
+            key,
+            elapsed: duration,
+            duration,
+            held: hold,
+            pass,
+        });
+        if slot.pass != pass {
+            slot.elapsed = (slot.elapsed + dt).min(slot.duration);
+            slot.held = (slot.held + dt).min(hold);
+        }
+        if slot.key != key {
+            if slot.held >= hold {
+                slot.elapsed = 0.0;
+                slot.duration = duration;
+            }
+            slot.key = key;
+            slot.held = 0.0;
+        }
+        if reduced {
+            slot.elapsed = slot.duration;
+        }
+        slot.pass = pass;
+        (slot.elapsed, slot.duration)
+    });
+    if duration <= 0.0 || elapsed >= duration {
+        return 1.0;
+    }
+    ctx.request_repaint();
+    cubic_bezier(theme::EASE_ENTER, elapsed / duration)
+}
+
 /// Rotation of the pending star, in radians: 0 with reduced motion (a static star, no
 /// repaint), otherwise [`pending_star_angle`] of the input time and one repaint request after
 /// `AMBIENT_REPAINT_MS` (never an immediate repaint).

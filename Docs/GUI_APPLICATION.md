@@ -380,7 +380,7 @@ widgets, thin floating scroll bars).
 | `brand` | SVG path data of the "SOOS" wordmark and the star mark, a small anti-aliased rasterizer (each mark is rasterized once into a texture, re-rasterized only when its size or color changes), `paint_wordmark`, `paint_star` and `window_icon` (the four-quadrant logo used as the window icon) |
 | `widgets` | Cards (`card_in_rect`, `card_in_rect_with_footer`), card and section titles, inner tables, stat and star tiles, `column_stack` / `column_stack_card_first`, banners with vector icons, `BrandButton` (primary, secondary, danger, danger outline), `progress_bar`, overlay chips, the enrollment checklist (`step_list`) and the toggle switch |
 | `header` | Header band and tabs ("Live Model Diagnostic", "Guided Enrollment", "Biometric Profiles", with painted icons; inactive tabs collapse to their icon on narrow windows), the sliding active-tab shape (`tab_pill`) and the daemon panel |
-| `motion` | Motion helpers (§5.5): closed-form `SpringState`, `cubic_bezier`, `Tween`, entrances and stagger, the pending-star angle, `MotionPrefs` / `resolve_motion_prefs`, the egui glue (`spring_value`, `tween_value`, `entrance`, `fade_in_on_change`, `pending_star_rotation`) and `MotionControl`; `motion::portal` reads the desktop reduced-motion preference once |
+| `motion` | Motion helpers (§5.5): closed-form `SpringState`, `cubic_bezier`, `Tween`, entrances and stagger, the pending-star angle, `MotionPrefs` / `resolve_motion_prefs`, the egui glue (`spring_value`, `tween_value`, `entrance`, `fade_in_on_change`, `fade_in_on_stable_change`, `pending_star_rotation`) and `MotionControl`; `motion::portal` reads the desktop reduced-motion preference once |
 | `overlay` | Face overlay of the live video (boxes, PAD crop area, landmarks), drawn from the painted frame only |
 
 Symbols missing from the default fonts (check, cross, warning, info) are painted as shapes.
@@ -452,10 +452,10 @@ clamped to 0.05 s).
 |---|---|
 | Daemon switch | the thumb moves on the spring (overshoot at most 4 %, retargetable), the track colour cross-fades over `T_SHORT`; while a privileged action is pending the star mark (blue on the pale panel) turns a quarter turn per 1.2 s in place of the old spinner and "Waiting for authorization..." stays visible |
 | Tabs | the pale active-tab shape slides to the newly active tab (`T_MEDIUM`, standard easing) and follows its tab at once on a window resize; icon and label colours cross-fade over `T_FAST` |
-| Right column | on a tab change the card, the stat tile and the star tile fade in and rise 6 pt, 30 ms apart; a stat tile fades its value in when what it shows changes (caption, or em dash / value), never on live numeric updates |
+| Right column | on a tab change the card, the stat tile and the star tile fade in and rise 6 pt, 30 ms apart; a stat tile fades its value in when what it shows changes (caption, or em dash / value) after being stable for 2 × `T_SHORT`, never on live numeric updates; a caption flickering with face detection never restarts the fade, so the value is fully opaque at most `T_SHORT` after the first change |
 | Banners | a banner that appears fades in and slides 8 pt (`T_SHORT`); a kind change cross-fades its colours; the daemon result leaves over `T_SHORT_EXIT` when it is cleared; nothing auto-dismisses |
 | Progress bar | the fill eases over `T_MEDIUM` |
-| Camera status card | the new state is drawn at once and fades in over `T_SHORT` (title colour cross-fading from the previous severity); Info states show the pending star |
+| Camera status card | the new state is drawn at once; an Info state fades in over `T_SHORT` (title colour cross-fading from the previous severity), a Warning or Error is at full opacity in its own colour on the frame it arrives; Info states show the pending star |
 | Star tiles | the star turns 45° on the spring while the daemon is confirmed paused (`DaemonState::Inactive`) |
 | Face overlay | never animated: boxes, landmarks and live/spoof colours come from the frame being painted |
 | Windows and popups | egui's built-in fade with `Style::animation_time` = `T_SHORT` |

@@ -144,9 +144,10 @@ pub fn camera_status_banner(status: &CameraStatus) -> StatusBanner {
 
 /// Draws `banner` as a centered brand status card (pending star for in-progress states).
 ///
-/// Truth first (`Docs/UI_MOTION.md` G7): a new state's text is drawn on the frame it arrives
-/// and fades in over `T_SHORT`, its title colour cross-fading from the previous severity's
-/// colour; the previous text is never kept on screen. Reduced motion draws it at rest.
+/// Truth first (`Docs/UI_MOTION.md` G7): a new state's text is drawn on the frame it arrives;
+/// an Info state fades in over `T_SHORT`, its title colour cross-fading from the previous
+/// severity's colour, while a Warning or Error is drawn at full opacity in its own colour at
+/// once. The previous text is never kept on screen. Reduced motion draws every state at rest.
 pub fn render_status_banner(ui: &mut egui::Ui, banner: &StatusBanner) {
     let color = severity_color(banner.severity);
     let ctx = ui.ctx().clone();
@@ -166,6 +167,13 @@ pub fn render_status_banner(ui: &mut egui::Ui, banner: &StatusBanner) {
         s.previous
     });
     let fade = motion::fade_in_on_change(&ctx, id.with("text"), key, theme::T_SHORT);
+    // A problem is never faded in: Warning and Error are drawn at full opacity, in their own
+    // colour, on the frame they arrive (security truth first, `Docs/UI_MOTION.md` G7).
+    let fade = if banner.severity == BannerSeverity::Info {
+        fade
+    } else {
+        1.0
+    };
     let title_color = motion::mix_color(severity_color(previous), color, fade);
     widgets::status_card(ui, |ui| {
         motion::with_opacity(ui, fade, |ui| {

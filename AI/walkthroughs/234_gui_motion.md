@@ -4,7 +4,7 @@
 - **Issue**: GitHub #438 = PR 3 of epic #358 (GitHub-only, no backlog id) — **Branch**: `feat/gui-motion`
 - **Decision**: ADR 2026-10-13 "Motion System for soos-gui and soos-remote" items (2), (3), (5), (6), (8); no new ADR
   (item (6) already records the zbus widening and the PAU17 migration)
-- **Matrix criteria**: GMO1–GMO19 (new, ✅), GMO20 (owner desktop check, ⬜), UIM9 (→ ✅); UIM7 (owner approval of the
+- **Matrix criteria**: GMO1–GMO19 and GMO21–GMO22 (new, ✅), GMO20 (owner desktop check, ⬜), UIM9 (→ ✅); UIM7 (owner approval of the
   prototype) and UIM11 (owner GNOME Wayland / X11 check) stay pending
 - **Merge gate**: not merged before the owner approves `Docs/prototypes/ui_motion_prototype.html` (UIM7, owner decision 3
   of 2026-10-13 on #358)
@@ -103,3 +103,26 @@ the zbus path is exercised in CI only through its static contract (GMO15–GMO18
 `Docs/GUI_APPLICATION.md` §1, §5.2, §5.3, §5.5; `Docs/UI_MOTION.md` intro, G4, G7;
 `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` "Audited D-Bus client" (the read-only `soos-gui` portal exception, still
 naming `soos-remote`); `AI/VERIFICATION_MATRIX.md` (component `gui-motion`, UIM9, PAU17 annotation).
+
+## 8. Review Follow-Up (two MINOR findings of PR #449)
+
+Both findings were fixed test first: `crates/gui/tests/motion_flicker_tests.rs` (GMO21, GMO22) failed before the
+production change (missing helper, then an Error banner painted nothing on its arrival frame) and passes after it.
+No existing test was modified.
+
+1. **A flickering stat tile stayed faint** (`widgets::stat_tile`). The value fade keyed on the caption restarted from 0
+   on every flip, so with face detection flickering between "Match score" and "Liveness (PAD)" at camera rate the value
+   never reached full opacity. The tile now uses `motion::fade_in_on_stable_change`: a change fades in only when the
+   previous content had been on screen for 2 × `T_SHORT`; a change during a running fade keeps that fade running and a
+   change sooner after a fade is drawn at once. A flicker therefore never lowers the opacity, the value is fully opaque
+   at most `T_SHORT` after the first change, and no repaint is requested afterwards (§9 idle budget). The helper keeps
+   `motion.rs` free of allocation and panic paths (GMO10). `fade_in_on_change` is unchanged (GMO12 pins it) and still
+   drives the camera status card.
+2. **A camera error faded in over 180 ms** (`camera_status::render_status_banner`). Every new state, Error included,
+   started at opacity 0 (egui paints nothing at opacity 0, so the error text was absent on its arrival frame). A Warning
+   or Error is now drawn at full opacity, title in its own colour (`WARN_TEXT`, `DANGER`, no cross-fade), on the frame
+   it arrives (§1 principle 6, security truth first); Info states keep the G7 fade.
+
+Documentation: `Docs/UI_MOTION.md` G4 and G7, `Docs/GUI_APPLICATION.md` (module table, §5.5 motion table), matrix rows
+GMO21–GMO22 and UIM9. Validation: `cargo test --locked -p soos-gui -p soos-invariants --all-features --
+--test-threads=3`, clippy `-D warnings` on both crates with all targets, `cargo fmt --check`.

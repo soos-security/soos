@@ -303,9 +303,10 @@ pub fn stat_tile(
     }
 
     // What the tile shows changed (caption, or em dash <-> value): the value fades in. Live
-    // numeric updates under the same caption are drawn at once (never counted up or faded).
+    // numeric updates under the same caption are drawn at once (never counted up or faded), and
+    // a caption flickering with face detection never restarts the fade (G4: stable changes only).
     let key = egui::Id::new((caption, value.is_some(), sub.is_some())).value();
-    let fade = motion::fade_in_on_change(
+    let fade = motion::fade_in_on_stable_change(
         ui.ctx(),
         ui.id().with("soos_stat_tile_value"),
         key,
