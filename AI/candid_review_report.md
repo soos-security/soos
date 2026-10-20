@@ -1,127 +1,143 @@
 # Candid Review Report
 
 - **Date**: 2026-10-20
-- **Target Branch**: `test/setup-scanners`
-- **Base (merge-base)**: `6c4ecd4` (equal to `origin/main` after `git fetch origin`; no rebase needed)
-- **Reviewed-Diff-Fingerprint**: `1db57be7ab1e41fc18ba11b9608784e0fa366d8fc9c918e8bec3e6701f9b0510`
-- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/245_setup_scanners.md`,
-  `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_scanner_contract.rs` (new),
-  `tests/invariants/src/setup_user_phase_contract.rs`
-
-Reviewer note: this is an **independent review** by a separate reviewer agent with no prior
-context of the change. It **replaces the author's in-session self-review** previously recorded
-in this file. Only the frozen patch (`target/candid_diff.patch`) and the code it lands in were
-trusted; the walkthrough and commit message were treated as claims to verify.
+- **Target Branch**: `chore/readme-capture-locale`
+- **Base (merge-base)**: `7ab2eae` (`origin/main` after #460; the branch was rebased from `6c4ecd4` onto it)
+- **Reviewed-Diff-Fingerprint**: `a5c8ba98018d5f569373354310e9826d37e184aa0bc8f86cb0611e5b71324dee`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/246_readme_capture_locale.md`, `Docs/README_ASSETS.md`, `README.md`, `scripts/capture_readme_web.sh`, `tests/fixtures/tests/readme_capture_locale_tests.rs` (new), `tests/fixtures/tests/readme_fixed_clock_tests.rs`
 
 ## 1. Executive Summary
 
-The change is test-only and additive: a new module `setup_scanner_contract.rs` with a small
-shell lexer (quotes, `$'...'`, `${...}`, `$(...)`, backticks, process substitution, here-strings,
-here-documents, arrays, comments, subshells, continuation lines) and five checks SCN1-SCN5 that
-close the documented SET40 (continuation lines) and SET41 (absolute path / quoted name / variable)
-gaps for `scripts/setup.sh`. The existing contract file receives two comment edits only; no
-assertion anywhere is added to, removed from or changed in pre-existing tests. The new checks
-genuinely run on the real `scripts/setup.sh` and were shown to bite on it by mutation (section 3).
-No production code changes. No CRITICAL or MAJOR finding; three MINOR items and one SUGGESTION
-are recorded as known limits of a static scanner.
+This is an **independent review that replaces the author's self-review** previously recorded in this
+file: it was produced by a separate reviewer with no authoring context, working only from the frozen
+patch (`target/candid_diff.patch`) and the code it lands in.
+
+Scope (GitHub #458, part of #356): the optional, dev-only web capture script pins the browser time
+zone and locale through one `BROWSER_ENV` array plus `--lang=en-US --accept-lang=en-US`; the README
+"Screenshots" intro now attributes the `soos-gui` captures and the phone web app captures to their
+respective scripts; a new fixture test file adds RAC22 (script contract) and RAC23 (server-level
+fixed-clock check); one comment is added in `readme_fixed_clock_tests.rs`. No production crate, PAM,
+daemon or `soos-remote` code changes; `Docs/assets/` (PNGs and `MANIFEST.toml`) is byte-identical to
+`origin/main`.
+
+Re-review after rebase: the branch was rebased from `6c4ecd4` onto `7ab2eae` (#460, setup.sh
+scanners: `tests/invariants/src/setup_scanner_contract.rs`, `setup_user_phase_contract.rs`,
+`tests/invariants/src/lib.rs`, matrix rows, walkthrough 245). The newly frozen patch, compared with
+the patch reviewed at fingerprint `27fb23cf…` (both excluding `index` lines and this report), is
+byte-identical, so the branch's own changes are unchanged. No interaction with #460: #460 touches no
+file of this diff except `AI/VERIFICATION_MATRIX.md` (separate rows, no RAC row) and this report; its
+scanners read only `scripts/setup.sh`, not `scripts/capture_readme_web.sh`. Walkthrough numbering
+stays sequential (245 from #460, 246 here). `bash -n` and the full test command were re-run on the
+rebased tree and are green.
 
 ## 2. Test Changes
 
 Mechanical listing from the frozen patch:
 
-- Test files touched: `tests/invariants/src/lib.rs` (module registration, `#[cfg(all(test, unix))]`),
-  `tests/invariants/src/setup_scanner_contract.rs` (new), `tests/invariants/src/setup_user_phase_contract.rs`.
-- Removed/changed assertion lines (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): **none**.
+- Test files touched: `tests/fixtures/tests/readme_capture_locale_tests.rs` (new, 2 tests),
+  `tests/fixtures/tests/readme_fixed_clock_tests.rs` (3 comment lines added).
+- Removed/changed `assert`/`#[test]`/`proptest!`/`should_panic` lines: **none** (grep empty).
 - New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance/epsilon): **none**.
 - Inline `mod tests` changes: **none**.
-- `setup_user_phase_contract.rs` hunks: (1) banner comment `rows SRP1-SRP6` -> `rows SRP1-SRP10`
-  (verified accurate: SRP1-SRP10 exist in that file and in the matrix); (2) comment above the
-  `PRESENCE_READ_FLAG` rewrite updated to say #454 is merged (accurate: `4e0c02a` on main). Both
-  are comment-only; the surrounding code is byte-identical.
-- `setup_contract.rs` (SET40 / SET41) is not in the patch: byte-identical.
+
+The only edit to an existing test file is a comment above the existing equality loop of
+`test_rac_fixed_capture_clock_is_pinned`; that loop and all its assertions are untouched. The
+comment accurately states the loop is weak (`route` is pure, so it compares a body with itself) and
+points to RAC23. No contract migration is needed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
 
-- Ran the full suite: `cargo test --locked -p soos-invariants -- --test-threads=3` -> 847 passed,
-  0 failed (SCN1-SCN5 included). `cargo clippy --locked -p soos-invariants --all-targets -- -D warnings`
-  clean; `cargo fmt --all -- --check` clean.
-- **Mutation on the real script** (throwaway detached worktree, removed afterwards):
-  - replaced line 2169 with `run_bounded "${UNIT_START_TIMEOUT_S}" true; systemctl \` + newline +
-    `stop "${UNIT}"` -> SCN4 failed with `line 2170: systemctl stop of the daemon unit is not
-    bounded by UNIT_START_TIMEOUT_S`.
-  - replaced the `tailscale version` substitution with `/usr/bin/tailscale serve status` -> SCN2
-    failed (`line 804`) while **SET41 still passed**, which confirms the gap is real and closed.
-  - added `TS_BIN="tailscale"` -> SCN3 failed (`line 805`).
-  The checks therefore read and evaluate `scripts/setup.sh`, not only synthetic snippets. SCN2
-  also asserts the lexer reaches the `tailscale version` substitution, and SCN4 asserts at least
-  six bounded calls and at least SET40's own line count, so a lexer that silently skipped the
-  script would fail. Verified the six bounded calls exist at lines 1853, 1890, 2105, 2109, 2169,
-  2181 as the walkthrough states.
-- Lexer false-pass analysis (could a real bad form slip through?):
-  - Continuation inside a word (`tail\` + newline + `scale`): joined, caught (SCN1/SCN2/SCN3 cases).
-  - Quoted name / absolute path / backticks / `<(...)` / unquoted here-document body: caught.
-  - Verb after options (`systemctl --no-block start`), `enable --now`, absolute `/usr/bin/systemctl`,
-    a `$verb` variable, a mismatched bound, a bound separated by `;`: all rejected in SCN4 snippets.
-  - An option value taken as the verb (e.g. `-t service start`) yields an "unexpected systemctl"
-    violation: fails closed.
-  - Residual forms that still pass are listed as MINOR findings 1-2; they are obfuscations rather
-    than plausible accidental regressions, and the walkthrough documents most of them honestly.
-- Lexer panic analysis (could it panic on valid bash?): every unbalanced or unknown construct ends
-  in an `assert!`/`panic!` with a line number, i.e. fails loudly, never passes silently. Valid
-  bash that would trip it: an arithmetic left shift `(( x << 2 ))` / `$(( x << 2 ))` (read as a
-  here-document with delimiter `2`), a `<< \EOF` delimiter, and a `case ... in pat) ...` inside a
-  `$(...)` (the `)` closes the substitution). None occur in `setup.sh` today (MINOR finding 3).
-  Every loop advances at least one character or returns; indexing is bounded by `i < len` checks
-  or `get`.
-- Traceability: matrix rows SCN1-SCN5 present with correct test paths; walkthrough snippet counts
-  verified (SCN2 10/9, SCN3 15/8, SCN4 13/7 rejected/accepted); SCN5 asserts SET40/SET41 still exist.
-  PASS.
+- Script: `BROWSER_ENV=(TZ=UTC LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US)` is a plain bash
+  array; `env "${BROWSER_ENV[@]}" "$browser" "${flags[@]}" …` passes each assignment as a separate,
+  correctly quoted word, and `env` execs the browser with those variables set. Works under the
+  script's `set -euo pipefail` (array non-empty). `bash -n` passes. Both browser runs (tour-seen,
+  then screenshot) use it; the old bare `TZ=UTC` prefixes are gone, and `TZ=UTC` is preserved inside
+  the array. → PASS.
+- Flags: `--accept-lang` is a valid Chrome (headless) switch and sets `Accept-Language` /
+  `navigator.languages`. `--lang` is a valid Chrome switch, but on Linux Chrome derives the default
+  ICU locale mainly from `LANGUAGE`/`LC_ALL`/`LANG`, so the environment pin is what actually decides
+  `toLocaleTimeString([], …)` output there; `--lang` is redundant but harmless (see SUGGESTION). The
+  author's reported evidence (German locale + `TZ=Asia/Tokyo` host gives byte-identical PNGs with the
+  pin, a 24 h clock without it) is consistent with this. → PASS.
+- README claims checked against the fixture data in `tests/fixtures/mod.rs`: the web fixture's only
+  person-like field is `"account":"owner"` in the locked-scene alert history, which is an account
+  *class* rendered by `app.js` (`ALERT_ACCOUNTS.owner` = "your account"), not a login or user name;
+  `DEMO_HOST` is documented as never served. So "canned, identity-free data with no login, host name
+  or address" is true, and the old intro's claim that *all* screenshots use the user `alice` is
+  correctly narrowed to the `soos-gui` captures. "with a pinned `en-US` locale" matches the script.
+  → PASS.
+- `Docs/README_ASSETS.md` §4 text matches the script exactly (variables, values, flags). → PASS.
 
 ### PAM Concurrency & Deadlines
 
-No change to `crates/pam` or any runtime code. Not applicable. PASS.
+Not applicable: no file under `crates/pam` or any runtime crate changes. → PASS (N/A).
 
 ### Panic Safety & Fail-Closed
 
-Panics are confined to `#[cfg(test)]` contract code with a scoped `#![allow(...)]` carrying a
-`reason`, consistent with other contract modules. The lexer's panics are the intended fail-loud
-behaviour (asserted by SCN1's five unbalanced inputs under `catch_unwind`). PASS.
+No production code changes; `unwrap`/`expect`/`panic!` appear only in the new integration test file
+under an explicit `#![allow(..., reason = ...)]`, consistent with the other fixture tests. → PASS.
 
 ### Test Integrity & Anti-Weakening
 
-Section 2: zero pre-existing assertions changed; the new tests fail against plausible wrong
-implementations (demonstrated by the mutations above and by each scanner's rejected-snippet
-self-test). PASS.
+- RAC22 mutation checks run by the reviewer (script temporarily swapped, then restored; working tree
+  verified clean afterwards):
+  - `origin/main` script (no `BROWSER_ENV`): test FAILS (line 111, definition count).
+  - `--accept-lang=en-US` removed from the flags: test FAILS (line 155).
+  - one browser run with the `env "${BROWSER_ENV[@]}"` prefix stripped: test FAILS (line 119).
+  The test also forbids a second `--lang=` (`--accept-lang=` does not match `--lang=`), any line
+  starting with `TZ=`, and requires exactly two browser runs (tour-seen and screenshot). Comment-line
+  and `\`-continuation handling is correct, so commented-out code cannot satisfy it.
+- RAC23 is non-vacuous: it first proves the bodies depend on the instant (`route` at +61 s differs for
+  status, offline, locked alerts and the event prelude; the unlocked alerts body has no timestamp and
+  is asserted equal), then checks over real HTTP that two `--clock fixed` servers answer exactly the
+  fixed-instant `route` bodies with `200 OK`, `Content-Type: application/json` and matching
+  `Content-Length` (format confirmed against `write_response`), byte-identical after a >1 s sleep, and
+  that the scenes differ. A server accidentally using `FixtureClock::Real` would fail the equality with
+  the fixed-instant body. The author honestly labels RAC23 as coverage, not a red-phase contract.
+- Server lifetime (4 s) exceeds the request window (~1.1 s plus requests); `serve_with_clock` returns
+  `Ok(())` at its deadline, so the joins terminate. The temporary asset directory is per-PID and
+  removed. → PASS.
 
 ### Memory, Bounds & Secrets
 
-Reads one repository file; no process, network or write. No secrets. PASS.
+No secrets, frames or embeddings involved; fixture data is synthetic. The test binds loopback only.
+→ PASS.
 
 ### Supply Chain & Automation
 
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. PASS.
+- No `Cargo.*`, `deny.toml`, `.github/` or `.githooks/` change; no new dependency.
+- RAC15 (capture tooling dev-only, no CI enables it): a search of `.github/` for `capture_readme`,
+  `chrome` and `chromium` is empty, and
+  `soos-invariants::readme_assets_contract::test_rac_capture_tooling_is_dev_only` passes. The script
+  still installs and downloads nothing. → PASS.
+- `Docs/assets/` (web and `gui-*` PNGs, `MANIFEST.toml`): `git diff origin/main -- Docs/assets` is
+  empty, and the invariants suite (manifest checks included) passes. → PASS.
 
 ### English-Only Policy
 
-All code, comments, matrix rows and the walkthrough are English. PASS.
+All added code, comments, docs, matrix rows and the walkthrough are in English. → PASS.
+
+### Verification Run by the Reviewer
+
+- `bash -n scripts/capture_readme_web.sh`: OK.
+- `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/readme-capture-locale CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3 cargo test --locked -p soos-test-fixtures -p soos-invariants -- --test-threads=3`:
+  all green (invariants 847 passed, after the rebase onto #460; `readme_capture_locale_tests` 2 passed; `readme_fixed_clock_tests`,
+  `readme_tour_seen_tests`, `readme_fixture_tests`, `fixture_generators_tests` and the fixtures unit
+  tests all passed; 0 failed, 0 ignored).
 
 ## 4. Detailed Findings & Action Items
 
-- **[MINOR]** `tests/invariants/src/setup_scanner_contract.rs` (`tailscale_tokens` / `tailscale_commands`)
-  — the token search runs on raw words, so a name split by quotes or a backslash inside a word
-  (`$(tail"scale" serve)`, `$(tailscal\e serve)`) still passes SCN2/SCN3. Optional hardening:
-  also search `unquote(word)` per word. Obfuscation only; not blocking.
-- **[MINOR]** same file, SCN3/SCN4 — a Tailscale command or daemon unit reached through a variable
-  the script never assigns (inherited environment) or a differently named variable holding
-  `soos-daemon` is not detected. Documented in walkthrough 245 section 7; the behavioural harness
-  remains the backstop. Not blocking.
-- **[MINOR]** same file, `Lexer::list` — valid bash such as `(( x << 2 ))`, `<< \EOF` or a `case`
-  inside `$(...)` would make the lexer panic (fail loudly, never pass). Absent from `setup.sh`
-  today; a future edit introducing one would get a clear panic message pointing at the line.
-- **[SUGGESTION]** SCN5 checks SET40/SET41 by function name only; that suffices for "kept" but not
-  for "byte-identical". Acceptable as is.
+- **[SUGGESTION]** `scripts/capture_readme_web.sh:94` — on Linux, Chrome's `--lang` has little or no
+  effect on the default ICU locale (the environment decides); the environment pin is the effective
+  control. Keeping `--lang` is harmless; a future comment could say the environment is the
+  authoritative pin on Linux.
+- **[SUGGESTION]** `Docs/README_ASSETS.md:104` — the edited paragraph leaves one line well over the
+  surrounding wrap width ("…byte-identical PNGs (checked on the capture host with the same");
+  cosmetic reflow only.
+
+No CRITICAL, MAJOR or MINOR findings.
 
 ## 5. Final Verdict
 

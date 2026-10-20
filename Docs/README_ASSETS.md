@@ -96,9 +96,12 @@ scripts/capture_readme_assets.sh   # refresh MANIFEST.toml afterwards
   history, event stream) from that instant; the screenshot is taken on the fixture page
   `/readme/capture`, which serves the assets' `index.html` with `<base href="/">` and an inline clock
   script (`CAPTURE_CLOCK_SCRIPT`) inserted before `app.js`, so `Date.now()` and `new Date()` return
-  the same instant (`new Date(value)` is unchanged). The asset files are never modified. The browser
-  runs with `TZ=UTC`, so the page shows "Updated 0 s ago", "idle for 12 min" and alerts at 09:38 AM in
-  both themes, and a rerun gives byte-identical PNGs (checked on the capture host with the same
+  the same instant (`new Date(value)` is unchanged). The asset files are never modified. Every
+  browser run has a pinned time zone and locale (`BROWSER_ENV`: `TZ=UTC`, `LANG` and `LC_ALL`
+  `en_US.UTF-8`, `LANGUAGE=en_US`, plus the flags `--lang=en-US` and `--accept-lang=en-US`; GitHub
+  #458), so the page shows "Updated 0 s ago", "idle for 12 min" and alerts at 09:38 AM (12 h clock)
+  in both themes whatever the capture host's time zone and locale (a run on a host with a German
+  locale gave a 24 h "09:38" before the pin), and a rerun gives byte-identical PNGs (checked on the capture host with the same
   Chrome build; another browser version or font set may render differently). The fixture server
   lives up to 240 s per scene (two browser runs per theme).
 - **First-run tour**: the web app's feature tour (ADR 2026-10-17, GitHub #414/#418) opens on a fresh

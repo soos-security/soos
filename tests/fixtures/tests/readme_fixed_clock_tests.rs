@@ -77,6 +77,9 @@ fn test_rac_fixed_capture_clock_is_pinned() {
         );
     }
 
+    // Weak check: `route` is pure, so this loop compares a body with itself. The stronger
+    // server-level check is `readme_capture_locale_tests::
+    // test_rac_fixed_clock_server_bodies_are_pinned_and_instant_dependent` (RAC23, GitHub #458).
     for scene in WebScene::ALL {
         for api in ["/api/status", "/api/alerts", "/api/offline", "/api/events"] {
             let now = FixtureClock::Fixed.now_unix_ms();
