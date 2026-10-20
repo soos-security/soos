@@ -67,7 +67,7 @@ All screenshots are generated from synthetic data, never from a real person or h
 ([`Docs/README_ASSETS.md`](Docs/README_ASSETS.md)). The `soos-gui` captures come from
 `scripts/capture_readme_assets.sh` (commit `a3cae16`, #392): a drawn placeholder face, the user `alice` and
 mock models. The phone web app captures below come from `scripts/capture_readme_web.sh`: canned,
-identity-free data with no user name at all. No real face is ever committed.
+identity-free data with no login, host name or address. No real face is ever committed.
 
 | Guided enrollment | Enrolled profiles |
 |---|---|

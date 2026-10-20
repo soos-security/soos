@@ -30,7 +30,7 @@ PR #450 committed the four phone web app captures, made reproducible by a fixed 
   unaffected (their output does not depend on the locale).
 - `README.md`: the intro names both scripts — the `soos-gui` captures (`capture_readme_assets.sh`, drawn
   face, user `alice`, mock models) and the phone web app captures (`capture_readme_web.sh`, canned,
-  identity-free data with no user name); the web caption mentions the pinned `en-US` locale.
+  identity-free data with no login, host name or address); the web caption mentions the pinned `en-US` locale.
 - `Docs/README_ASSETS.md` §4 describes the pinned environment and flags.
 - No production crate changes. `soos-remote` and the asset files are untouched.
 
