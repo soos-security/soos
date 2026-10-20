@@ -9,10 +9,10 @@
 use eframe::egui;
 use soos_camera_v4l::{CameraErrorKind, CameraStatus};
 
-use crate::{theme, widgets};
+use crate::{motion, theme, widgets};
 
 /// Visual severity of a [`StatusBanner`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BannerSeverity {
     /// Normal progress or healthy state.
     Info,
@@ -142,25 +142,72 @@ pub fn camera_status_banner(status: &CameraStatus) -> StatusBanner {
     }
 }
 
-/// Draws `banner` as a centered brand status card (spinner for in-progress states).
+/// Draws `banner` as a centered brand status card (pending star for in-progress states).
+///
+/// Truth first (`Docs/UI_MOTION.md` G7): a new state's text is drawn on the frame it arrives;
+/// an Info state fades in over `T_SHORT`, its title colour cross-fading from the previous
+/// severity's colour, while a Warning or Error is drawn at full opacity in its own colour at
+/// once. The previous text is never kept on screen. Reduced motion draws every state at rest.
 pub fn render_status_banner(ui: &mut egui::Ui, banner: &StatusBanner) {
-    let color = match banner.severity {
+    let color = severity_color(banner.severity);
+    let ctx = ui.ctx().clone();
+    let id = egui::Id::new("soos_camera_status_banner");
+    let key = egui::Id::new((banner.severity, banner.title.as_str())).value();
+    let previous = ctx.data_mut(|d| {
+        let s = d.get_temp_mut_or_insert_with(id.with("state"), || StatusMotion {
+            key,
+            severity: banner.severity,
+            previous: banner.severity,
+        });
+        if s.key != key {
+            s.key = key;
+            s.previous = s.severity;
+            s.severity = banner.severity;
+        }
+        s.previous
+    });
+    let fade = motion::fade_in_on_change(&ctx, id.with("text"), key, theme::T_SHORT);
+    // A problem is never faded in: Warning and Error are drawn at full opacity, in their own
+    // colour, on the frame they arrive (security truth first, `Docs/UI_MOTION.md` G7).
+    let fade = if banner.severity == BannerSeverity::Info {
+        fade
+    } else {
+        1.0
+    };
+    let title_color = motion::mix_color(severity_color(previous), color, fade);
+    widgets::status_card(ui, |ui| {
+        motion::with_opacity(ui, fade, |ui| {
+            if banner.severity == BannerSeverity::Info {
+                let (star, _) =
+                    ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                widgets::pending_star(ui, star, theme::PINK);
+                ui.add_space(4.0);
+            }
+            // Same faux-bold title as every other card (the default font has one weight).
+            widgets::card_title_colored(ui, banner.title.as_str(), title_color);
+            ui.add_space(-10.0);
+            ui.label(
+                egui::RichText::new(banner.detail.as_str())
+                    .size(theme::F_BODY)
+                    .color(theme::INK_MUTED),
+            );
+        });
+    });
+}
+
+/// Last state shown by [`render_status_banner`] (for the title colour cross-fade).
+#[derive(Debug, Clone, Copy)]
+struct StatusMotion {
+    key: u64,
+    severity: BannerSeverity,
+    previous: BannerSeverity,
+}
+
+/// Title colour of a severity.
+fn severity_color(severity: BannerSeverity) -> egui::Color32 {
+    match severity {
         BannerSeverity::Info => theme::INK,
         BannerSeverity::Warning => theme::WARN_TEXT,
         BannerSeverity::Error => theme::DANGER,
-    };
-    widgets::status_card(ui, |ui| {
-        if banner.severity == BannerSeverity::Info {
-            ui.add(egui::Spinner::new().size(22.0).color(theme::BLUE));
-            ui.add_space(4.0);
-        }
-        // Same faux-bold title as every other card (the default font has one weight).
-        widgets::card_title_colored(ui, banner.title.as_str(), color);
-        ui.add_space(-10.0);
-        ui.label(
-            egui::RichText::new(banner.detail.as_str())
-                .size(theme::F_BODY)
-                .color(theme::INK_MUTED),
-        );
-    });
+    }
 }

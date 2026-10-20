@@ -6,9 +6,10 @@ Normative motion specification for the desktop GUI (`crates/gui`, egui 0.35) and
 contract `AI/tester_contract_motion.md`; static invariants `tests/invariants/src/ui_motion_spec_contract.rs`
 (matrix UIM1–UIM6).
 
-This document is a specification. The motion itself lands in two later pull requests:
-`feat/remote-motion` (`style.css`, class hooks in `app.js`) and `feat/gui-motion` (`theme.rs` tokens,
-`motion.rs`, animated widgets). A third, `test/ui-motion-owner-check`, records the owner's device checks.
+This document is a specification. The motion lands in two pull requests: `feat/remote-motion`
+(`style.css`, class hooks in `app.js`) and `feat/gui-motion` (GitHub #438: `theme.rs` tokens, `motion.rs`,
+`motion/portal.rs`, animated widgets; walkthrough 234). A third, `test/ui-motion-owner-check`, records the
+owner's device checks.
 
 ## 1. Direction
 
@@ -225,10 +226,10 @@ instant change:
 | G1 | `motion.rs` | pure helpers: `SpringState` (section 3), `cubic_bezier(points, t)` (t clamped; f(0) = 0, f(1) = 1), `MotionPrefs`, `resolve_motion_prefs`; state stored as `Copy` data in egui temp storage |
 | G2 | Header daemon switch | thumb on the spring (retargetable), track colour cross-fade `T_SHORT` standard (replaces the fixed 0.15 s); busy: the pending star replaces the `egui::Spinner`; the authorization text stays visible |
 | G3 | Tabs | a pill indicator slides between tabs (`T_MEDIUM`, `EASE_STANDARD`); labels change colour `T_FAST` |
-| G4 | Cards and stat tiles | on a mode or tab change, cards fade in and rise `RISE_PX` (`T_MEDIUM`, `EASE_ENTER`), staggered `T_STAGGER`, at most 6; stat values cross-fade `T_SHORT`, never count up |
+| G4 | Cards and stat tiles | on a mode or tab change, cards fade in and rise `RISE_PX` (`T_MEDIUM`, `EASE_ENTER`), staggered `T_STAGGER`, at most 6; a stat tile whose caption or em dash / value presence changes fades its value in over `T_SHORT`, but only when the previous content had been on screen for at least 2 × `T_SHORT`: a change during a running fade never restarts it and a change sooner after a fade is drawn at once, so a caption flickering with face detection is fully opaque at most `T_SHORT` after the first change (`motion::fade_in_on_stable_change`); live numeric updates under the same caption are drawn at once (never counted up, never faded at camera rate) |
 | G5 | Banners (`widgets::banner`) | enter with a fade and `SLIDE_PX` (`T_SHORT`, `EASE_ENTER`), leave in `T_SHORT_EXIT` (`EASE_EXIT`); a kind change cross-fades the colours; nothing auto-dismisses (there is no toast component and none is added) |
 | G6 | Progress bar | the fill eases toward its target in `T_MEDIUM` with `EASE_STANDARD` (replaces the fixed 0.25 s) |
-| G7 | Camera status card (`camera_status.rs`) | cross-fade between banner states (old out `T_SHORT_EXIT`, new in `T_SHORT`); the pending star replaces the spinner of Info states |
+| G7 | Camera status card (`camera_status.rs`) | a new banner state is drawn on the frame it arrives (security truth first: the previous text is never kept on screen); an Info state fades in over `T_SHORT`, its title colour cross-fading from the previous severity's colour, while a Warning or Error is drawn at full opacity in its own colour on that frame (a problem is never faded in); the pending star replaces the spinner of Info states |
 | G8 | Star tiles | turn 45° with the spring when the confirmed daemon state changes (section 5) |
 | G9 | Face overlay | **no motion**: boxes, landmarks and the live/spoof colours (`FACE_LIVE`, `FACE_SPOOF`) are drawn from the latest detection on the same frame, never interpolated |
 | G10 | egui windows and popups | the built-in fade with `Style::animation_time` = `T_SHORT`; their existing shadows are unchanged and no shadow is added |

@@ -196,7 +196,14 @@ fn test_pau_zbus_is_declared_once_in_the_workspace() {
 #[test]
 fn test_pau_zbus_is_used_only_by_the_daemon() {
     const ZBUS_LINE: &str = "zbus = { workspace = true }";
-    const ALLOWED: [&str; 2] = ["crates/daemon/Cargo.toml", "crates/remote/Cargo.toml"];
+    // Planned Contract Migration B.2a (`AI/tester_contract_motion.md`; ADR 2026-10-13 "Motion
+    // System for soos-gui and soos-remote" item (6); #358 owner decision 4 of 2026-10-13): the
+    // read-only session-bus portal reader of `soos-gui` (GitHub #438).
+    const ALLOWED: [&str; 3] = [
+        "crates/daemon/Cargo.toml",
+        "crates/remote/Cargo.toml",
+        "crates/gui/Cargo.toml",
+    ];
     for rel in ALLOWED {
         let manifest = read(rel);
         assert!(

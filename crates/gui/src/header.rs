@@ -18,6 +18,7 @@ use eframe::egui::{
 };
 
 use crate::daemon_control::DaemonState;
+use crate::motion;
 use crate::privileged::PrivilegedAction;
 use crate::theme::{self, paint_faux_bold};
 use crate::widgets;
@@ -49,7 +50,7 @@ pub struct DaemonSwitch {
     pub position: Option<bool>,
     /// Whether a click is accepted (known state and no privileged action pending).
     pub interactive: bool,
-    /// A privileged action is pending (spinner shown instead of the switch).
+    /// A privileged action is pending (pending star shown instead of the switch).
     pub busy: bool,
     /// Text shown next to the switch.
     pub label: &'static str,
@@ -237,7 +238,80 @@ pub fn layout_tabs(label_widths: &[f32], active: usize, x0: f32, x_max: f32) -> 
         .collect()
 }
 
+/// Paints the active-tab shape (pale folder tab with concave fillets flaring into the body)
+/// over `rect`.
+pub fn paint_tab_pill(painter: &egui::Painter, rect: Rect) {
+    painter.rect_filled(
+        rect,
+        CornerRadius {
+            nw: 20,
+            ne: 20,
+            sw: 0,
+            se: 0,
+        },
+        theme::PALE,
+    );
+    let y = rect.max.y - TAB_FILLET;
+    // Concave fillets flaring the tab into the body.
+    painter.rect_filled(
+        Rect::from_min_max(
+            pos2(rect.min.x - TAB_FILLET, y),
+            pos2(rect.min.x, rect.max.y + 1.0),
+        ),
+        CornerRadius::ZERO,
+        theme::PALE,
+    );
+    painter.circle_filled(pos2(rect.min.x - TAB_FILLET, y), TAB_FILLET, theme::BLUE);
+    painter.rect_filled(
+        Rect::from_min_max(
+            pos2(rect.max.x, y),
+            pos2(rect.max.x + TAB_FILLET, rect.max.y + 1.0),
+        ),
+        CornerRadius::ZERO,
+        theme::PALE,
+    );
+    painter.circle_filled(pos2(rect.max.x + TAB_FILLET, y), TAB_FILLET, theme::BLUE);
+}
+
+/// Paints the active-tab indicator for the rectangle `target` of active tab `index` and returns
+/// the rectangle painted. When `index` changes, its left and right edges slide to the new tab
+/// over `T_MEDIUM` with `EASE_STANDARD` (`Docs/UI_MOTION.md` G3; at once with reduced motion);
+/// while the same tab stays active it follows its rectangle at once (a window resize never
+/// makes the shape trail its tab). Paint it before the tabs, so the z-order at rest is that of
+/// the old active tab.
+pub fn tab_pill(ui: &Ui, target: Rect, index: usize) -> Rect {
+    let id = ui.id().with("soos_tab_pill");
+    let ctx = ui.ctx();
+    let switched = ctx.data_mut(|d| {
+        let last = d.get_temp_mut_or_insert_with(id.with("index"), || index);
+        let switched = *last != index;
+        *last = index;
+        switched
+    });
+    let duration = if switched { theme::T_MEDIUM } else { 0.0 };
+    let left = motion::tween_value(
+        ctx,
+        id.with("left"),
+        target.min.x,
+        duration,
+        theme::EASE_STANDARD,
+    );
+    let right = motion::tween_value(
+        ctx,
+        id.with("right"),
+        target.max.x,
+        duration,
+        theme::EASE_STANDARD,
+    );
+    let shown = Rect::from_min_max(pos2(left, target.min.y), pos2(right, target.max.y));
+    paint_tab_pill(ui.painter(), shown);
+    shown
+}
+
 /// Paints one header tab in `rect` (top of the band to its bottom) and returns its response.
+///
+/// The pale active shape is painted separately by [`tab_pill`]; the icon and label colours of
+/// the tab cross-fade between the inactive and the active palette over `T_FAST`.
 pub fn tab(
     ui: &Ui,
     rect: Rect,
@@ -250,49 +324,25 @@ pub fn tab(
     let id = ui.id().with(("soos_tab", label));
     let response = ui.interact(rect, id, Sense::click());
     let painter = ui.painter();
-    if active {
-        painter.rect_filled(
-            rect,
-            CornerRadius {
-                nw: 20,
-                ne: 20,
-                sw: 0,
-                se: 0,
-            },
-            theme::PALE,
-        );
-        let y = rect.max.y - TAB_FILLET;
-        // Concave fillets flaring the tab into the body.
-        painter.rect_filled(
-            Rect::from_min_max(
-                pos2(rect.min.x - TAB_FILLET, y),
-                pos2(rect.min.x, rect.max.y + 1.0),
-            ),
-            CornerRadius::ZERO,
-            theme::PALE,
-        );
-        painter.circle_filled(pos2(rect.min.x - TAB_FILLET, y), TAB_FILLET, theme::BLUE);
-        painter.rect_filled(
-            Rect::from_min_max(
-                pos2(rect.max.x, y),
-                pos2(rect.max.x + TAB_FILLET, rect.max.y + 1.0),
-            ),
-            CornerRadius::ZERO,
-            theme::PALE,
-        );
-        painter.circle_filled(pos2(rect.max.x + TAB_FILLET, y), TAB_FILLET, theme::BLUE);
-    } else if response.hovered() {
+    if !active && response.hovered() {
         painter.rect_filled(
             rect.shrink2(vec2(6.0, 6.0)),
             CornerRadius::same(16),
             Color32::from_rgba_unmultiplied(237, 241, 255, 28),
         );
     }
-    let (icon_color, text_color, band) = if active {
-        (theme::BLUE, theme::INK, theme::PALE)
-    } else {
-        (theme::PALE, theme::PALE, theme::BLUE)
-    };
+    let ink = motion::tween_value(
+        ui.ctx(),
+        id.with("ink"),
+        if active { 1.0 } else { 0.0 },
+        theme::T_FAST,
+        theme::EASE_STANDARD,
+    );
+    let (icon_color, text_color, band) = (
+        motion::mix_color(theme::PALE, theme::BLUE, ink),
+        motion::mix_color(theme::PALE, theme::INK, ink),
+        motion::mix_color(theme::BLUE, theme::PALE, ink),
+    );
     let icon_x = if show_label {
         rect.min.x + spacing.pad_l
     } else {
@@ -370,8 +420,9 @@ pub fn daemon_panel(ui: &mut Ui, rect: Rect, switch: &DaemonSwitch) -> Option<Pr
     );
 
     if switch.busy {
-        let spin = Rect::from_center_size(toggle.center(), vec2(18.0, 18.0));
-        ui.put(spin, egui::Spinner::new().size(18.0).color(theme::BLUE));
+        // The pending star replaces the spinner; the label above stays painted (UI_MOTION.md G2).
+        let star = Rect::from_center_size(toggle.center(), vec2(18.0, 18.0));
+        widgets::pending_star(ui, star, theme::BLUE);
         return None;
     }
     let id = ui.id().with("soos_daemon_switch");

@@ -33,6 +33,7 @@ use crate::feature_control::{
     SystemFeatureExecutor, SystemProgramRunner,
 };
 use crate::header;
+use crate::motion::{self, portal::PortalReader, MotionControl, MotionPrefs};
 use crate::onboarding::{
     should_show_tour, tour_state_path, Feature, FeatureSnapshot, Tour, TourLoad, TourStore,
 };
@@ -123,6 +124,9 @@ pub struct SoosApp {
     feature_message: Option<(String, bool)>,
     /// A refresh was requested while the feature runner was busy.
     refresh_pending: bool,
+
+    /// Source of the reduced-motion preference (GitHub #438, `Docs/UI_MOTION.md` §8).
+    motion: MotionControl,
 }
 
 impl SoosApp {
@@ -244,11 +248,29 @@ impl SoosApp {
             feature_runner,
             feature_message: None,
             refresh_pending: false,
+            motion: MotionControl::fixed(MotionPrefs::REDUCED),
         };
+        motion::install_prefs(&cc.egui_ctx, MotionPrefs::REDUCED);
         app.refresh_features();
 
         app.refresh_profiles();
         app
+    }
+
+    /// Selects the motion preference source (`Docs/UI_MOTION.md` §8): `--reduce-motion`, then
+    /// `SOOS_REDUCE_MOTION`, then the XDG desktop portal (read once on a background thread
+    /// with a 200 ms deadline, only when neither override decides). Until the portal answers,
+    /// motion counts as reduced.
+    pub fn configure_motion(&mut self, cli_reduce: bool, env: Option<&std::ffi::OsStr>) {
+        self.motion =
+            MotionControl::from_sources(cli_reduce, env, PortalReader::spawn_session_portal);
+    }
+
+    /// Daemon state published by the background monitor (lock-free read, GitHub #154).
+    fn daemon_state(&self) -> DaemonState {
+        self.daemon_monitor
+            .as_ref()
+            .map_or(DaemonState::Unknown, DaemonMonitor::state)
     }
 
     /// Sets the camera ownership notice rendered in place of the camera feed (GitHub #150).
@@ -676,7 +698,11 @@ impl SoosApp {
             ));
             x += width;
         }
-        // The active tab is painted first so its concave fillets never cover a neighbor's icon.
+        // The active-tab shape is painted first so its concave fillets never cover a neighbor's
+        // icon; it slides between tabs (UI_MOTION.md G3).
+        if let Some((active_rect, _)) = rects.get(active_index) {
+            header::tab_pill(ui, *active_rect, active_index);
+        }
         let order =
             std::iter::once(active_index).chain((0..tabs.len()).filter(|i| *i != active_index));
         for i in order {
@@ -773,16 +799,20 @@ impl SoosApp {
             widgets::banner(ui, BannerKind::Warning, banner);
             shown = true;
         }
-        if !self.tasks.is_busy() {
-            if let Some((msg, is_err)) = &self.daemon_message {
+        // The daemon result leaves with a short exit when it is cleared (UI_MOTION.md G5).
+        let daemon_notice = (!self.tasks.is_busy())
+            .then_some(self.daemon_message.as_ref())
+            .flatten()
+            .map(|(msg, is_err)| {
                 let kind = if *is_err {
                     BannerKind::Error
                 } else {
                     BannerKind::Success
                 };
-                widgets::banner(ui, kind, msg);
-                shown = true;
-            }
+                (kind, msg.as_str())
+            });
+        if widgets::banner_slot(ui, egui::Id::new("soos_daemon_notice"), daemon_notice).is_some() {
+            shown = true;
         }
         if shown {
             ui.add_space(theme::GAP_CARD - ui.spacing().item_spacing.y);
@@ -826,92 +856,18 @@ impl SoosApp {
                 );
             }
 
-            let to_screen = |x: f32, y: f32| -> Pos2 {
-                Pos2::new(
-                    rect.min.x + (x / frame.width as f32) * rect.width(),
-                    rect.min.y + (y / frame.height as f32) * rect.height(),
-                )
-            };
-
-            // 2. Paint authentic ONNX detections
-            for det in &frame.detections {
-                // Liveness color comes only from the pipeline decision (GitHub #215).
-                let box_color = if frame.pad_live {
-                    theme::FACE_LIVE
-                } else {
-                    theme::FACE_SPOOF
-                };
-
-                // PAD 2.7x expanded bounding box context crop (drawn under the face box)
-                if self.show_pad_crop {
-                    let pad_box = soos_vision::crop::expand_bbox_for_pad(
-                        &det.box_,
-                        2.7,
-                        frame.width,
-                        frame.height,
-                    );
-                    let pad_p1 = to_screen(pad_box.x1, pad_box.y1);
-                    let pad_p2 = to_screen(pad_box.x2, pad_box.y2);
-                    painter.rect_stroke(
-                        Rect::from_two_pos(pad_p1, pad_p2),
-                        2.0,
-                        Stroke::new(1.0, theme::PAD_BOX),
-                        egui::StrokeKind::Outside,
-                    );
-                }
-
-                if self.show_bbox {
-                    let p1 = to_screen(det.box_.x1, det.box_.y1);
-                    let p2 = to_screen(det.box_.x2, det.box_.y2);
-                    painter.rect_stroke(
-                        Rect::from_two_pos(p1, p2),
-                        3.0,
-                        Stroke::new(2.0, box_color),
-                        egui::StrokeKind::Outside,
-                    );
-
-                    // Confidence badge
-                    let label = format!("Face: {:.1}%", det.score * 100.0);
-                    widgets::backed_text(
-                        &painter,
-                        Pos2::new(p1.x + 7.0, p1.y + 5.0),
-                        egui::Align2::LEFT_TOP,
-                        &label,
-                        egui::FontId::proportional(theme::F_SMALL),
-                        box_color,
-                    );
-                }
-
-                // 3. Paint authentic 5-point landmarks
-                if self.show_landmarks {
-                    if let Some(lmk) = &det.landmarks {
-                        // Eye axis first so the dots sit on top of it.
-                        painter.line_segment(
-                            [
-                                to_screen(lmk.left_eye.x, lmk.left_eye.y),
-                                to_screen(lmk.right_eye.x, lmk.right_eye.y),
-                            ],
-                            Stroke::new(1.5, theme::EYE_AXIS),
-                        );
-                        let pts = [
-                            (lmk.left_eye, theme::EYE),
-                            (lmk.right_eye, theme::EYE),
-                            (lmk.nose, theme::NOSE),
-                            (lmk.mouth_left, theme::MOUTH),
-                            (lmk.mouth_right, theme::MOUTH),
-                        ];
-                        for (pt, color) in pts {
-                            let center = to_screen(pt.x, pt.y);
-                            painter.circle_filled(center, 4.5, color);
-                            painter.circle_stroke(
-                                center,
-                                5.0,
-                                Stroke::new(1.0, Color32::from_rgba_unmultiplied(16, 24, 32, 200)),
-                            );
-                        }
-                    }
-                }
-            }
+            // 2-3. Detections, PAD crop area and landmarks, from this frame only (never
+            // interpolated, `Docs/UI_MOTION.md` G9).
+            crate::overlay::paint_detections(
+                &painter,
+                rect,
+                frame,
+                crate::overlay::OverlayToggles {
+                    bbox: self.show_bbox,
+                    landmarks: self.show_landmarks,
+                    pad_crop: self.show_pad_crop,
+                },
+            );
 
             // 4. Inset preview: 112x112 aligned face crop, bottom-right
             if self.show_crop_inset {
@@ -996,6 +952,14 @@ impl SoosApp {
             });
         let match_threshold = self.pipeline.config().match_threshold;
 
+        // Right-column entrance on a tab change (UI_MOTION.md G4): card, stat tile, star
+        // tile, staggered; drawn at rest once entered (and always with reduced motion).
+        let [card_in, stat_in, star_in] = column_entrances(ui.ctx(), self.current_tab);
+        let card_rect = card_rect.translate(Vec2::new(0.0, card_in.offset_y));
+        let stat_rect = stat_rect.map(|r| r.translate(Vec2::new(0.0, stat_in.offset_y)));
+        let star_rect = star_rect.map(|r| r.translate(Vec2::new(0.0, star_in.offset_y)));
+        let daemon_paused = self.daemon_state() == DaemonState::Inactive;
+        let restore = motion::push_opacity(ui, stat_in.opacity);
         if let Some(stat_rect) = stat_rect {
             if let Some(score) = live_score {
                 let is_match = score >= match_threshold;
@@ -1033,9 +997,13 @@ impl SoosApp {
                 widgets::stat_tile(ui, stat_rect, "Match score", None, None, None);
             }
         }
+        ui.set_opacity(restore);
         if let Some(star_rect) = star_rect {
-            widgets::star_tile(ui, star_rect);
+            let restore = motion::push_opacity(ui, star_in.opacity);
+            widgets::star_tile_turned(ui, star_rect, daemon_paused);
+            ui.set_opacity(restore);
         }
+        let restore = motion::push_opacity(ui, card_in.opacity);
 
         widgets::card_in_rect(ui, card_rect, "live_telemetry_card", |ui| {
             widgets::card_title(ui, "Telemetry & Analysis");
@@ -1204,6 +1172,7 @@ impl SoosApp {
                 }
             }
         });
+        ui.set_opacity(restore);
     }
 
     /// Renders Tab 2: Apple FaceID-style guided multi-step enrollment flow.
@@ -1425,6 +1394,14 @@ impl SoosApp {
         let (card_rect, stat_rect, star_rect) =
             widgets::column_stack_card_first(column, metrics.gap_card, card_needed);
 
+        // Right-column entrance on a tab change (UI_MOTION.md G4): card, stat tile, star
+        // tile, staggered; drawn at rest once entered (and always with reduced motion).
+        let [card_in, stat_in, star_in] = column_entrances(ui.ctx(), self.current_tab);
+        let card_rect = card_rect.translate(Vec2::new(0.0, card_in.offset_y));
+        let stat_rect = stat_rect.map(|r| r.translate(Vec2::new(0.0, stat_in.offset_y)));
+        let star_rect = star_rect.map(|r| r.translate(Vec2::new(0.0, star_in.offset_y)));
+        let daemon_paused = self.daemon_state() == DaemonState::Inactive;
+        let restore = motion::push_opacity(ui, stat_in.opacity);
         if let Some(stat_rect) = stat_rect {
             if has_session {
                 let value = format!("{progress:.0}%");
@@ -1450,9 +1427,13 @@ impl SoosApp {
                 widgets::stat_tile(ui, stat_rect, "Enrollment", None, Some("Not started"), None);
             }
         }
+        ui.set_opacity(restore);
         if let Some(star_rect) = star_rect {
-            widgets::star_tile(ui, star_rect);
+            let restore = motion::push_opacity(ui, star_in.opacity);
+            widgets::star_tile_turned(ui, star_rect, daemon_paused);
+            ui.set_opacity(restore);
         }
+        let restore = motion::push_opacity(ui, card_in.opacity);
 
         let (_, footer_rect) =
             widgets::card_in_rect_with_footer(ui, card_rect, "enrollment_card", footer_h, |ui| {
@@ -1699,6 +1680,7 @@ impl SoosApp {
                 }
             });
         });
+        ui.set_opacity(restore);
     }
 
     /// Renders Tab 3: Enrolled profiles and template deletion.
@@ -1713,26 +1695,39 @@ impl SoosApp {
         let tile = column.width();
         let (stat_h, star) = widgets::profiles_column(column.height(), tile, metrics.gap_card);
         let stat = Rect::from_min_size(column.min, Vec2::new(tile, stat_h));
+        // Entrance on a tab change (UI_MOTION.md G4): main card, stat tile, star tile.
+        let [card_in, stat_in, star_in] = column_entrances(ui.ctx(), self.current_tab);
+        let daemon_paused = self.daemon_state() == DaemonState::Inactive;
         // Polkit mode keeps no local copy: an empty list there means "not loaded yet".
         let count = (!(self.profiles.profiles.is_empty() && self.store.uses_polkit()))
             .then(|| self.profiles.profiles.len().to_string());
+        let restore = motion::push_opacity(ui, stat_in.opacity);
         widgets::stat_tile(
             ui,
-            stat,
+            stat.translate(Vec2::new(0.0, stat_in.offset_y)),
             "TEMPLATES",
             count.as_deref(),
             Some("AES-256-GCM at rest"),
             None,
         );
+        ui.set_opacity(restore);
         if let Some(star_h) = star {
             let star = Rect::from_min_size(
                 Pos2::new(column.min.x, stat.max.y + metrics.gap_card),
                 Vec2::new(tile, star_h),
             );
-            widgets::star_tile(ui, star);
+            let restore = motion::push_opacity(ui, star_in.opacity);
+            widgets::star_tile_turned(
+                ui,
+                star.translate(Vec2::new(0.0, star_in.offset_y)),
+                daemon_paused,
+            );
+            ui.set_opacity(restore);
         }
 
         // Main card hosting the title row, the store notice and the profiles table.
+        let main = main.translate(Vec2::new(0.0, card_in.offset_y));
+        let restore = motion::push_opacity(ui, card_in.opacity);
         ui.painter().rect(
             main,
             egui::CornerRadius::same(theme::R_CARD),
@@ -1845,6 +1840,7 @@ impl SoosApp {
                     }
                 });
         });
+        ui.set_opacity(restore);
 
         if refresh {
             self.refresh_profiles();
@@ -2112,6 +2108,8 @@ impl SoosApp {
 impl eframe::App for SoosApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Non-blocking poll of the reduced-motion source; installs a changed preference.
+        self.motion.apply(&ctx);
 
         // Apply finished background privileged operations without blocking (GitHub #154).
         self.handle_task_outcomes();
@@ -2175,6 +2173,24 @@ impl eframe::App for SoosApp {
         });
         self.render_tour(&ctx);
     }
+}
+
+/// Entrances of the three right-column elements (card, stat tile, star tile) of `tab`, in
+/// stagger order (`Docs/UI_MOTION.md` G4). Each tab has its own ids, so a tab change enters
+/// the new tab's column while a refresh of the same tab never replays it.
+fn column_entrances(ctx: &egui::Context, tab: AppTab) -> [motion::Entrance; 3] {
+    let tab_index: u8 = match tab {
+        AppTab::LiveInspection => 0,
+        AppTab::GuidedEnrollment => 1,
+        AppTab::Profiles => 2,
+    };
+    [0_usize, 1, 2].map(|slot| {
+        motion::entrance(
+            ctx,
+            egui::Id::new(("soos_column_entrance", tab_index, slot)),
+            slot,
+        )
+    })
 }
 
 /// Success message of a feature change.

@@ -26,6 +26,7 @@ use soos_vision::{PadInputModality, VisionPipeline, VisionPipelineConfig};
 use super::{AppTab, SoosApp};
 use crate::daemon_control::{DaemonMonitor, DaemonState, DaemonStatusProbe, DAEMON_POLL_INTERVAL};
 use crate::feature_control::{FeatureAction, FeatureExecutor, FeatureOutcome, FeatureRunner};
+use crate::motion::{MotionControl, MotionPrefs};
 use crate::onboarding::{FeatureSnapshot, Tour};
 use crate::privileged::{PrivilegedAction, PrivilegedExecutor, PrivilegedOutcome, TaskRunner};
 use crate::state::{EnrollmentGuiState, LatestFrameData, ProfilesGuiState};
@@ -228,6 +229,7 @@ pub fn capture_app(
     frame: &Frame,
 ) -> Result<SoosApp, CaptureError> {
     theme::apply(&cc.egui_ctx);
+    crate::motion::install_prefs(&cc.egui_ctx, MotionPrefs::REDUCED);
     if !frame_is_supported(frame) {
         return Err(CaptureError::UnsupportedFrame);
     }
@@ -341,5 +343,7 @@ pub fn capture_app(
         feature_runner: FeatureRunner::new(Arc::new(NoFeatureExecutor), Arc::new(|| {})),
         feature_message: None,
         refresh_pending: false,
+        // Captures are still images: reduced motion draws every widget at rest.
+        motion: MotionControl::fixed(MotionPrefs::REDUCED),
     })
 }

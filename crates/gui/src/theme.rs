@@ -133,6 +133,66 @@ pub const F_SMALL: f32 = 12.0;
 /// Placeholder text size on the video.
 pub const F_PLACEHOLDER: f32 = 18.0;
 
+// ---------------------------------------------------------------------------------------------
+// Motion tokens (`Docs/UI_MOTION.md` §2 and §3; ADR 2026-10-13 "Motion System for soos-gui and
+// soos-remote"). Durations are seconds, easings cubic-bezier control points `[x1, y1, x2, y2]`.
+// The web app mirrors these values by name in `style.css`; keep the literals plain (the static
+// contract UIM-S2 reads them).
+// ---------------------------------------------------------------------------------------------
+
+/// Hover, press-in and control colours.
+pub const T_FAST: f32 = 0.12;
+/// Switch track colour, small fades, banners in.
+pub const T_SHORT: f32 = 0.18;
+/// Card and section entries, tab indicator.
+pub const T_MEDIUM: f32 = 0.26;
+/// Long colour morphs.
+pub const T_LONG: f32 = 0.38;
+/// Settle time of the spring (`SPRING_*`).
+pub const T_SPRING: f32 = 0.4;
+/// 0.7 × [`T_SHORT`].
+pub const T_SHORT_EXIT: f32 = 0.126;
+/// 0.7 × [`T_MEDIUM`].
+pub const T_MEDIUM_EXIT: f32 = 0.182;
+/// 0.7 × [`T_LONG`].
+pub const T_LONG_EXIT: f32 = 0.266;
+/// Delay between staggered items.
+pub const T_STAGGER: f32 = 0.03;
+/// Items staggered at most; later items enter with the last staggered one.
+pub const STAGGER_MAX_ITEMS: usize = 6;
+/// One quarter turn of the pending star.
+pub const T_PENDING: f32 = 1.2;
+/// Default easing and colour cross-fades.
+pub const EASE_STANDARD: [f32; 4] = [0.2, 0.0, 0.0, 1.0];
+/// Elements appearing.
+pub const EASE_ENTER: [f32; 4] = [0.16, 1.0, 0.3, 1.0];
+/// Elements leaving.
+pub const EASE_EXIT: [f32; 4] = [0.4, 0.0, 1.0, 1.0];
+/// Scale of a pressed button (mirrored for the web app).
+pub const PRESS_SCALE: f32 = 0.98;
+/// Rise of cards entering, in points.
+pub const RISE_PX: f32 = 6.0;
+/// Slide of banners entering, in points.
+pub const SLIDE_PX: f32 = 8.0;
+/// Turn of the star tiles while the daemon is confirmed paused, in degrees.
+pub const STAR_TURN_DEG: f32 = 45.0;
+/// Spring stiffness k on a normalized span.
+pub const SPRING_STIFFNESS: f32 = 400.0;
+/// Spring damping c.
+pub const SPRING_DAMPING: f32 = 30.0;
+/// Spring mass m.
+pub const SPRING_MASS: f32 = 1.0;
+/// A spring is settled within this fraction of its span of the target...
+pub const SPRING_SETTLE_EPSILON: f32 = 0.001;
+/// ...and below this fraction of its span per second.
+pub const SPRING_SETTLE_VELOCITY: f32 = 0.1;
+/// Longest frame time a motion helper advances by (a stall never makes a value jump).
+pub const MAX_MOTION_DT: f32 = 0.05;
+/// Repaint period of the ambient pending star (at most 30 Hz).
+pub const AMBIENT_REPAINT_MS: u64 = 33;
+/// Overall deadline of the one-time XDG portal read of the reduced-motion preference.
+pub const PORTAL_READ_DEADLINE_MS: u64 = 200;
+
 /// Responsive layout metrics derived from the window width.
 ///
 /// The reference mockup is 1512 points wide; narrower windows scale the paddings down to the

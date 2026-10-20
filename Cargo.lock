@@ -3608,9 +3608,11 @@ dependencies = [
  "soos-vision",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "zbus",
  "zeroize",
 ]
 
