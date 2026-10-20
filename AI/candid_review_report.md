@@ -2,8 +2,8 @@
 
 - **Date**: 2026-10-20
 - **Target Branch**: `chore/readme-capture-locale`
-- **Base (merge-base)**: `6c4ecd4` (equal to `origin/main` after `git fetch origin`; no rebase needed)
-- **Reviewed-Diff-Fingerprint**: `27fb23cf40112f2760ac6a2610c33f49495cb304557a91955fe0d3dfd3938c2d`
+- **Base (merge-base)**: `7ab2eae` (`origin/main` after #460; the branch was rebased from `6c4ecd4` onto it)
+- **Reviewed-Diff-Fingerprint**: `a5c8ba98018d5f569373354310e9826d37e184aa0bc8f86cb0611e5b71324dee`
 - **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/246_readme_capture_locale.md`, `Docs/README_ASSETS.md`, `README.md`, `scripts/capture_readme_web.sh`, `tests/fixtures/tests/readme_capture_locale_tests.rs` (new), `tests/fixtures/tests/readme_fixed_clock_tests.rs`
 
 ## 1. Executive Summary
@@ -19,6 +19,16 @@ respective scripts; a new fixture test file adds RAC22 (script contract) and RAC
 fixed-clock check); one comment is added in `readme_fixed_clock_tests.rs`. No production crate, PAM,
 daemon or `soos-remote` code changes; `Docs/assets/` (PNGs and `MANIFEST.toml`) is byte-identical to
 `origin/main`.
+
+Re-review after rebase: the branch was rebased from `6c4ecd4` onto `7ab2eae` (#460, setup.sh
+scanners: `tests/invariants/src/setup_scanner_contract.rs`, `setup_user_phase_contract.rs`,
+`tests/invariants/src/lib.rs`, matrix rows, walkthrough 245). The newly frozen patch, compared with
+the patch reviewed at fingerprint `27fb23cf…` (both excluding `index` lines and this report), is
+byte-identical, so the branch's own changes are unchanged. No interaction with #460: #460 touches no
+file of this diff except `AI/VERIFICATION_MATRIX.md` (separate rows, no RAC row) and this report; its
+scanners read only `scripts/setup.sh`, not `scripts/capture_readme_web.sh`. Walkthrough numbering
+stays sequential (245 from #460, 246 here). `bash -n` and the full test command were re-run on the
+rebased tree and are green.
 
 ## 2. Test Changes
 
@@ -113,7 +123,7 @@ All added code, comments, docs, matrix rows and the walkthrough are in English. 
 
 - `bash -n scripts/capture_readme_web.sh`: OK.
 - `LIBONNXRUNTIME_NO_PKG_CONFIG=1 CARGO_TARGET_DIR=~/.cache/soos-targets/readme-capture-locale CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=3 cargo test --locked -p soos-test-fixtures -p soos-invariants -- --test-threads=3`:
-  all green (invariants 842 passed; `readme_capture_locale_tests` 2 passed; `readme_fixed_clock_tests`,
+  all green (invariants 847 passed, after the rebase onto #460; `readme_capture_locale_tests` 2 passed; `readme_fixed_clock_tests`,
   `readme_tour_seen_tests`, `readme_fixture_tests`, `fixture_generators_tests` and the fixtures unit
   tests all passed; 0 failed, 0 ignored).
 
