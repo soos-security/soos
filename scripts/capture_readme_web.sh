@@ -16,7 +16,8 @@
 # run in the same profile takes the screenshot of /readme/capture: index.html
 # with the page clock frozen at the fixture's fixed capture instant, while the
 # server builds every body from that same instant (--clock fixed), so every
-# scene and theme shows the same date and times.
+# scene and theme shows the same date and times. Every browser run has a pinned time zone
+# and locale (BROWSER_ENV, --lang=en-US, --accept-lang=en-US; GitHub #458).
 #
 # Optional and never a CI requirement: nothing is installed or downloaded.
 # The browser binary is taken from $CHROME or found on PATH. Run
@@ -34,6 +35,10 @@ SCENES=(unlocked locked-alerts)
 VIEWPORT="390,844"
 SCALE=2
 SETTLE_MS=4000
+# Pinned time zone and locale of every browser run, so clock times (12/24 h) and month names
+# never depend on the capture host (GitHub #458); --lang/--accept-lang below pin the browser's
+# own locale and Accept-Language the same way.
+BROWSER_ENV=(TZ=UTC LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US)
 
 browser="${CHROME:-}"
 if [[ -z "$browser" ]]; then
@@ -86,7 +91,7 @@ for scene in "${SCENES[@]}"; do
             --disable-extensions --disable-sync --disable-background-networking
             --disable-component-update --hide-scrollbars --user-data-dir="$profile"
             --window-size="$VIEWPORT" --force-device-scale-factor="$SCALE"
-            --virtual-time-budget="$SETTLE_MS")
+            --lang=en-US --accept-lang=en-US --virtual-time-budget="$SETTLE_MS")
         if [[ "$variant" == "dark" ]]; then
             flags+=(--force-dark-mode --blink-settings=preferredColorScheme=0)
         else
@@ -94,10 +99,11 @@ for scene in "${SCENES[@]}"; do
         fi
         # The fixture page marks the first-run feature tour as seen in this throw-away
         # profile, then loads / (GitHub #448), so the tour never covers the capture.
-        # TZ=UTC keeps the capture host's time zone out of the clock times shown.
-        TZ=UTC "$browser" "${flags[@]}" "http://127.0.0.1:$port/readme/tour-seen" > /dev/null 2>&1
+        # BROWSER_ENV (TZ=UTC, en_US locale) keeps the capture host's time zone and locale out
+        # of the clock times and dates shown.
+        env "${BROWSER_ENV[@]}" "$browser" "${flags[@]}" "http://127.0.0.1:$port/readme/tour-seen" > /dev/null 2>&1
         # Same profile, page clock frozen at the fixed capture instant: the screenshot.
-        TZ=UTC "$browser" "${flags[@]}" --screenshot="$raw" \
+        env "${BROWSER_ENV[@]}" "$browser" "${flags[@]}" --screenshot="$raw" \
             "http://127.0.0.1:$port/readme/capture" > /dev/null 2>&1
         cargo run --locked -q -p soos-test-fixtures --example readme_web_fixture_server -- \
             --strip-png "$raw" "$OUT/web-$scene-$variant.png"
