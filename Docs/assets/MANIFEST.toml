@@ -34,11 +34,11 @@ source = "synthetic"
 [[asset]]
 path = "screenshots/web-unlocked-dark.png"
 generator = "scripts/capture_readme_web.sh"
-sha256 = "c150088e9f1fbaf3e84773d996c20b0a980a0f58db93812243b6c46b94d48d98"
+sha256 = "186c80a2dda7fbc9c6e3206b6b33218ecd50ec1e0208912cdc741d49c36e2326"
 source = "synthetic"
 
 [[asset]]
 path = "screenshots/web-unlocked-light.png"
 generator = "scripts/capture_readme_web.sh"
-sha256 = "03838f7b67427ba092191cd64b78b7cc46507d5e67238a07982f19c5a9666a35"
+sha256 = "db661b7ddac3e5e26a572905f61520838401db1a5bb20a130af42668c9fdf3a1"
 source = "synthetic"
