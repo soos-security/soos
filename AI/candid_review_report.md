@@ -1,138 +1,88 @@
 # Candid Review Report
 
-- **Date**: 2026-10-18
-- **Target Branch**: `feat/remote-motion`
-- **Base (merge-base)**: `3f76090` (equal to the current `origin/main`)
-- **Reviewed-Diff-Fingerprint**: `09d020e858c3c4b6b4ace52f5ad9461b6863a11a0c30765cddac8ff79549782c`
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_motion.md`,
-  `AI/auditor_constraints_remote_motion.md`, `AI/tester_contract_motion.md`,
-  `AI/walkthroughs/235_remote_web_motion.md`, `Docs/REMOTE_COMPANION.md`, `Docs/UI_MOTION.md`,
-  `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `tests/invariants/src/lib.rs`,
-  `tests/invariants/src/remote_motion_contract.rs`
+- **Date**: 2026-10-20
+- **Target Branch**: `feat/remote-motion` (PR #436, GitHub #433 = PR 2 of #358), after the rebase onto `origin/main` `da320a4`
+- **Base (merge-base)**: `da320a4`
+- **Reviewed-Diff-Fingerprint**: `6ae0f13f445950239baa8c2fd5c028bf53ff7ddc68bf3666be17d693e0dec56c`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_remote_motion.md`, `AI/auditor_constraints_remote_motion.md`, `AI/tester_contract_motion.md`, `AI/walkthroughs/235_remote_web_motion.md`, `Docs/REMOTE_COMPANION.md`, `Docs/UI_MOTION.md`, `crates/remote/assets/app.js`, `crates/remote/assets/style.css`, `tests/invariants/src/lib.rs`, `tests/invariants/src/remote_motion_contract.rs`
 
 ## 1. Executive Summary
 
-Presentation-only change to the `soos-remote` web app: motion tokens, a gated `linear()` spring, state-word
-keyframes, the star turn, a pending star bound to the request flags, `@starting-style` entries, a list stagger,
-a View Transition for the CSS-overlay camera full screen, and one reduced-motion block that removes every
-animation and transition. No Rust production code, route, header, CSP, asset file, element id or label
-changes. No PAM, IPC, daemon or secret-handling code is touched. Tests are additive only (one new invariant
-module). Scoped tests and clippy are green. No CRITICAL or MAJOR finding.
+Independent review of the full raw diff against the new merge base, with the semantic interaction with main
+(#418 phone tour, #450/#461 README web captures, #457) checked explicitly. The motion code itself is sound:
+class-only hooks, one guarded `startViewTransition`, the pending flags drive `is-pending` through one helper
+after every write, security truth is written before any motion, CSP/routes/assets/ids are unchanged, and the
+single reduced-motion block removes every transition and animation. The tour card keeps its main entry
+(`.tour` transition, now inside the single `@starting-style` block), the single `// soos-tour-storage:begin/end`
+block is untouched (app.js 2315–2336), and RMC-S18/S30/S38, PTR-S1…S10, RXB-S* and RMO-S1…S12 all pass.
 
-Commands re-run by the reviewer (with `LIBONNXRUNTIME_NO_PKG_CONFIG=1`,
-`CARGO_TARGET_DIR=~/.cache/soos-targets/remote-motion`, `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`,
-`CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_BUILD_JOBS=3`): `cargo test -p soos-invariants -- --test-threads=3`
-(800 passed, 0 failed), `cargo test -p soos-remote -- --test-threads=3` (all 43 test binaries ok, 0 failed),
-`cargo clippy -p soos-invariants --all-targets -- -D warnings` and
-`cargo clippy -p soos-remote --all-targets -- -D warnings` (clean), `node --check crates/remote/assets/app.js`
-(syntax ok).
+However, the requested test command **fails**:
+`soos-invariants::matrix_citations::test_matrix_claimed_rows_cite_at_least_one_resolvable_evidence` rejects the
+UIM7 row that `ee3f495` flipped to `✅ Verified` without resolvable evidence, so CI (Quality) would fail. In
+addition, the motion change alters two committed README captures (the unlocked scenes now show the star turned
+45°), so `Docs/assets/screenshots/web-unlocked-{light,dark}.png` and their MANIFEST hashes are stale.
+Verdict: **CHANGES_REQUESTED**.
 
-## 2. Test Changes
+## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-Mechanical listing from `target/candid_diff.patch`:
+- Test files touched: `tests/invariants/src/lib.rs` (+11: one new `#[cfg(all(test, unix))] mod remote_motion_contract;`, the 96th module = 95 on main + 1), `tests/invariants/src/remote_motion_contract.rs` (new, 13 tests).
+- Removed/changed assertion lines (`^-` with assert/#[test]/proptest/should_panic): **none** in code. The only grep hit is the ADR line in `AI/DECISIONS.md` (prose, it contains the word "assertion"); the diff only appends a dated italic note to item (6), no ADR text is removed (verified with `--word-diff`).
+- New escape hatches (`#[ignore]`, `cfg(any())`, `should_panic`, tolerance/epsilon): **none**.
+- Inline `mod tests` added/removed: **none**.
+- `AI/tester_contract_motion.md`: only an appended "Delivered" paragraph; no contract item reworded.
 
-- Test files touched: `tests/invariants/src/lib.rs` (adds `mod remote_motion_contract;` under
-  `#[cfg(all(test, unix))]` with a doc comment, 11 added lines, nothing removed) and the new file
-  `tests/invariants/src/remote_motion_contract.rs` (1973 added lines).
-- Removed or changed assertion lines (`^-` with `assert`, `#[test]`, `proptest!`, `should_panic`): **none**
-  in any test file. The only `^-` hit of the grep is the pre-existing ADR line in `AI/DECISIONS.md`, whose
-  word diff shows one appended implementation note and no removed text.
-- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
-- Inline test modules added or removed: **none**.
-- `git diff 3f76090 HEAD -- tests 'crates/*/tests' android/app/src/test` contains only the two additions above.
-  No pre-existing assertion was removed, weakened or changed.
+No pre-existing assertion changed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- `syncPending()`: every write of `lockRequestedAt` / `unlockRequestedAt` (confirm, set, deadline, answer,
-  failure, `unlockFailed`, unlock set and deadline) is followed on the next line by `syncPending();` (checked
-  line by line). The pending star therefore cannot outlive the existing 5 s timers. Sign-out during a pending
-  request keeps the star until the existing timer resets the flag: bounded. PASS.
-- `render()` still writes the state text, `dataset.state`, the state class and `statTile.dataset.state` before
-  any motion; the state class is rewritten each poll with an identical value, so the per-class keyframe does not
-  replay (one keyframe name per class, six classes matching the six `LABELS` keys). PASS.
-- Camera full screen: `enterCameraFullscreen` sets `cameraFull` first; the overlay-only path (no
-  `requestFullscreen` / `webkitRequestFullscreen`) runs `applyCameraFull` inside `withViewTransition` and returns;
-  that early return skips only the element-fullscreen request that cannot exist on that path. The
-  `exitCameraFullscreen(true)` early return likewise skips only the `exitFullscreen` block, unreachable when
-  element fullscreen is unavailable. `applyCameraFull` reads the current flag, so a stop/error/stall
-  (`endCameraView` -> `exitCameraFullscreen()` with `animate` undefined -> direct) racing a queued transition
-  callback ends in the correct state; a skipped transition still runs its update callback and its rejected
-  promises are caught. Escape, the close button and the tap pass `true`; `cameraFullscreenChanged` and
-  `endCameraView` do not. PASS.
-- Stagger: `firstShow` is read from `hidden` before the reveal, the class is toggled before the list is
-  rebuilt, and the next poll removes it, so a refresh never replays it. PASS.
-- `.push button` (specificity 0,1,1) does not override `button:active:not(:disabled)` (0,2,1): the press still
-  works in the notifications card. The star `<svg class="stat-star">` is the outer SVG element, so
-  `transform-origin: center` turns it about its box centre; `rotate` (angle) and the pending `transform`
-  keyframe compose. PASS.
-- Engines without `linear()` keep the cubic-bezier fallback thanks to the `@supports` gate around the
-  `:root` override. PASS.
+- **Pending flags**: every assignment of `lockRequestedAt` / `unlockRequestedAt` (app.js 640, 650, 1024, 1032, 1051, 1072, 1086, 1128, 1136) is immediately followed by `syncPending()`; the only unpaired lines are the `let` declarations (282, 284). Scenario "unlock POST succeeds but the desktop never confirms" → the 5000 ms timer resets the flag and `syncPending()` removes the star. PASS.
+- **View Transition race**: tap-enter, then `endCameraView` (stop/error/stall) before the transition callback runs → `exitCameraFullscreen()` sets `cameraFull = false` and applies the classes synchronously; the deferred callback `applyCameraFull` reads the current flag (false) and re-applies the same state. No stale overlay. PASS.
+- **Event argument leak**: `closeButton` now wraps `exitCameraFullscreen(true)`; `cameraFullscreenChanged` (1884) and `endCameraView` (2100) call it without an argument; `animate === true` is strict, so a stray `Event` cannot request animation. PASS.
+- **Element fullscreen path**: `requestFullscreen` stays inside the tap activation (classes applied synchronously, no transition on that path). PASS.
+- **State word replay**: `stateNode.className` is rewritten every second with an identical string; an unchanged `animation-name` does not restart, and each state has its own keyframe name so a real change does. PASS.
+- **Nudge**: `.alerts-attention` is toggled with `classList.toggle` on a persistent node (app.js 808), not recreated per poll, so the 2-iteration nudge does not replay each second. PASS.
+- **Stagger**: `firstShow` is read before `hidden = false`; the list is rebuilt each render, so later renders (class removed) do not animate. PASS.
+- **Interaction with #418 tour**: `.tour` keeps the main transition (style.css 1164) and its entry now lives in the single top-level `@starting-style` block (RMO7, PTR-S8 green). `.tour-where` is a `.banner`, so it also slides in when revealed — harmless and consistent with W5. `soos-tour-storage` block unique and unchanged. PASS.
+- **Containing block**: revealed cards carry no rest `transform`; the transient entry transform of the camera card lasts 260 ms and the stage cannot be full screen before the card is shown. PASS.
+- **Docs**: the documented deviation (reduced motion removes even the ≤120 ms fades because PTR-S8 pins `transition: none !important`) is recorded in the ADR item (6) note, `Docs/UI_MOTION.md` §8 and the tester contract. PASS.
+- **Matrix**: the UIM7 row (2371) claims `✅ Verified` but cites no resolvable evidence → **FINDING (MAJOR)**. A duplicated `---` separator was left by the conflict resolution (2996, 2998) → MINOR.
 
 ### PAM Concurrency & Deadlines
-
-Not applicable: no file under `crates/pam`, `crates/daemon` or `crates/protocol` changes. PASS.
+No change under `crates/pam` or in any Rust production code. N/A — PASS.
 
 ### Panic Safety & Fail-Closed
-
-No Rust production code changes. In `app.js`, `withViewTransition` falls back to the direct class change on any
-throw and never leaves a promise unhandled; no new path writes a security state (no optimistic "Unlocked"; the
-unlock still goes `window.confirm` -> passkey -> flag -> request, guarded by RMO-S9). PASS.
+No Rust production code changed. In `app.js`, `withViewTransition` catches a throwing `startViewTransition` and applies directly, and swallows the three transition promises so a skipped transition leaves no unhandled rejection. No path writes a protection-lowering state optimistically (RMO9 green: `requestUnlock` keeps `window.confirm`, the passkey, then the pending flag, then the request). PASS.
 
 ### Test Integrity & Anti-Weakening
-
-- Section 2: additive only, no assertion touched.
-- Mutation probes run by the reviewer on the working tree, then reverted with `git checkout` (tree verified
-  clean, fingerprint unchanged): removing the `syncPending();` after the lock `.catch` reset made
-  `test_rmo_s10_pending_star_follows_the_request_flags` fail; removing `animation: none !important` from the
-  reduce block made `test_rmo_s5_single_reduced_motion_block_removes_motion` fail; turning the Escape exit into
-  a non-animated `exitCameraFullscreen()` made `test_rmo_s8_app_hooks_and_guarded_view_transition` fail. The
-  new tests can fail against plausible wrong implementations. `test_rmo_helper_self_test` covers the parser.
-- `unwrap`/`expect` in the module are test-only, under the module-level `allow` used by the other invariant
-  modules. PASS.
+- Step-3 listing above: no assertion removed or relaxed.
+- Requested command (`cargo test --locked -p soos-invariants -p soos-remote -p soos-test-fixtures -- --test-threads=3`, re-run with `--no-fail-fast` to reach every target): `soos-invariants` 859 passed / **1 failed** (`matrix_citations::test_matrix_claimed_rows_cite_at_least_one_resolvable_evidence`, `AI/VERIFICATION_MATRIX.md:2371 UIM7`); every `soos-remote` and `soos-test-fixtures` target passed. Relevant groups: RMO 13/13, PTR-S 10/10, RXB-S 11/11, RMC-S18/S30/S38 ok, README contracts 27/27.
+- New tests: `test_rmo_helper_self_test` proves the parser/extractors can fail; RMO9/RMO12 are explicit regression guards. PASS apart from the failing matrix invariant.
 
 ### Memory, Bounds & Secrets
-
-No allocation, I/O, logging or storage is added. The View Transition snapshot is the browser's own rendering,
-not readable by script; no frame is captured, cached or logged. No `.style.` write, `requestAnimationFrame`,
-Web Animations API, new asset, id or route. PASS.
+No new timer (motion adds none; both confirmation timers stay 5000 ms), no storage, no network, no `.style.` writes, no frame access: the View Transition snapshot is the browser's own, unreadable by script. CSP string unchanged (no server code in the diff; RMO12 and RXB green). Reduced motion: one `prefers-reduced-motion` block with `transition: none !important; animation: none !important;` on `*, *::before, *::after`, and `withViewTransition` skips the transition under reduce. PASS.
 
 ### Supply Chain & Automation
+No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change. No library, polyfill or web font added. PASS.
 
-No `Cargo.*`, `deny.toml`, `.github/`, `scripts/` or `.githooks/` change; no library is added. PASS.
+**README captures (#450/#461)** — re-run in scratch copies (`git archive`) with `CHROME=/usr/bin/google-chrome-stable`
+(headless Chrome, `--virtual-time-budget=4000`, so `@starting-style` entries, W1 and the nudge have settled and the
+captured frame is the rest state):
+- Base `da320a4`: all four PNGs reproduce `Docs/assets/MANIFEST.toml` bit for bit (the host is a valid reference).
+- Head: `web-locked-alerts-{light,dark}.png` identical to MANIFEST (`02a30d2b…`, `4cb600f4…`).
+- Head: `web-unlocked-light.png` → `db661b7ddac3e5e26a572905f61520838401db1a5bb20a130af42668c9fdf3a1` (MANIFEST `03838f7b…`), `web-unlocked-dark.png` → `186c80a2dda7fbc9c6e3206b6b33218ecd50ec1e0208912cdc741d49c36e2326` (MANIFEST `c150088e…`), deterministic over two runs. The only differing region (119×120 px, 930 px) is the tile star, turned 45° by `.stat-tile[data-state="unlocked"] .stat-star { rotate: var(--star-turn); }` — the intended signature move. The committed captures therefore no longer show what the generator produces → **FINDING (MINOR)**. No image was committed by this review.
+- Observation: Chrome hung (killed after 15 min, then a 90 s timeout) on 2 of 6 head `locked-alerts` screenshot runs and 0 of 5 base runs; every completed head run matched MANIFEST. The sample is too small to attribute it to the motion CSS; the capture script has no per-run timeout → SUGGESTION.
 
 ### English-Only Policy
-
-All code, comments, docs and the commit message are English; the only non-ASCII characters are typographic
-symbols. The commit subject has one scope and stays under 72 characters. PASS.
-
-### Factual Accuracy of Doc Claims (checked against the code)
-
-- PTR-S8 does pin `transition: none !important` in the reduce block's universal rule
-  (`tests/invariants/src/remote_tour_contract.rs`, `test_ptr_s8_style_uses_brand_and_motion_tokens`), as the
-  ADR note, `Docs/UI_MOTION.md` §8 and `Docs/REMOTE_COMPANION.md` state.
-- "Nine keyframes" (six state words, `soos-pending-turn`, `soos-nudge`, `soos-rise-in`), the 16 px button star
-  with `clip-path: path()` / `currentColor`, the 22-stop `linear()`, the 6 px card rise and 8 px banner slide,
-  delays 1-4 x and 5 x `--t-stagger`, and the overlay-only View Transition all match `style.css` / `app.js`.
-- RMO12 counts (CSP, eleven assets, 29 ids, nine labels) are enforced by a green test against the tree.
+All code, comments, docs and matrix rows in the diff are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `crates/remote/assets/style.css` (`@starting-style` block, `.card.camera`) — during the
-  260 ms entry the camera card carries a transient `transform`, which would briefly make it the containing
-  block of the fixed full-screen stage if full screen were entered within that window. Practically unreachable
-  (the stage only opens after a passkey ceremony); no change required.
-- **[SUGGESTION]** `AI/DECISIONS.md` (Motion System ADR, item 6) — the appended note records that the web reduce
-  block removes all fades (the 0 ms end of the "at most 120 ms" ceiling). It is an annotation, not a change of
-  the decision; acceptable as written.
-- **[SUGGESTION]** `AI/walkthroughs/235_remote_web_motion.md` — `origin/main` ends at walkthrough 231; numbers
-  232-234 are presumably taken by parallel branches. Confirm no collision at merge time.
+- **[MAJOR]** `AI/VERIFICATION_MATRIX.md:2371` — row UIM7 was set to `✅ Verified` by `ee3f495` with only "Owner opens the prototype … records the approval on #358" as evidence; `soos-invariants::matrix_citations::test_matrix_claimed_rows_cite_at_least_one_resolvable_evidence` fails ("1 claimed rows cite no resolvable evidence … UIM7"), so CI Quality will be red. Correction (documentation only, no test change): keep the owner-approval text and add resolvable evidence, e.g. the prototype path `Docs/prototypes/ui_motion_prototype.html` and/or `soos-invariants::ui_motion_spec_contract::test_uim_s4_prototype_is_self_contained_and_on_brand` (the pattern of owner rows such as RMC20), then re-run the suite.
+- **[MINOR]** `Docs/assets/screenshots/web-unlocked-light.png`, `Docs/assets/screenshots/web-unlocked-dark.png`, `Docs/assets/MANIFEST.toml:35-37` and `:41-43` — stale after this change: `scripts/capture_readme_web.sh` now yields `db661b7d…` (light) and `186c80a2…` (dark); the README (`README.md:85`, `:89`) shows the unlocked tile with the star at 0° while the shipped app turns it 45°. Regenerate with `scripts/capture_readme_web.sh` and `scripts/capture_readme_assets.sh --web` on this branch (or in a follow-up `chore/` PR) so the README matches the generator.
+- **[MINOR]** `AI/VERIFICATION_MATRIX.md:2996-2998` — two consecutive `---` separators left by the conflict resolution; drop one.
+- **[SUGGESTION]** `scripts/capture_readme_web.sh` — browser runs have no timeout; an intermittent headless hang (seen 2/6 on head `locked-alerts`, 0/5 on base) blocks the script indefinitely. Consider a bounded `timeout` per browser run in a separate change.
 
 ## 5. Final Verdict
 
-**VERDICT: APPROVED**
-
-Merge stays gated by the owner's prototype approval (UIM7) and the owner device check (RMO13 / UIM10), both
-recorded as pending matrix rows.
+**VERDICT: CHANGES_REQUESTED**
