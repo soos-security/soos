@@ -1,112 +1,105 @@
 # Candid Review Report
 
 - **Date**: 2026-10-21
-- **Target Branch**: `chore/readme-capture-chrome-cleanup`
-- **Base (merge-base)**: `ecfefa4`
-- **Reviewed-Diff-Fingerprint**: `53ed21e00db6b73e0275cb604e31a93ee4e47e2495a125579b1c2f394cbae662`
-- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/250_readme_capture_chrome_cleanup.md`, `Docs/README_ASSETS.md`, `scripts/capture_readme_web.sh`, `tests/fixtures/tests/readme_capture_cleanup_tests.rs`
+- **Target Branch**: `test/setup-scanner-lexer`
+- **Base (merge-base)**: `6492eb1`
+- **Reviewed-Diff-Fingerprint**: `f426aadc491edaf66320a16d633a2080ceaebcb2a7c22223d83ea772b0bbd64c`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/251_setup_scanner_lexer.md`, `tests/invariants/src/setup_scanner_contract.rs`
 
 ## 1. Executive Summary
 
-Dev-only change to the optional README web capture script (never a CI step). Each headless Chrome
-run is started with job control on (`set -m` on the line before the background start, `set +m` as
-the first line of `await_browser`), so it becomes its own process group; the whole group is ended
-(SIGTERM, bounded 0.2 s poll for `BROWSER_KILL_AFTER_S` seconds, then SIGKILL) after every run, on a
-timeout and from the exit trap. The RAC24 watcher now runs in the background and is awaited with the
-`wait` builtin so `trap 'exit 130' INT` / `trap 'exit 143' TERM` act at once and exit through the
-existing `trap cleanup EXIT`. No production Rust, PAM, IPC, daemon or shipped asset is touched. No
-CRITICAL or MAJOR finding.
+Test-only change (commit 2b57f7f: 5fef852, an amendment of 980b2ca after a first
+CHANGES_REQUESTED review, rebased onto `origin/main` 6492eb1 after #468 merged). The static shell lexer behind SCN1-SCN5 now returns `Result` (`try_lex`, nesting
+capped at 64), reads `(( ))` / `$(( ))` as arithmetic, follows `case ... esac` inside `$( )`,
+keeps a command-position `[[ ... ]]` as one command, checks Tailscale words after quote removal
+too, and adds SCN7 (command words built from variables must expand only script-assigned
+variables). New tests SCN6-SCN12, matrix rows SCN6-SCN12, walkthrough 251. No production code,
+PAM, IPC, daemon or `scripts/setup.sh` change. No CRITICAL or MAJOR finding remains.
 
 ## 2. Test Changes
 
-Mechanical listing from the frozen patch:
+- Rebase check (ecfefa4 to 6492eb1): the sorted `+`/`-` lines of the review diff are identical
+  before and after the rebase; `setup_scanner_contract.rs` and walkthrough 251 are
+  byte-identical to the reviewed 5fef852; the matrix diff is still the 7 added rows SCN6-SCN12
+  (no line removed, RAC25 from #468 intact); no conflict marker. Only diff context moved.
 
-- Test files touched: `tests/fixtures/tests/readme_capture_cleanup_tests.rs` (new file).
-- Removed/changed lines under `tests/`: **none** (`git diff origin/main...HEAD -- tests` has zero `-`
-  lines); RAC22 (`readme_capture_locale_tests.rs`) and RAC24 (`readme_capture_timeout_tests.rs`)
-  and `tests/invariants` are unchanged.
+- Test files touched: `tests/invariants/src/setup_scanner_contract.rs` only.
+- SCN1-SCN5 and the `words` helper are byte-identical to `origin/main` (the region from the
+  `// Tests` banner to the end of `test_scn5_traceability` diffs empty).
+- Removed `assert!`/`assert_eq!` lines in the patch are all inside the lexer implementation
+  (the old `list`, `heredoc_bodies` and `lex` internal panics), replaced by `Err` returns that
+  `lex` turns back into a panic with the reason. No test assertion was removed or relaxed.
 - New escape hatches (`#[ignore]`, skips, tolerances): **none**.
-
-The new static test is not vacuous: replacing the script with the `origin/main` version makes it
-fail (reproduced here, panic at `readme_capture_cleanup_tests.rs:91`, missing `set -m` before the
-run); RAC22 and RAC24 tests pass on both versions. It pins `set -m` right before exactly the two runs
-and nowhere else, `< /dev/null`, the SIGTERM → bounded poll → SIGKILL ordering in
-`end_browser_group`, group signals in `stop_browser` with the group end after the reap, `set +m`
-first in `await_browser`, the background watcher, the group end before the status check, the watcher
-stop in `cleanup`, and the three traps.
+- Added tests: SCN6-SCN12, each with rejected and accepted synthetic inputs, then run on the
+  real `setup.sh` where relevant.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- `set -m` in a non-interactive bash: the background `env … &` child calls `setpgid` so `$!` is the
-  pgid of Chrome and every child that does not call `setsid`. Verified under a pty (`script -qec`):
-  the fake browser's pgid equalled its pid and the terminal's foreground group stayed the script's,
-  so no terminal ownership moves. No foreground command runs while `set -m` is on (only the
-  `browser_pid=$!` assignment and the call into `await_browser`, whose first line is `set +m`). PASS.
-- Group-kill safety: `end_browser_group` and the `-$browser_pid` signals are only reached with a
-  non-empty `browser_pid` from `$!` (never 0, 1 or the script's own group). If job control had not
-  taken effect, `kill -- -$pid` would fail with ESRCH (no such group) and fall back to the plain
-  pid, so the script's own group is never signalled. The leader is reaped before
-  `end_browser_group`; Linux keeps the id reserved while any group member lives. PASS (see
-  SUGGESTION on the empty-group window).
-- `set -euo pipefail`: `wait "$browser_pid" || status=$?`, `if ! wait "$watch_pid"`, and every kill
-  guarded with `|| true` / `|| return 0`; `end_browser_group` returns 0 on an empty group. PASS.
-- Chrome already exited: `kill -TERM -- -pgid` fails → `return 0`; `stop_browser` with a reaped pid
-  (exit between reap and `browser_pid=""`) only re-runs a no-op group end. PASS.
-- Trap order: INT/TERM traps call `exit`, which runs the EXIT trap once; `cleanup` kills the
-  `timeout` watcher (which forwards to its own group with `tail`), stops the run, then the server.
-  PASS.
 
-### Empirical checks (this review)
-- Fake browser forking a TERM-ignoring orphan and a normal orphan:
-  - failing run (normal-end path): exit 1, zero orphans (SIGKILL escalation after 5 s works);
-  - SIGINT mid-run (default disposition restored for the test harness): exit 130, zero orphans,
-    fixture server gone;
-  - SIGTERM mid-run: exit 143, zero orphans;
-  - hang: exit 124 after 45 s, zero orphans.
-- Real Google Chrome stable, full capture: every Chrome process sat in a group led by a run's main
-  pid (never the script's group), crashpad handlers in their own sessions as documented; the run hit
-  the known intermittent hang (locked-alerts light screenshot) → exit 124, zero Chrome processes right
-  after and 2 s later; the PNGs written before were byte-identical (`git status` clean).
-- `bash -n`, shellcheck (`koalaman/shellcheck:stable`), `cargo fmt --all --check`,
-  `cargo test --locked -p soos-test-fixtures -p soos-invariants -- --test-threads=3`: all green
-  (invariants 871 passed).
+Differential check, old lexer (`origin/main`) versus new (5fef852), on SCN2, SCN3, SCN4 and
+`unit_assignments`, over about 50 adversarial inputs, with the bash semantics confirmed using
+stub functions:
+
+- First review's blocking input (`echo [[` then `run_bounded "${UNIT_START_TIMEOUT_S}"` then
+  `systemctl start soos-daemon` on separate lines) at top level, in `$( )` and in backticks:
+  SCN4 now rejects it, as on `origin/main`. Variations `then [[`, `! [[`, `{ [[ a ]]; }`,
+  `time [[`, `[[ a ]];systemctl start`, `[[ a ]]&&`, `]]||`, `]]|`, `echo ]]`, `echo ]] [[`,
+  `[[ $x == ]] ]]`, `echo "[["`, a `[[)` case pattern, `$( [[ $(systemctl start ...) ]] )` and
+  nested `$( [[ $( [[ a ]] && tailscale up ) ]] )`: identical verdicts old versus new.
+- Arithmetic: `(( $(tailscale up) ))`, `$(( $(tailscale) ))`, `` `(( $(tailscale up) ))` ``,
+  `for (( ...; i<$(tailscale up); ... ))` are still rejected. `$((tailscale up) )`,
+  `$((echo a);(tailscale up))` and `((a) ; tailscale up)` fall back to subshells as bash does.
+  `echo $((tailscale up))` and `$(((echo a);(tailscale up)))` are no longer SCN2 findings, which
+  is correct: bash reads both as arithmetic and runs nothing (verified).
+- `case` inside `$( )`: three bodies the old lexer missed silently are now rejected.
+- Quote-removal union in `tailscale_commands` only adds findings.
+- SCN7: unquoted expansions no longer qualify for the fixed-program exception
+  (`$TS/x run` and `X="$TS/bin/tool"; $X up` both run `tailscale` when
+  `TS='tailscale serve '`). `eval`, `xargs`, `nice`, `setsid` and `stdbuf` are followed.
 
 ### PAM Concurrency & Deadlines
-- Not applicable: no `crates/pam` change. PASS.
+
+Not applicable (no PAM code).
 
 ### Panic Safety & Fail-Closed
-- No Rust production code changed. The script still fails loudly (124 on a timeout, the run status
-  on a failure, 130/143 on a signal). PASS.
+
+`try_lex` never panics: recursion is bounded by `MAX_NESTING` through `nested()`, the cache of
+start positions found not to be arithmetic prevents re-reading, and index reads are
+bounds-checked. The new `Err` paths (`;` inside an open test, a test or `case` left open when
+`$( )`, backticks or the script end) are bash syntax errors too. `setup.sh`, which has 326 lines
+containing `[[`, lexes without error (SCN7 and SCN12 read it).
 
 ### Test Integrity & Anti-Weakening
-- See §2: zero removed or modified assertions; one new additive contract test with a red proof.
-  PASS.
+
+Confirmed: no existing test changed, and no regression where the old scanners flagged an input
+the new ones accept, except the arithmetic cases above that bash does not execute.
 
 ### Memory, Bounds & Secrets
-- Cleanup stays bounded (at most about `BROWSER_KILL_AFTER_S` for the main pid plus the same for the
-  group). No new dependency, download, privilege or logged data. PASS.
+
+Reads one repository file; no process, network or write; no secret handled.
 
 ### Supply Chain & Automation
-- No change to workflows, lockfiles, images or `deny.toml`. PASS.
+
+No dependency or workflow change.
 
 ### English-Only Policy
-- All added text (script comments, docs bullet, matrix row, walkthrough, test) is English. PASS.
+
+All code, docs and the commit message are in English; the commit follows Conventional Commits
+with the trailer.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `scripts/capture_readme_web.sh` `end_browser_group` — once the group is empty
-  its id is free, and in theory an unrelated process could reuse that pid and become its own group
-  leader between the reap and `kill -TERM -- "-$pgid"`. The window is milliseconds and needs a full
-  pid wrap plus a `setpgid`/`setsid` by the new process of the same user; acceptable for a dev-only
-  script, no change required.
-- **[SUGGESTION]** `AI/walkthroughs/250_readme_capture_chrome_cleanup.md` §2 — "Switching job control
-  on for a background start only moves no terminal ownership" reads awkwardly; the claim itself was
-  confirmed under a pty. Reword at the next touch ("Job control switched on only for a background
-  start does not move terminal ownership").
-- **[SUGGESTION]** The walkthrough's "within 0.22 s" exit times apply when every group member honours
-  SIGTERM; a member that ignores it delays the exit by up to `BROWSER_KILL_AFTER_S` (observed 5.08 s
-  here with a TERM-ignoring fake child). Consistent with the documented bound; informational only.
+- RESOLVED (was MAJOR, 980b2ca): `[[` test mode on any word merged lines and let SCN4 miss an
+  unbounded `systemctl start`; fixed, pinned by SCN11.
+- RESOLVED (was MINOR): the SCN7 fixed-program exception could be abused by unquoted
+  expansions; fixed, pinned by SCN12.
+- MINOR (documented, not blocking): wrappers not followed by SCN7 (`bash -c`, `sh -c`,
+  `su -c`, `runuser`, `flock`, `chroot`, `find -exec`); top-level `"${X}/bin/tailscale" up`
+  remains a pre-existing gap of SCN7 and SET41. Both are recorded in walkthrough 251.
+
+Gates: `cargo fmt --all -- --check` OK; `cargo clippy -p soos-invariants --all-targets -- -D
+warnings` OK; `cargo test --locked -p soos-invariants -- --test-threads=3` 878 passed, 0 failed (re-run after the rebase).
 
 ## 5. Final Verdict
 
