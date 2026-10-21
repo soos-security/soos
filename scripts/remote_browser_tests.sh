@@ -14,7 +14,8 @@
 #   2. `playwright test` with `--network none`, as the calling user, with every
 #      capability dropped: the pages come from the loopback-only fixture server
 #      of tests/fixtures (synthetic scenes, fixed clock), started inside the
-#      container from the host binary, never from the owner's data.
+#      container from the host binary, never from the owner's data. The bench
+#      is mounted read-only; only its output directory is writable.
 # No secret, token or credential is read or passed. Dev-only: nothing here is
 # built into a shipped artifact.
 #
@@ -102,6 +103,13 @@ docker run --rm "${user_args[@]}" \
     npm ci --ignore-scripts --no-audit --no-fund --no-update-notifier
 
 echo "[INFO]  playwright test (no network, loopback fixture server only)"
+# The bench (specs, config, node_modules) is read-only in the test container;
+# only tests/browser/test-results (ignored by git) is writable, mounted outside
+# the bench tree. Playwright deletes and recreates its output directory before a
+# run, so `--output` names a subdirectory of that mount, never the mount point.
+readonly OUTPUT="$BENCH/test-results"
+readonly CONTAINER_OUTPUT="/work/output"
+mkdir -p "$OUTPUT"
 status=0
 docker run --rm "${user_args[@]}" \
     --network none --init --shm-size=1g \
@@ -109,7 +117,9 @@ docker run --rm "${user_args[@]}" \
     -e CI=1 -e SOOS_FIXTURE_SERVER="$CONTAINER_FIXTURE" \
     -v "$fixture:$CONTAINER_FIXTURE:ro" \
     -v "$ASSETS:/work/crates/remote/assets:ro" \
-    -v "$BENCH:/work/tests/browser" -w /work/tests/browser \
+    -v "$BENCH:/work/tests/browser:ro" \
+    -v "$OUTPUT:$CONTAINER_OUTPUT" -w /work/tests/browser \
     "$PLAYWRIGHT_IMAGE" \
-    npx --no-install playwright test "${playwright_args[@]}" || status=$?
+    npx --no-install playwright test --output "$CONTAINER_OUTPUT/run" \
+    "${playwright_args[@]}" || status=$?
 exit "$status"

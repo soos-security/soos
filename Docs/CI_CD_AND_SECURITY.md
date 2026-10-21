@@ -110,8 +110,9 @@ without persisted credentials, actions pinned to full commit SHAs, nothing uploa
   network, fetching pinned packages from the npm registry), then `playwright test` in a second
   container with `--network none`, as the calling user, with every capability dropped and
   `no-new-privileges`. The pages come from the loopback-only fixture server of `tests/fixtures`
-  (synthetic scenes, fixed clock), built on the runner and mounted read-only. No trace,
-  screenshot or video is recorded.
+  (synthetic scenes, fixed clock), built on the runner and mounted read-only. The bench
+  directory is mounted read-only too; only `tests/browser/test-results` (ignored by git) is
+  writable, mounted outside the bench tree and passed to Playwright as `--output`. No trace, screenshot or video is recorded.
 - **Advisory semantics**: the workflow is separate from `ci.yml`, so its jobs are never a
   `CI Success` dependency, and its job names are not in `ADVISORY_CHECKS` of
   `scripts/pr_checks_gate.sh` (which keeps exactly its two entries). Instead, the bench step has
@@ -122,7 +123,10 @@ without persisted credentials, actions pinned to full commit SHAs, nothing uploa
   on any other check. Enforced by `soos-invariants::remote_playwright_contract::*`.
 - **Local run**: `scripts/remote_browser_tests.sh` (Docker required; it builds the fixture server
   with `cargo build --locked`, or takes `--fixture-server <path>`), with extra Playwright
-  arguments after `--`, for example `-- --project=webkit`.
+  arguments after `--`, for example `-- --project=webkit`. The fixture server is built on the
+  host and run inside the Ubuntu 24.04 Playwright image, so a host with a much newer glibc than
+  the image may produce a binary that does not start there; pass `--fixture-server` with a binary
+  built on an older base (for example in `tests/docker/Dockerfile.ubuntu`) in that case.
 
 ### Docker Workspace Isolation and Base Images (GitHub #308, #316)
 - Every container that bind-mounts the checkout read-write (`run_tests.sh`, `tests/docker/run_matrix.sh`,
@@ -331,7 +335,7 @@ The [`deny.toml`](../deny.toml) configuration enforces strict third-party depend
 - **Sources**: Only the official `crates.io` index is permitted (no unverified git repositories or alternate registries).
 - **Duplicates**: `multiple-versions = "deny"`; every tolerated duplicate is listed in `skip` with a reason that names the direct dependents of the skipped version, as printed by `cargo tree --locked -i <crate>@<version> --target all -e normal,build,dev --depth 1`. A version used directly by a workspace crate is never described as transitive, and every version of a crate locked three times is documented in `deny.toml` (enforced by `tests/invariants/src/dependency_tooling_contract.rs`, GitHub #243). Rewrite the reason whenever `cargo update` changes who pulls the old version in.
 - **Pre-release pins**: a pre-release workspace dependency is pinned with `=` (today `ort = "=2.0.0-rc.13"`), so a `cargo update` never adopts the API changes of the next release candidate silently; upgrade it deliberately and rerun the real-model tests. Workspace crates use `getrandom` 0.4 (0.2 and 0.3 remain only through `rand_core` and `ahash`).
-- **Cargo updates**: Dependabot covers GitHub Actions and the dev-only npm bench of `tests/browser` (grouped `test(deps): ...` titles, 7-day cooldown; a `@playwright/test` bump must also move the image digest of `scripts/remote_browser_tests.sh` by hand) only; crate updates go through the normal dev-workflow (see `.github/dependabot.yml`).
+- **Cargo updates**: Dependabot does not update crates; it covers only GitHub Actions and the dev-only npm bench of `tests/browser` (grouped `test(deps): ...` titles, 7-day cooldown; a `@playwright/test` bump must also move the image digest of `scripts/remote_browser_tests.sh` by hand). Crate updates go through the normal dev-workflow (see `.github/dependabot.yml`).
 - **Banned Crates**: `opencv` and `nokhwa` (see [`AI/ARCHITECTURE.md`](../AI/ARCHITECTURE.md)).
 
 To execute the security audit locally (cargo-deny ≥ 0.20):
