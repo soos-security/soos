@@ -2,14 +2,14 @@
 
 - **Date**: 2026-10-21
 - **Target Branch**: `test/setup-scanner-lexer`
-- **Base (merge-base)**: `ecfefa4`
-- **Reviewed-Diff-Fingerprint**: `18b2a2328917ae5fb7010efa75aaf9fdda597f68b9bc4f850cd0c2a4dfe14bde`
+- **Base (merge-base)**: `6492eb1`
+- **Reviewed-Diff-Fingerprint**: `f426aadc491edaf66320a16d633a2080ceaebcb2a7c22223d83ea772b0bbd64c`
 - **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/251_setup_scanner_lexer.md`, `tests/invariants/src/setup_scanner_contract.rs`
 
 ## 1. Executive Summary
 
-Test-only change (commit 5fef852, an amendment of 980b2ca after a first CHANGES_REQUESTED
-review). The static shell lexer behind SCN1-SCN5 now returns `Result` (`try_lex`, nesting
+Test-only change (commit 2b57f7f: 5fef852, an amendment of 980b2ca after a first
+CHANGES_REQUESTED review, rebased onto `origin/main` 6492eb1 after #468 merged). The static shell lexer behind SCN1-SCN5 now returns `Result` (`try_lex`, nesting
 capped at 64), reads `(( ))` / `$(( ))` as arithmetic, follows `case ... esac` inside `$( )`,
 keeps a command-position `[[ ... ]]` as one command, checks Tailscale words after quote removal
 too, and adds SCN7 (command words built from variables must expand only script-assigned
@@ -17,6 +17,11 @@ variables). New tests SCN6-SCN12, matrix rows SCN6-SCN12, walkthrough 251. No pr
 PAM, IPC, daemon or `scripts/setup.sh` change. No CRITICAL or MAJOR finding remains.
 
 ## 2. Test Changes
+
+- Rebase check (ecfefa4 to 6492eb1): the sorted `+`/`-` lines of the review diff are identical
+  before and after the rebase; `setup_scanner_contract.rs` and walkthrough 251 are
+  byte-identical to the reviewed 5fef852; the matrix diff is still the 7 added rows SCN6-SCN12
+  (no line removed, RAC25 from #468 intact); no conflict marker. Only diff context moved.
 
 - Test files touched: `tests/invariants/src/setup_scanner_contract.rs` only.
 - SCN1-SCN5 and the `words` helper are byte-identical to `origin/main` (the region from the
@@ -94,7 +99,7 @@ with the trailer.
   remains a pre-existing gap of SCN7 and SET41. Both are recorded in walkthrough 251.
 
 Gates: `cargo fmt --all -- --check` OK; `cargo clippy -p soos-invariants --all-targets -- -D
-warnings` OK; `cargo test --locked -p soos-invariants -- --test-threads=3` 878 passed, 0 failed.
+warnings` OK; `cargo test --locked -p soos-invariants -- --test-threads=3` 878 passed, 0 failed (re-run after the rebase).
 
 ## 5. Final Verdict
 
