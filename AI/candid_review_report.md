@@ -1,127 +1,135 @@
 # Candid Review Report
 
-- **Date**: 2026-10-20
-- **Target Branch**: `feat/gui-motion` (PR #449, GitHub #438, part of #358), rebased onto `origin/main`
-- **Base (merge-base)**: `587c73a` (equal to `origin/main` at review time; main gained #436, #463 and #457 since the previous review on `6c4ecd4`)
-- **Reviewed-Diff-Fingerprint**: `9ea832072e90daec58c30a7ab7e606d86d03442437fccd39e213b3655c6d2d51`
-- **Reviewer**: independent context-free sub-agent (not the author of the branch, of the rebase or of the earlier reviews)
-- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_gui_motion.md`,
-  `AI/auditor_constraints_gui_motion.md`, `AI/tester_contract_gui_motion.md`, `AI/walkthroughs/234_gui_motion.md`,
-  `Cargo.lock`, `Docs/GUI_APPLICATION.md`, `Docs/SECURITY_AND_QUALITY_GUIDELINES.md`, `Docs/UI_MOTION.md`,
-  `crates/gui/Cargo.toml`, `crates/gui/src/app.rs`, `crates/gui/src/app/capture.rs`, `crates/gui/src/args.rs`,
-  `crates/gui/src/brand.rs`, `crates/gui/src/camera_status.rs`, `crates/gui/src/header.rs`, `crates/gui/src/lib.rs`,
-  `crates/gui/src/main.rs`, `crates/gui/src/motion.rs`, `crates/gui/src/motion/portal.rs`, `crates/gui/src/overlay.rs`,
-  `crates/gui/src/theme.rs`, `crates/gui/src/widgets.rs`, `crates/gui/tests/motion_flicker_tests.rs`,
-  `crates/gui/tests/motion_tests.rs`, `tests/invariants/src/gui_motion_contract.rs`, `tests/invariants/src/lib.rs`,
-  `tests/invariants/src/presence_unlock_contract.rs`
+- **Date**: 2026-10-21
+- **Target Branch**: `test/remote-playwright` (GitHub #464, PR 2 of #355), single commit `bed5c47`
+- **Base (merge-base)**: `5ec99fd` (equal to `origin/main` at review time)
+- **Reviewed-Diff-Fingerprint**: `00171270de1b2b9f06c01cbdbf164ae2254b5b178deafe4ae71c65580a8323ca`
+- **Reviewer**: independent context-free sub-agent (not the author of the branch)
+- **Audited Files**: `.github/dependabot.yml`, `.github/workflows/browser.yml`, `.gitignore`, `AGENTS.md`,
+  `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/248_remote_playwright.md`,
+  `Docs/CI_CD_AND_SECURITY.md`, `Docs/REMOTE_COMPANION.md`, `scripts/remote_browser_tests.sh`,
+  `tests/browser/.npmrc`, `tests/browser/fixtures.mjs`, `tests/browser/package-lock.json`,
+  `tests/browser/package.json`, `tests/browser/playwright.config.mjs`, `tests/browser/specs/cards.spec.mjs`,
+  `tests/browser/specs/degradation.spec.mjs`, `tests/browser/specs/motion.spec.mjs`,
+  `tests/browser/specs/signin.spec.mjs`, `tests/browser/specs/tour.spec.mjs`, `tests/invariants/src/lib.rs`,
+  `tests/invariants/src/remote_playwright_contract.rs`
 
 ## 1. Executive Summary
 
-Re-review after the rebase of `feat/gui-motion` onto `origin/main` `587c73a` (#436 web motion system,
-#463 webpki lockfile, #457 actions bump). Scope: the full raw diff against the new merge base (29 files,
-5185 patch lines), with a focus on the hand-resolved conflicts and on semantic interaction with #436.
-
-Rebase content proof (independent of the author's): `git merge-tree --write-tree origin/main
-origin/feat/gui-motion` (the pre-rebase reviewed head `9f4ec87`) auto-merges every file except four.
-The rebased HEAD `b81d642` is byte-identical to that automatic merge for every other file, and for the
-four conflicted files:
-
-- `AI/candid_review_report.md`, `AI/plan_evaluator_report.md`: identical to the branch's pre-rebase
-  version (branch-scoped reports; this file is overwritten here).
-- `AI/VERIFICATION_MATRIX.md`: the conflict is resolved exactly as described: main's UIM7 (verified,
-  owner approval 2026-10-20) and UIM8 (verified, RMO rows), the branch's UIM9 (GMO1–GMO19, GMO21–GMO22);
-  then main's `remote-motion` section, `---`, the branch's `gui-motion` section. No marker remains.
-- `tests/invariants/src/lib.rs`: main's `mod remote_motion_contract;` kept, the branch's
-  `mod gui_motion_contract;` added after it; 97 `mod` lines = 96 on main + 1.
-
-Every UIM (12), RMO (13) and GMO (22) row appears exactly once (47 rows, no duplicate id); each of the
-two motion component headings appears once. The test command and clippy are green, and RAC1 confirms
-the README GUI captures are unchanged. No CRITICAL, MAJOR or MINOR finding; two optional wording
-suggestions.
+The diff (23 files, 1921 patch lines) adds a dev-only Playwright bench of the `soos-remote` web app on
+Chromium, Firefox and WebKit, its runner script, a separate advisory workflow, a Dependabot npm entry, the
+static contract `remote_playwright_contract` (RPW-S1 to RPW-S5), an additive ADR amendment, matrix rows
+RPW1-RPW9, documentation and walkthrough 248. No production code, asset, route, header, CSP, crate
+manifest or `Cargo.lock` changes; `crates/` is untouched. The owner decision cited by the ADR amendment
+exists on GitHub #355 ("Owner decision (2026-10-21)", PR 2 approved, advisory at first, pinned toolchain,
+no secrets). No CRITICAL, MAJOR or MINOR finding; five suggestions.
 
 ## 2. Test Changes (mechanical listing from the frozen patch)
 
-- Test files touched: `crates/gui/tests/motion_flicker_tests.rs` (new), `crates/gui/tests/motion_tests.rs`
-  (new), `tests/invariants/src/gui_motion_contract.rs` (new), `tests/invariants/src/lib.rs` (one `mod`
-  added, nothing removed relative to main), `tests/invariants/src/presence_unlock_contract.rs`.
-- Removed or changed assertions (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): **none**.
-- New escape hatches: none (`#[ignore]`, `#[cfg(any())]`, `should_panic`: none; the only hit is a comment
-  stating that a spring settle epsilon is relative to the span, a property under test, not a tolerance
-  loosening).
+- Test files touched: `tests/browser/**` (all new), `tests/invariants/src/remote_playwright_contract.rs`
+  (new), `tests/invariants/src/lib.rs` (one `mod` with its doc comment added, nothing removed).
+- Removed or changed assertions (`^-` with `assert`/`#[test]`/`proptest!`/`should_panic`): **none**. The
+  only `-` lines of the patch are in `.github/dependabot.yml` (header comment), `AI/DECISIONS.md` (the
+  2026-10-13 browser ADR line; the word diff shows a pure append of the amendment) and
+  `Docs/CI_CD_AND_SECURITY.md` (one sentence extended).
+- New escape hatches: none. The only hits (`test.only`, `test.skip`, `test.fixme`) are inside the new
+  contract, which forbids them in the specs; the Playwright config also sets `forbidOnly: true` and
+  `retries: 0`.
 - Inline `mod tests` added or removed: none.
-- The only change to a pre-existing test is the PAU17 allowlist in
-  `presence_unlock_contract::test_pau_zbus_is_used_only_by_the_daemon`: `ALLOWED` grows from 2 to 3 with
-  `crates/gui/Cargo.toml`. This is the owner-approved Planned Contract Migration B.2a (ADR
-  "[2026-10-18] Owner-Approved Contract Migration of PAU17"). The assertion body is unchanged; the
-  companion `gui_motion_contract` invariants confine the new use.
+- `scripts/pr_checks_gate.sh` is not in the diff: `ADVISORY_CHECKS` keeps exactly its two entries, and
+  `portable_crates_contract::test_mac_pr_loop_treats_only_the_macos_job_as_advisory` is untouched.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Tried: a lost or duplicated matrix row or section from the hand resolution → counted rows by id and
-  section headings: each exactly once; UIM9 keeps GMO21–GMO22.
-- Tried: a semantic clash with #436 in shared docs. `Docs/UI_MOTION.md`: main added a web
-  "Implementation" paragraph in §6 and an "As implemented" bullet under reduced motion (web); the branch
-  edits only the intro sentence and the G4 and G7 rows of §7. No overlapping or contradictory text; the
-  token values are unchanged on both sides (#436 does not touch `theme.rs`), and
-  `ui_motion_spec_contract::test_uim_s2_motion_tokens_are_documented_and_consistent` (live GUI cross-check)
-  passes against the merged document. The ADR line in `AI/DECISIONS.md` that #436 edited is a different
-  entry from the branch's appended PAU17 ADR. `AI/tester_contract_motion.md` gained a "Delivered" note for
-  B.1 only; B.2/B.2a are untouched. README: #436 changed only the web capture wording; the branch does not
-  touch `README.md`, and no README sentence claims GUI motion exists. → PASS.
-- Tried: `Cargo.lock` interaction with #463 → the branch adds only `tokio` and `zbus` to the
-  `soos-gui` dependency list; no new package enters the lockfile; the `--locked` build succeeds. → PASS.
+- Tried: a new state added to the fixture crate that would break immutable RAC tests iterating
+  `WebScene::ALL` → the fixture crate is unchanged; the two missing states are fulfilled with `page.route`
+  in the browser. PASS.
+- Tried: specs that pass against a wrong page → read every spec. Expected sentences are extracted from
+  `app.js` (`appText`, which throws when the constant is missing), the EventSource test counts exactly one
+  extra `/api/status` per `page.clock.runFor(15000)` and asserts no `/api/events` request, the motion test
+  checks both directions, the sign-in test checks the hidden cards, and an auto fixture fails any test on
+  an uncaught page error. The walkthrough red-proof table (one deliberate asset break per spec) is
+  consistent with what the assertions check. PASS.
+- Ran the bench once: `./scripts/remote_browser_tests.sh -- --project=chromium` → 18 passed (2.8 s), the
+  working tree stayed clean (outputs are git-ignored).
 
 ### PAM Concurrency & Deadlines
-- The PAM crate is not touched. The GUI portal reader: one named thread, its own current-thread runtime,
-  `zbus::connection::Builder::session()` only (no system bus), `method_timeout(deadline)`, the whole read
-  wrapped in `tokio::time::timeout(deadline, …)`, and the UI thread enforces the deadline itself in
-  `PortalReader::poll_at` (`try_recv` only, `Unavailable` from `deadline_at` on).
-  `theme::PORTAL_READ_DEADLINE_MS = 200`. No `object_server`, `serve_at`, `request_name` or match rule in
-  `crates/gui/src`. → PASS.
+- `crates/pam` and the daemon are not touched; nothing here runs at authentication time. N/A → PASS.
 
 ### Panic Safety & Fail-Closed
-- Tried: a reader thread that panics or never answers → the channel disconnects or the deadline passes,
-  both map to `Unavailable` (full motion), never block, never retry. Spawn failure → `Unavailable`. No
-  security decision depends on motion; camera Warning/Error states are drawn at full opacity on arrival
-  (GMO22). → PASS.
+- No production Rust code. The runner script is fail-closed: `set -euo pipefail`; a cargo build failure,
+  zero or several example executables, a missing/non-executable fixture, missing Docker or an unreachable
+  daemon each stop with exit 2 and a message; the Playwright status is propagated unchanged. Shellcheck
+  (koalaman/shellcheck:stable) is clean. Empty `playwright_args` under `set -u` is safe on bash >= 4.4.
+  PASS.
 
 ### Test Integrity & Anti-Weakening
-- See §2: no pre-existing assertion changed except PAU17 (approved). The rebase did not alter any test
-  file of the branch (content proof above). → PASS.
+- See §2: purely additive. The new contract is not vacuous: it pins the exact package versions and
+  integrity hashes against the image tag, the container flags, the single `continue-on-error` step, the
+  two-entry `ADVISORY_CHECKS` line, the spec file list and the RXB behaviours each spec must reference,
+  the dev-only scope (no packaging mention, not a workspace member) and the docs. PASS.
+- **RAC15 judgement** (`readme_assets_contract::test_rac_capture_tooling_is_dev_only`): the scanner flags
+  any file under `scripts/` or `.github/` other than the two README capture scripts that contains
+  `readme-capture` or `readme_web_fixture_server`; its stated purpose (code comment and matrix row RAC15)
+  is that nothing that builds, installs or packages soos enables the capture tooling, i.e. it stays
+  dev-only. The bench script builds the fixture example through `cargo build --locked -p
+  soos-test-fixtures --examples` and takes the single example executable from cargo's JSON report,
+  refusing anything but exactly one. This avoids the literal name, but it is an honest design rather than
+  an evasion of intent: (1) it is disclosed openly in the script header, the commit message and
+  walkthrough 248; (2) it does not enable the `readme-capture` feature, touch packaging, or change the
+  fixture crate; (3) CI already compiles that example today (`cargo test` builds examples), so the
+  bench adds no new exposure of the fixture server to any shipped artifact; (4) the exactly-one check
+  fails closed instead of guessing. The residual cost is that the textual scanner no longer sees this
+  consumer (see suggestion 1). Not blocking.
 
 ### Memory, Bounds & Secrets
-- Connection queue bounded (`max_queued` 8), sync channel of 1, variant unwrapping depth-bounded, the
-  portal value never logged (pinned by `gui_motion_contract`). No frame or embedding is touched by motion
-  (the face overlay is explicitly not animated, G9). → PASS.
+- One fixture server per test (60 s lifetime, 5 s start-up wait, SIGKILL at teardown), test timeout 30 s,
+  job timeout 20 min. Bodies are synthetic (no identity, a dummy VAPID-shaped key, no endpoint). No trace,
+  screenshot, video or artifact upload; no `console.log` of page data. No secret is read or passed. PASS.
 
 ### Supply Chain & Automation
-- `zbus`/`tokio` via `workspace = true`, already locked; no new crate, no `.github/` or script change in
-  this diff (#457 is main's). The security guideline sentence names the read-only portal exception.
-  → PASS.
+- Image `mcr.microsoft.com/playwright:v1.64.0-noble@sha256:06a9…971f`, referenced twice through one
+  constant; `@playwright/test` 1.64.0 exact; lockfile v3 with exactly three registry packages and
+  `sha512` integrity, no `hasInstallScript`; `.npmrc` `ignore-scripts=true`, registry pinned;
+  `npm ci --ignore-scripts` with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` (the only networked step); test
+  container with `--network none`, `--cap-drop ALL`, `no-new-privileges`, `--user $(id -u):$(id -g)`,
+  fixture binary and assets mounted `:ro`. PASS.
+- Workflow: `permissions: contents: read`, no `secrets.`, no `pull_request_target`, checkout pinned to
+  the same full SHA as the 19 other uses, `persist-credentials: false`, matrix and step outcome passed
+  through `env:` (no `${{ }}` expression inside a `run:` body), no upload. PASS.
+- Advisory semantics: separate workflow (never a `CI Success` need), `continue-on-error` on the bench
+  step only, outcome written to the job summary and a `::warning` annotation, so a failure is surfaced
+  honestly while the job concludes green. Dependabot npm entry with grouping (title length) and a 7-day
+  cooldown. PASS.
 
 ### English-Only Policy
-- All added text in the diff is English. → PASS.
+- All added code, comments, docs and the commit message are English. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md` `gui-motion` section heading — it still reads "not merged
-  before the owner approves the prototype, UIM7", while UIM7 is now verified on main; main's
-  `remote-motion` heading has the same wording, so this is consistent and harmless. Optional refresh in a
-  later documentation pass.
-- **[SUGGESTION]** `Docs/GUI_APPLICATION.md` §1 tour bullet "Motion: no animation yet … the hook the
-  motion system of #358 / #377 will use" — pre-existing text, unchanged by the rebase; the tour is not in
-  the G1–G10 table, so it is not wrong, but the future tense could be clarified once the motion system is
-  on main.
-
-README GUI captures (`Docs/assets/screenshots/gui-*.png`, last changed in `a3cae16`, #392): still current.
-`test_rac_capture_scenes_match_committed_assets` (RAC1) passes in the test command below.
+1. **[SUGGESTION]** `scripts/remote_browser_tests.sh` (fixture build block) — the RAC15 workaround is
+   honest but makes the textual scanner blind to this consumer. A later owner-approved, additive contract
+   migration that names this script among RAC15's exceptions (instead of avoiding the name) would keep the
+   invariant self-describing.
+2. **[SUGGESTION]** `scripts/remote_browser_tests.sh` (second `docker run`) — the host-built fixture
+   binary runs inside the Ubuntu 24.04 image; on a host with a much newer glibc it could fail to start in
+   the container (it worked here on Arch; on the `ubuntu-24.04` runner the libc matches). Worth one
+   sentence in the CI doc.
+3. **[SUGGESTION]** `scripts/remote_browser_tests.sh` (second `docker run`) — the offline test container
+   mounts `tests/browser` read-write (including `node_modules`); only `test-results/` needs to be writable.
+4. **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md` RPW3 — "Skip stores only the fixed flag": the tour spec
+   asserts the flag's value, not that no other key is written.
+5. **[SUGGESTION]** `Docs/CI_CD_AND_SECURITY.md` "Cargo updates" bullet — "Dependabot covers GitHub
+   Actions and the dev-only npm bench … only" reads awkwardly under a "Cargo updates" heading; consider
+   rewording.
 
 Validation run on the reviewed tree:
-- `LIBONNXRUNTIME_NO_PKG_CONFIG=1 … cargo test --locked -p soos-gui -p soos-invariants --all-features --
-  --test-threads=3`: 40 test binaries, 1200 passed, 0 failed, 0 ignored.
-- `cargo clippy --locked -p soos-gui -p soos-invariants --all-features --all-targets -- -D warnings`: clean.
 - `cargo fmt --all -- --check`: clean.
+- `cargo test --locked -p soos-invariants -- --test-threads=3`: 871 passed, 0 failed, 0 ignored
+  (includes RPW-S1 to RPW-S5, RAC15 and the portable-crates advisory contract).
+- `shellcheck scripts/remote_browser_tests.sh` (koalaman/shellcheck:stable): clean.
+- `./scripts/remote_browser_tests.sh -- --project=chromium`: 18 passed.
 
 ## 5. Final Verdict
 

@@ -984,6 +984,23 @@ sentence and nothing stays subscribed (`soos-remote push list` unchanged); RXB20
 window (Chrome incognito and Firefox private): the matching push sentence while status and lock
 keep working.
 
+**Automated cross-engine bench** (GitHub #464, PR 2 of #355; advisory): `tests/browser` runs the
+page on Chromium, Firefox and WebKit with Playwright, through `scripts/remote_browser_tests.sh`
+(the official Playwright image pinned by digest, the npm lockfile with integrity hashes, the
+tests in a container with no network). The pages come from the loopback-only README fixture
+server of `tests/fixtures` (synthetic scenes, fixed clock), never from a real companion or the
+owner's data. It covers the sign-in screen (RPW1); the status, alerts, offline history and
+battery cards (RPW2); the feature tour shown once and again with blocked site data (RPW3);
+motion under `prefers-reduced-motion` (RPW4); and the per-feature messages when WebAuthn,
+`EventSource`, push or the service worker is removed before the page loads (RPW5). Every test
+also fails on an uncaught page error. The Linux WebKit build of Playwright has no
+`navigator.credentials`, so on WebKit the page shows the passkey sentence by itself; the
+positive sign-in test gives it a stub that never answers a ceremony. Not covered yet: the real
+`soos-remote` binary behind a test TLS proxy, its CSP header, passkey ceremonies (CDP virtual
+authenticator), push delivery and mobile emulation. The CI job is advisory
+(`Docs/CI_CD_AND_SECURITY.md`); the owner hardware rows above stay the evidence for real
+browsers and devices.
+
 ## 2j. Offline history and back-online notifications (off by default, on after `scripts/setup.sh`)
 
 ADR 2026-10-13 "Offline History and Back-Online Push Notifications in `soos-remote`" (GitHub #376,

@@ -118,6 +118,7 @@ soos/
 │   ├── fixtures/           # soos-test-fixtures: synthetic frames, PAD presentations, ONNX graphs
 │   ├── docker/             # Dockerized PAM matrix (pam_test_runner)
 │   ├── distro/             # per-distribution package validation
+│   ├── browser/            # dev-only Playwright bench of the soos-remote web app
 │   └── physical/           # real-hardware validation suite
 └── AI/                     # AI documentation and walkthroughs
 ```

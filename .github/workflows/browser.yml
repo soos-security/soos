@@ -1,0 +1,85 @@
+# =============================================================================
+# Browser — Playwright bench of the soos-remote web app (advisory)
+# =============================================================================
+# GitHub #464 (PR 2 of #355); owner decision of 2026-10-21 on #355; ADR
+# 2026-10-13 "Browser Support Policy for the `soos-remote` Web App", amendment
+# of 2026-10-21. Runs tests/browser on Chromium, Firefox and WebKit (one job
+# per engine) through scripts/remote_browser_tests.sh: the official Playwright
+# image pinned by digest (Node and browser builds included), the npm lockfile
+# with integrity hashes (`npm ci --ignore-scripts`), and the tests themselves
+# with `--network none` against the loopback-only fixture server of
+# tests/fixtures (synthetic scenes, fixed clock).
+#
+# Advisory at first: a separate workflow, so never a CI Success dependency,
+# and not in ADVISORY_CHECKS of scripts/pr_checks_gate.sh (that list keeps
+# exactly two entries). The bench step has step-level `continue-on-error`, so
+# each job concludes green whatever the bench result; the result is the bench
+# step outcome, the job summary line and a warning annotation. Promotion to a
+# required check removes `continue-on-error` and nothing else: the gate of
+# scripts/pr_loop.sh then blocks on a failed job like on any other check.
+# No secrets, read-only token, actions pinned to full commit SHAs, nothing
+# uploaded (no trace, screenshot or video is recorded).
+# =============================================================================
+
+name: Browser
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/remote/assets/**"
+      - "tests/browser/**"
+      - "tests/fixtures/**"
+      - "scripts/remote_browser_tests.sh"
+      - ".github/workflows/browser.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/remote/assets/**"
+      - "tests/browser/**"
+      - "tests/fixtures/**"
+      - "scripts/remote_browser_tests.sh"
+      - ".github/workflows/browser.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  remote-browsers:
+    name: "Remote web app (${{ matrix.engine }}, Playwright, advisory)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install --profile minimal && rustc --version
+
+      - name: Playwright bench (advisory, never blocks)
+        id: bench
+        continue-on-error: true
+        env:
+          ENGINE: ${{ matrix.engine }}
+        run: ./scripts/remote_browser_tests.sh -- --project="$ENGINE"
+
+      - name: Advisory result
+        if: always()
+        env:
+          ENGINE: ${{ matrix.engine }}
+          OUTCOME: ${{ steps.bench.outcome }}
+        run: |
+          echo "soos-remote browser bench on ${ENGINE}: ${OUTCOME} (advisory)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$OUTCOME" != "success" ]]; then
+            echo "::warning title=Advisory browser bench::${ENGINE}: ${OUTCOME}; see the bench step log (advisory, does not block)"
+          fi
