@@ -113,6 +113,14 @@ scripts/capture_readme_assets.sh   # refresh MANIFEST.toml afterwards
   fails also fails the script, and the exit trap stops a run still going. Four bounded runs per
   scene (4 × 50 s = 200 s) fit in the server's 240 s lifetime. Rerun the script after a timeout;
   the PNGs already written are byte-identical to a clean run's (RAC24).
+- **No browser process outlives the script**: Chrome forks renderer, GPU, zygote and utility
+  children. Each browser run starts with job control on (`set -m`, switched off again by
+  `await_browser`), so it is its own process group, and the whole group is ended after every run,
+  on a timeout and from the exit trap (`end_browser_group`: SIGTERM, SIGKILL when a member is still
+  there `BROWSER_KILL_AFTER_S` seconds later). `await_browser` waits with the `wait` builtin, so
+  Ctrl-C (INT) and TERM stop the script at once (status 130 and 143) through the same exit trap.
+  Chrome's crashpad handlers start their own session and exit on their own. The capture output is
+  unchanged (RAC25).
 - **First-run tour**: the web app's feature tour (ADR 2026-10-17, GitHub #414/#418) opens on a fresh
   browser profile and would cover the page. The browser therefore first opens the fixture page
   `/readme/tour-seen` (`soos_test_fixtures::readme_web::TOUR_SEEN_PAGE`), which sets the app's own
