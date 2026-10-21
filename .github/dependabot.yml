@@ -1,12 +1,14 @@
 # =============================================================================
-# Dependabot — keeps SHA-pinned GitHub Actions current (security patches).
+# Dependabot — keeps SHA-pinned GitHub Actions and the dev-only npm bench
+# (tests/browser) current (security patches).
 # =============================================================================
 # A 7-day cooldown avoids adopting a release in the window where a compromised
 # action version is typically detected and yanked.
 # Dependabot PRs go through the same gates as any other PR, including the
 # fingerprint-bound candid review (push the report onto the Dependabot branch).
-# Commit prefix "ci(deps)" keeps PR titles compliant with Conventional Commits,
-# which CI validates because the PR title becomes the squash commit subject.
+# Commit prefixes "ci(deps)" (actions) and "test(deps)" (npm bench) keep PR
+# titles compliant with Conventional Commits, which CI validates because the
+# PR title becomes the squash commit subject.
 # A title longer than 72 characters (e.g. many grouped updates) fails the
 # PR Title check: retitle the PR by hand before merging.
 # Cargo dependencies are intentionally not auto-bumped: deny.toml enforces
@@ -27,4 +29,22 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "ci"
+      include: scope
+  # Dev-only Playwright bench of the soos-remote web app (GitHub #464). A bump of
+  # @playwright/test must land with the matching image digest in
+  # scripts/remote_browser_tests.sh (remote_playwright_contract fails otherwise).
+  # Prefix "test(deps)": the bench is test tooling. The group keeps the title
+  # within 72 characters; an ungrouped "bump @playwright/test from X to Y in
+  # /tests/browser" title would exceed it.
+  - package-ecosystem: npm
+    directory: /tests/browser
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      playwright:
+        patterns: ["*"]
+    commit-message:
+      prefix: "test"
       include: scope

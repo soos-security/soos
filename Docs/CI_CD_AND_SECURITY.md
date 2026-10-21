@@ -89,6 +89,41 @@ advisory check is the job named "Portable crates (macOS, non-required)", matched
 `CI Success` the gate runs once more and only `0` merges. Pinned by
 `portable_crates_contract::{test_mac_pr_loop_treats_only_the_macos_job_as_advisory,test_mac_pr_checks_gate_decisions}`.
 
+### Advisory Browser Bench Workflow (GitHub #464)
+`.github/workflows/browser.yml` runs the Playwright bench of the `soos-remote` web app
+(`tests/browser`, ADR 2026-10-13 "Browser Support Policy for the `soos-remote` Web App",
+amendment of 2026-10-21) on pull requests and pushes that touch `crates/remote/assets`,
+`tests/browser`, `tests/fixtures`, `scripts/remote_browser_tests.sh` or the workflow. One job per
+engine (Chromium, Firefox, WebKit), `fail-fast: false`, read-only token, no secret, checkout
+without persisted credentials, actions pinned to full commit SHAs, nothing uploaded.
+
+- **Pinning**: `scripts/remote_browser_tests.sh` names the official image
+  `mcr.microsoft.com/playwright:v<version>-noble@sha256:<digest>` (the digest of the
+  multi-architecture index; the image carries Node, npm and the browser builds of that release).
+  `tests/browser/package.json` pins `@playwright/test` to the same exact version and the Node
+  version; `tests/browser/package-lock.json` (lockfile v3) holds the three Playwright packages
+  with `sha512` integrity hashes and no install script; `tests/browser/.npmrc` sets
+  `ignore-scripts=true`. A version bump changes the package, the lockfile and the image tag and
+  digest together (`remote_playwright_contract` fails otherwise). Dependabot watches the npm
+  ecosystem of `tests/browser` with a 7-day cooldown.
+- **Isolation**: the script runs `npm ci --ignore-scripts` in the image (the only step with
+  network, fetching pinned packages from the npm registry), then `playwright test` in a second
+  container with `--network none`, as the calling user, with every capability dropped and
+  `no-new-privileges`. The pages come from the loopback-only fixture server of `tests/fixtures`
+  (synthetic scenes, fixed clock), built on the runner and mounted read-only. No trace,
+  screenshot or video is recorded.
+- **Advisory semantics**: the workflow is separate from `ci.yml`, so its jobs are never a
+  `CI Success` dependency, and its job names are not in `ADVISORY_CHECKS` of
+  `scripts/pr_checks_gate.sh` (which keeps exactly its two entries). Instead, the bench step has
+  step-level `continue-on-error: true`: each job concludes green whatever the bench result, so
+  `scripts/pr_checks_gate.sh` never blocks on it. The result is the bench step outcome, a job
+  summary line and a `::warning` annotation when it did not succeed. Promotion to a required
+  check removes `continue-on-error` and nothing else: the gate then blocks on a failed job like
+  on any other check. Enforced by `soos-invariants::remote_playwright_contract::*`.
+- **Local run**: `scripts/remote_browser_tests.sh` (Docker required; it builds the fixture server
+  with `cargo build --locked`, or takes `--fixture-server <path>`), with extra Playwright
+  arguments after `--`, for example `-- --project=webkit`.
+
 ### Docker Workspace Isolation and Base Images (GitHub #308, #316)
 - Every container that bind-mounts the checkout read-write (`run_tests.sh`, `tests/docker/run_matrix.sh`,
   `tests/distro/run_distro_validation.sh`, the `pam-integration`, `package-deploy` and `distro-deploy`
@@ -296,7 +331,7 @@ The [`deny.toml`](../deny.toml) configuration enforces strict third-party depend
 - **Sources**: Only the official `crates.io` index is permitted (no unverified git repositories or alternate registries).
 - **Duplicates**: `multiple-versions = "deny"`; every tolerated duplicate is listed in `skip` with a reason that names the direct dependents of the skipped version, as printed by `cargo tree --locked -i <crate>@<version> --target all -e normal,build,dev --depth 1`. A version used directly by a workspace crate is never described as transitive, and every version of a crate locked three times is documented in `deny.toml` (enforced by `tests/invariants/src/dependency_tooling_contract.rs`, GitHub #243). Rewrite the reason whenever `cargo update` changes who pulls the old version in.
 - **Pre-release pins**: a pre-release workspace dependency is pinned with `=` (today `ort = "=2.0.0-rc.13"`), so a `cargo update` never adopts the API changes of the next release candidate silently; upgrade it deliberately and rerun the real-model tests. Workspace crates use `getrandom` 0.4 (0.2 and 0.3 remain only through `rand_core` and `ahash`).
-- **Cargo updates**: Dependabot covers GitHub Actions only; crate updates go through the normal dev-workflow (see `.github/dependabot.yml`).
+- **Cargo updates**: Dependabot covers GitHub Actions and the dev-only npm bench of `tests/browser` (grouped `test(deps): ...` titles, 7-day cooldown; a `@playwright/test` bump must also move the image digest of `scripts/remote_browser_tests.sh` by hand) only; crate updates go through the normal dev-workflow (see `.github/dependabot.yml`).
 - **Banned Crates**: `opencv` and `nokhwa` (see [`AI/ARCHITECTURE.md`](../AI/ARCHITECTURE.md)).
 
 To execute the security audit locally (cargo-deny ≥ 0.20):

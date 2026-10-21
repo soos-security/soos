@@ -77,3 +77,10 @@ android/captures/
 android/.kotlin/
 *.apk
 *.aab
+
+# ---------------------------------------------------------------------------
+# soos-remote Playwright bench (GitHub #464): npm install tree and run output
+# ---------------------------------------------------------------------------
+tests/browser/node_modules/
+tests/browser/test-results/
+tests/browser/playwright-report/

@@ -548,6 +548,16 @@ mod lockscreen_installer_contract;
 #[cfg(all(test, unix))]
 mod remote_motion_contract;
 
+/// Playwright cross-engine bench of the `soos-remote` web app: pinned toolchain (exact
+/// `@playwright/test`, integrity-hashed lockfile without install script, official image by
+/// digest, `npm ci --ignore-scripts`, offline test run), a separate advisory workflow outside
+/// `CI Success` and `ADVISORY_CHECKS`, specs covering the RXB behaviours on Chromium, Firefox and
+/// WebKit against the loopback fixture server only, dev-only scope and documentation (GitHub
+/// #464, PR 2 of #355; amendment of 2026-10-21 to ADR 2026-10-13 "Browser Support Policy for
+/// the `soos-remote` Web App"; rows RPW1-RPW9).
+#[cfg(all(test, unix))]
+mod remote_playwright_contract;
+
 /// `soos-gui` motion system: zbus and Tokio confined to the read-only XDG portal reader thread
 /// (`Settings.ReadOne` / `Read` on `org.freedesktop.portal.Desktop` only, no object server, name
 /// or match rule), the manifest lines, the portal value never logged, and the security
