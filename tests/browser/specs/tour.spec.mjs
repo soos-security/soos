@@ -12,6 +12,8 @@ test("the tour shows once, then is remembered", async ({ page, app }) => {
   expect(await page.evaluate((key) => window.localStorage.getItem(key), TOUR_STORAGE_KEY)).toBe(
     TOUR_STORAGE_SEEN,
   );
+  // Skip writes the fixed flag and no other storage key.
+  expect(await page.evaluate(() => Object.keys(window.localStorage))).toEqual([TOUR_STORAGE_KEY]);
   await page.reload();
   await expect(page.locator("#state")).toHaveText("Unlocked");
   await expect(page.locator("section.tour")).toBeHidden();
