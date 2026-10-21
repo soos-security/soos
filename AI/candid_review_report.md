@@ -1,105 +1,84 @@
 # Candid Review Report
 
 - **Date**: 2026-10-21
-- **Target Branch**: `test/setup-scanner-lexer`
-- **Base (merge-base)**: `6492eb1`
-- **Reviewed-Diff-Fingerprint**: `f426aadc491edaf66320a16d633a2080ceaebcb2a7c22223d83ea772b0bbd64c`
-- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/251_setup_scanner_lexer.md`, `tests/invariants/src/setup_scanner_contract.rs`
+- **Target Branch**: `dependabot/github_actions/actions-4430c5f07e` (Dependabot PR #466)
+- **Base (merge-base)**: `fdf6039` (`origin/main` is now `ecfefa4`, which does not touch `.github/`)
+- **Reviewed-Diff-Fingerprint**: `e5f4213760da1f2c24b7876f952577a391fa0c6679bd1b2116b7c2fe9a50ae41`
+- **Audited Files**: `.github/workflows/android.yml`
 
 ## 1. Executive Summary
 
-Test-only change (commit 2b57f7f: 5fef852, an amendment of 980b2ca after a first
-CHANGES_REQUESTED review, rebased onto `origin/main` 6492eb1 after #468 merged). The static shell lexer behind SCN1-SCN5 now returns `Result` (`try_lex`, nesting
-capped at 64), reads `(( ))` / `$(( ))` as arithmetic, follows `case ... esac` inside `$( )`,
-keeps a command-position `[[ ... ]]` as one command, checks Tailscale words after quote removal
-too, and adds SCN7 (command words built from variables must expand only script-assigned
-variables). New tests SCN6-SCN12, matrix rows SCN6-SCN12, walkthrough 251. No production code,
-PAM, IPC, daemon or `scripts/setup.sh` change. No CRITICAL or MAJOR finding remains.
+The diff changes one pinned GitHub Action reference and nothing else:
+
+- `.github/workflows/android.yml:50` — `actions/setup-java` `de7274f081f381c8f8158605e0321c36c376e2e6`
+  (v6.0.1) → `b843ebf9b913146b38da2eaa7aeddf76074ae1ad` (v6.1.0).
+
+The new SHA was independently resolved against the upstream repository and matches the tag named in the
+trailing comment. No Rust code, test, script, hook or permission block is touched. No findings.
 
 ## 2. Test Changes
 
-- Rebase check (ecfefa4 to 6492eb1): the sorted `+`/`-` lines of the review diff are identical
-  before and after the rebase; `setup_scanner_contract.rs` and walkthrough 251 are
-  byte-identical to the reviewed 5fef852; the matrix diff is still the 7 added rows SCN6-SCN12
-  (no line removed, RAC25 from #468 intact); no conflict marker. Only diff context moved.
+Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: `tests/invariants/src/setup_scanner_contract.rs` only.
-- SCN1-SCN5 and the `words` helper are byte-identical to `origin/main` (the region from the
-  `// Tests` banner to the end of `test_scn5_traceability` diffs empty).
-- Removed `assert!`/`assert_eq!` lines in the patch are all inside the lexer implementation
-  (the old `list`, `heredoc_bodies` and `lex` internal panics), replaced by `Err` returns that
-  `lex` turns back into a panic with the reason. No test assertion was removed or relaxed.
-- New escape hatches (`#[ignore]`, skips, tolerances): **none**.
-- Added tests: SCN6-SCN12, each with rejected and accepted synthetic inputs, then run on the
-  real `setup.sh` where relevant.
+- Test files touched: none (only `.github/workflows/android.yml` appears in `diff --git` headers).
+- Removed or changed assertions: none (0 matches).
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
+- Inline test modules: none.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-Differential check, old lexer (`origin/main`) versus new (5fef852), on SCN2, SCN3, SCN4 and
-`unit_assignments`, over about 50 adversarial inputs, with the bash semantics confirmed using
-stub functions:
-
-- First review's blocking input (`echo [[` then `run_bounded "${UNIT_START_TIMEOUT_S}"` then
-  `systemctl start soos-daemon` on separate lines) at top level, in `$( )` and in backticks:
-  SCN4 now rejects it, as on `origin/main`. Variations `then [[`, `! [[`, `{ [[ a ]]; }`,
-  `time [[`, `[[ a ]];systemctl start`, `[[ a ]]&&`, `]]||`, `]]|`, `echo ]]`, `echo ]] [[`,
-  `[[ $x == ]] ]]`, `echo "[["`, a `[[)` case pattern, `$( [[ $(systemctl start ...) ]] )` and
-  nested `$( [[ $( [[ a ]] && tailscale up ) ]] )`: identical verdicts old versus new.
-- Arithmetic: `(( $(tailscale up) ))`, `$(( $(tailscale) ))`, `` `(( $(tailscale up) ))` ``,
-  `for (( ...; i<$(tailscale up); ... ))` are still rejected. `$((tailscale up) )`,
-  `$((echo a);(tailscale up))` and `((a) ; tailscale up)` fall back to subshells as bash does.
-  `echo $((tailscale up))` and `$(((echo a);(tailscale up)))` are no longer SCN2 findings, which
-  is correct: bash reads both as arithmetic and runs nothing (verified).
-- `case` inside `$( )`: three bodies the old lexer missed silently are now rejected.
-- Quote-removal union in `tailscale_commands` only adds findings.
-- SCN7: unquoted expansions no longer qualify for the fixed-program exception
-  (`$TS/x run` and `X="$TS/bin/tool"; $X up` both run `tailscale` when
-  `TS='tailscale serve '`). `eval`, `xargs`, `nice`, `setsid` and `stdbuf` are followed.
+- Scenario: the new SHA does not correspond to the commented tag (a mislabelled or attacker-supplied pin).
+  Checked with `gh api repos/actions/setup-java/git/ref/tags/v6.1.0` → commit
+  `b843ebf9b913146b38da2eaa7aeddf76074ae1ad` (lightweight tag, object type `commit`); the moving `v6` tag
+  points at the same commit. The old pin resolves to `v6.0.1`. The commit carries a GitHub-verified
+  signature. PASS.
+- Scenario: the upstream delta changes how our step resolves the JDK. Compare `v6.0.1...v6.1.0` is 9
+  commits ahead, 0 behind. The only Temurin resolution change (#1279, JEP 322 patch versions) adds an
+  extra OR-branch for exact build requests matched against the OpenJDK version fields; the previous
+  `isVersionSatisfies` match is kept, so the pinned `java-version: "17.0.16+8"` resolves as before. The
+  PR's "Android (debug build)" job is green with the new pin. PASS.
+- Scenario: input names change and break the step. `action.yml` only adds optional inputs
+  (`mvn-server-repository-origins`, `mvn-plugin-repositories`) and a `riscv64` architecture note; our
+  inputs (`distribution`, `java-version`) are unchanged. PASS.
 
 ### PAM Concurrency & Deadlines
-
-Not applicable (no PAM code).
+- Not applicable: no change under `crates/pam` or any runtime code. PASS.
 
 ### Panic Safety & Fail-Closed
-
-`try_lex` never panics: recursion is bounded by `MAX_NESTING` through `nested()`, the cache of
-start positions found not to be arithmetic prevents re-reading, and index reads are
-bounds-checked. The new `Err` paths (`;` inside an open test, a test or `case` left open when
-`$( )`, backticks or the script end) are bash syntax errors too. `setup.sh`, which has 326 lines
-containing `[[`, lexes without error (SCN7 and SCN12 read it).
+- Not applicable: no production Rust code changed. PASS.
 
 ### Test Integrity & Anti-Weakening
-
-Confirmed: no existing test changed, and no regression where the old scanners flagged an input
-the new ones accept, except the arithmetic cases above that bash does not execute.
+- No test touched (section 2). `cargo test --locked -p soos-invariants -- --test-threads=3` on the
+  reviewed tree: 871 passed, 0 failed. PASS.
 
 ### Memory, Bounds & Secrets
-
-Reads one repository file; no process, network or write; no secret handled.
+- Credentials: the `src/auth.ts` changes (#1282, #1286) only add opt-in Maven repository-origin and
+  plugin-repository generation; with the new inputs unset, the generated `settings.xml` server entry is
+  built exactly as before (default server id and env var names, no secret values). The Android build uses
+  Gradle, not Maven, and no secret is passed to the step. PASS.
+- Signature verification: #1273 stops the GPG agent before removing the temporary verification home, a
+  cleanup hardening with no change to what is verified. PASS.
 
 ### Supply Chain & Automation
-
-No dependency or workflow change.
+- Pinning: the reference remains a full 40-hex commit SHA with a version comment. PASS.
+- Runtime: `runs.using` is `node24` in both v6.0.1 and v6.1.0 (no runtime change). PASS.
+- Bundled dependency updates: `undici` 6.28.0 → 6.29.0 and a monthly npm group bump are compiled into
+  `dist/`; upstream CI built and tagged them. Accepted risk consistent with pinning a first-party
+  `actions/*` release by SHA. PASS.
+- Cooldown: v6.1.0 was published 2026-10-14T20:17Z; Dependabot opened the PR on 2026-10-21T08:06Z under
+  the configured `cooldown.default-days: 7` (day granularity). No newer release, retraction or yank was
+  observed at review time; v6.1.0 is still the latest release. Note: the full 7×24 h window closes at
+  2026-10-21T20:17Z. Non-blocking. PASS.
+- Permissions: workflow-level permissions in `android.yml` are unchanged; no new
+  `${{ github.event.* }}` interpolation in `run:`. PASS.
 
 ### English-Only Policy
-
-All code, docs and the commit message are in English; the commit follows Conventional Commits
-with the trailer.
+- The diff contains only a SHA and an English version comment. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- RESOLVED (was MAJOR, 980b2ca): `[[` test mode on any word merged lines and let SCN4 miss an
-  unbounded `systemctl start`; fixed, pinned by SCN11.
-- RESOLVED (was MINOR): the SCN7 fixed-program exception could be abused by unquoted
-  expansions; fixed, pinned by SCN12.
-- MINOR (documented, not blocking): wrappers not followed by SCN7 (`bash -c`, `sh -c`,
-  `su -c`, `runuser`, `flock`, `chroot`, `find -exec`); top-level `"${X}/bin/tailscale" up`
-  remains a pre-existing gap of SCN7 and SET41. Both are recorded in walkthrough 251.
-
-Gates: `cargo fmt --all -- --check` OK; `cargo clippy -p soos-invariants --all-targets -- -D
-warnings` OK; `cargo test --locked -p soos-invariants -- --test-threads=3` 878 passed, 0 failed (re-run after the rebase).
+None.
 
 ## 5. Final Verdict
 
