@@ -6,8 +6,8 @@
 - **Branch**: `chore/android-owner-checks`
 - **Decision**: none new; the owner decisions taken during the test (one-command setup, push sender
   as a system service) are recorded on GitHub #362 and handled by their own pull requests.
-- **Matrix criteria**: ANA15 verified by the owner; ANA18, ANA19, ANA22, ANA23, ANA24, AAF1,
-  AHB4, AHB5, AHB6, ATR1 verified by CI; RAN12, RDB10, ANA26, AAF4 partially verified and ATR9,
+- **Matrix criteria**: ANA18, ANA19, ANA22, ANA23, ANA24, AAF1,
+  AHB4, AHB5, AHB6, ATR1 verified by CI; RAN12, RDB10, ANA26, AAF4, ANA15 partially verified and ATR9,
   ANA14 reported OK without item-by-item detail (all still pending); ANA16, ANA21, AHB8 not tested
   yet.
 
@@ -24,7 +24,7 @@ mostly over Funnel with the Tailscale app turned off (the owner does not want to
 | RAN12 | Parts 1–2 OK: Chrome *Install app*, passkey enrolment with `soos-remote enroll-code`, sign-in over Funnel. Push parts not tested (push off, see §3). |
 | RDB10 | Android OK: unlock and camera start went straight to the biometric prompt over Funnel. iPhone part not tested. |
 | ATR9, ANA14 | The owner reported "everything works" after the guided step covering the tour and the fingerprint sign-in, without an item-by-item report; kept pending until each clause is confirmed. |
-| ANA15 | OK: icon, themed icon and blue header in light and dark mode (as reported by the owner). |
+| ANA15 | Icon, themed icon and blue header in light and dark mode reported OK; the system bars are still to confirm. |
 | AAF4 | First clause OK: "Acknowledged." disappears on refresh. The expired-session clause is still to check. |
 | ANA26 | Battery card OK (follows the charger). Offline history card shows "off" because `offline_alerts = false`. |
 | ANA16 | Not applicable to this owner setup (no Tailscale app on the phone); still pending. |
