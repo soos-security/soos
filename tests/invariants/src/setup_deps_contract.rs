@@ -1773,6 +1773,20 @@ fn test_sdp16_user_android_block_carried_over() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(fs::read_to_string(h.remote_toml()).unwrap(), written);
     assert!(text(&out).contains("[PLAN] companion config: already done"));
+
+    // The documented hand-written block (Docs/REMOTE_COMPANION.md, trailing comments) is
+    // carried over too; the comments are not.
+    let h = Harness::new("b12doc");
+    h.user_file(&format!(
+        "allowed_logins = [\"{USER_LOGIN}\"]\nrp_id = \"{RP_ID}\"\n\n[android]   # the app\npackage = \"org.soos.remote\"\nsha256_cert_fingerprints = [\"{FP_A}\"]   # 1 or 2 entries, upper-case, 32 pairs\n"
+    ));
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(h.remote_toml()).unwrap(),
+        managed(LOGIN, [true; 7], &[FP_A])
+    );
+    assert!(!text(&out).contains("not carried over (see the backup)"));
 }
 
 /// SDP17 (SDP-B13): a binding (carried over or managed) while Funnel resolves off (`--funnel

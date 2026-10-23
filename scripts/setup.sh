@@ -1524,7 +1524,7 @@ report_name() {
 # USER_BOOL_PRESENT, USER_UNRECOGNIZED, USER_DROPPED_KEYS, and FILE_ANDROID_FPS when the file
 # ends with an [android] table of the strict grammar (USER_ANDROID_DROPPED otherwise).
 parse_user_remote_config() {
-    local line key inner top=true android=0 strict=true name
+    local line norm key inner top=true android=0 strict=true name
     local re_key='^[[:space:]]*([A-Za-z0-9_-]+)[[:space:]]*='
     local re_login='^[[:space:]]*allowed_logins[[:space:]]*=[[:space:]]*\[[[:space:]]*"([^"]*)"[[:space:]]*\][[:space:]]*(#.*)?$'
     local re_rp='^[[:space:]]*rp_id[[:space:]]*=[[:space:]]*"([^"]*)"[[:space:]]*(#.*)?$'
@@ -1540,15 +1540,20 @@ parse_user_remote_config() {
     USER_DROPPED_KEYS=()
     USER_ANDROID_DROPPED=false
     while IFS= read -r line || [[ -n "${line}" ]]; do
+        # Table lines are compared without a trailing comment and surrounding blanks (the
+        # documented [android] example carries one); no value contains `#`.
+        norm="${line%%[[:space:]]#*}"
+        norm="${norm#"${norm%%[![:space:]]*}"}"
+        norm="${norm%"${norm##*[![:space:]]}"}"
         if [[ "${line}" =~ ^[[:space:]]*\[ ]]; then
-            if [[ "${top}" == true && "${line}" == "[android]" ]]; then
+            if [[ "${top}" == true && "${norm}" == "[android]" ]]; then
                 android=1
             else
                 strict=false
             fi
             top=false
             [[ "${line}" =~ ${re_android} ]] && USER_ANDROID_DROPPED=true
-            name="$(report_name "${line}")"
+            name="$(report_name "${norm}")"
             if [[ "${name}" != android ]]; then
                 name="[${name}]"
                 dropped[${name}]=1
@@ -1558,8 +1563,8 @@ parse_user_remote_config() {
         [[ "${line}" =~ ^[[:space:]]*(#.*)?$ ]] && continue
         if [[ "${top}" != true ]]; then
             case "${android}" in
-                1) [[ "${line}" == "package = \"${ANDROID_PACKAGE}\"" ]] && android=2 || strict=false ;;
-                2) parse_android_fps "${line}" && android=3 || strict=false ;;
+                1) [[ "${norm}" == "package = \"${ANDROID_PACKAGE}\"" ]] && android=2 || strict=false ;;
+                2) parse_android_fps "${norm}" && android=3 || strict=false ;;
                 *) strict=false ;;
             esac
             continue
