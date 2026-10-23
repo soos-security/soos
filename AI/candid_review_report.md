@@ -3,7 +3,7 @@
 - **Date**: 2026-10-23
 - **Target Branch**: `fix/push-sender-system-service`
 - **Base (merge-base)**: `c3ad0ee`
-- **Reviewed-Diff-Fingerprint**: `618c3ffd099407b19ce2f4c44a1870ddd6cc0757446b761d796df93c21499001`
+- **Reviewed-Diff-Fingerprint**: `69d90c05ab33836a43dba42a2ba6f33f77b87b132d1e42a1d56daeb5d32f8d1e`
 - **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`,
   `.github/workflows/ci.yml`, `AGENTS.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`,
   `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_push_sender_system_service.md`,
@@ -38,7 +38,7 @@ re-run on this tree: `cargo fmt --check`, workspace clippy (all targets/features
 warnings`), tests of push-protocol, push-sender, remote, gui and soos-invariants (96 suites, 0
 failed), shellcheck (no finding beyond those already on `origin/main`), and
 `tests/docker/push_sender_system_unit_test.sh` (all 7 cases pass, `systemd-analyze security`
-exposure 1.4). Remaining findings are MINOR only.
+exposure 1.4). Rebind after 28e2f98: three log-label strings of the branch-new PSS12 tests now use the harness's fixed role label `uid=1000` (the stub prologue always logs user calls as `uid=1000`; the previous `uid=<real uid>` failed on CI runners with uid 1001) and one unused `let uid` is removed; socket names still use `real_uid()`, matching setup's `TARGET_UID`. No assertion was dropped or loosened; soos-invariants re-run green (896 passed) with clippy clean. Remaining findings are MINOR only.
 
 ## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
@@ -63,6 +63,7 @@ additions):
   `STUB_SYSTEM_OFF_UNIT`. Owner-approved.
 - Stub knobs `STUB_USER_DIE_UNIT` / `STUB_SYSTEM_OFF_UNIT` are inert when unset (the latter
   guarded by `-n`), so no other test can pass vacuously.
+- 28e2f98 changes only branch-new PSS12 tests (`test_pss12_setup_enables_the_system_sender_not_the_user_unit`, `test_pss12_setup_disables_a_legacy_user_unit`): the same lines are still required, with the fixed `uid=1000` role label instead of the real uid; nothing is weakened.
 - The round-2 commits (bca9e03..2247134) remove no test line at all; they add PSS16-PSS19
   invariants and Docker case 7. No `#[ignore]`, `should_panic`, tolerance or inline
   `mod tests` change in the patch.
