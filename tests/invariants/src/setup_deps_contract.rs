@@ -2110,3 +2110,255 @@ fn test_sdp24_docs_adr_matrix_walkthrough() {
         "walkthrough 256 must exist"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Candid review of PR A (2026-10-23): B1, N1, N2, N4 (rows SDP27-SDP29)
+// ---------------------------------------------------------------------------
+
+/// SDP27 (review B1, N4): quoted keys (`"allow_funnel" = false`, `'allow_unlock' = false`,
+/// valid TOML that soos-remote accepts) are read like bare keys, so a written `false` is never
+/// turned on; a top-level line that is not parsed but names a feature key (a quoted key with an
+/// unrecognized value, a line inside a multi-line string or array, whose `[` lines are not
+/// table headers) turns that key off and names it once ("value not recognized"), never the
+/// value.
+#[test]
+fn test_sdp27_quoted_keys_and_unparsed_lines_fail_safe() {
+    for (tag, body, expected, unrecognized) in [
+        (
+            "dquote",
+            "\"allow_funnel\" = false\n",
+            [false, true, true, true, true, true, false],
+            None,
+        ),
+        (
+            "squote",
+            "'allow_unlock' = false # mine\n",
+            [true, false, true, true, true, true, true],
+            None,
+        ),
+        (
+            "quotedbad",
+            "\"camera_view\"=maybe\n",
+            [true, true, true, true, true, false, false],
+            Some("camera_view"),
+        ),
+        (
+            "mlstring",
+            "note = \"\"\"\n[not a table]\nallow_funnel = false\n\"\"\"\nallow_unlock = false\n",
+            [false, false, true, true, true, true, false],
+            Some("allow_funnel"),
+        ),
+        (
+            "mlarray",
+            "lock_screen_programs = [\n  [\"swaylock\"],\n]\npush_notifications = false\n",
+            [true, true, true, false, false, true, true],
+            None,
+        ),
+        (
+            "twice",
+            "allow_funnel = nope\nallow_funnel = also-nope\n",
+            [false, true, true, true, true, true, false],
+            Some("allow_funnel"),
+        ),
+    ] {
+        let h = Harness::new(&format!("b1{tag}"));
+        h.user_file(&format!(
+            "allowed_logins = [\"{USER_LOGIN}\"]\nrp_id = \"{RP_ID}\"\n{body}"
+        ));
+        let out = h.run_companion(&[]);
+        assert_eq!(code(&out), 0, "{tag}: {}", text(&out));
+        assert_eq!(
+            fs::read_to_string(h.remote_toml()).unwrap(),
+            managed(LOGIN, expected, &[]),
+            "{tag}"
+        );
+        let t = text(&out);
+        if let Some(key) = unrecognized {
+            let needle = format!("kept off (value not recognized): {key}");
+            assert_eq!(
+                t.matches(&needle).count(),
+                2,
+                "{tag}: named once in the plan and once in the result: {t}"
+            );
+            let line = t
+                .lines()
+                .find(|l| l.contains("[PLAN] companion config:"))
+                .expect("plan line");
+            let list = &line[line.find("value not recognized").expect("list")..];
+            let list = list.split(';').next().unwrap_or(list);
+            assert_eq!(list.matches(key).count(), 1, "{tag}: deduplicated: {line}");
+        }
+        for value in ["maybe", "nope", "not a table"] {
+            assert!(!t.contains(value), "{tag}: no value printed ({value}): {t}");
+        }
+    }
+}
+
+/// Function bodies of a script written as `name() {` ... `}` at column 0.
+fn function_bodies(script: &str) -> Vec<(String, usize, usize, String)> {
+    let lines: Vec<&str> = script.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(name) = lines[i].strip_suffix("() {") {
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                let start = i;
+                while i < lines.len() && lines[i] != "}" {
+                    i += 1;
+                }
+                let body = lines[start..i.min(lines.len())].join("\n");
+                out.push((name.to_string(), start + 1, i + 1, body));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn has_word(text: &str, w: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .any(|x| x == w)
+}
+
+/// Whether function `name` is guarded for a tool: it holds `guard` or calls a function that
+/// does, or every one of its callers (at least one) is guarded, `depth` levels up.
+fn guarded(
+    name: &str,
+    depth: usize,
+    bodies: &[(String, usize, usize, String)],
+    guard: &str,
+) -> bool {
+    let Some((_, _, _, body)) = bodies.iter().find(|(n, _, _, _)| n == name) else {
+        return false;
+    };
+    let guard_fns: Vec<&String> = bodies
+        .iter()
+        .filter(|(_, _, _, b)| b.contains(guard))
+        .map(|(n, _, _, _)| n)
+        .collect();
+    if body.contains(guard) || guard_fns.iter().any(|g| has_word(body, g)) {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let callers: Vec<&String> = bodies
+        .iter()
+        .filter(|(n, _, _, b)| n != name && has_word(b, name))
+        .map(|(n, _, _, _)| n)
+        .collect();
+    !callers.is_empty() && callers.iter().all(|c| guarded(c, depth - 1, bodies, guard))
+}
+
+/// SDP28 (review N2) scanner: every call of an `optional` tool is guarded by `command -v`:
+/// see [`guarded`]; a top-level call needs the guard on the same line.
+fn unguarded_optional_calls(script: &str, optional: &[&str]) -> Vec<String> {
+    let bodies = function_bodies(script);
+    let mut found = Vec::new();
+    for cmd in lex(script) {
+        let Some(k) = command_word_index(&cmd.words) else {
+            continue;
+        };
+        let tool = unquote(&cmd.words[k]);
+        if !optional.contains(&tool.as_str()) {
+            continue;
+        }
+        let guard = format!("command -v {tool}");
+        match bodies
+            .iter()
+            .find(|(_, s, e, _)| *s <= cmd.line && cmd.line <= *e)
+        {
+            None => {
+                let line = script.lines().nth(cmd.line - 1).unwrap_or("");
+                if !line.contains(&guard) {
+                    found.push(format!(
+                        "line {}: top-level {tool} without a guard",
+                        cmd.line
+                    ));
+                }
+            }
+            Some((name, _, _, _)) => {
+                if !guarded(name, 3, &bodies, &guard) {
+                    found.push(format!(
+                        "line {}: {tool} in {name}() is not guarded by `{guard}`",
+                        cmd.line
+                    ));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// SDP28 (review N2): every call of an `optional` tool of `REQUIRED_TOOLS` is guarded by
+/// `command -v` (synthetic rejects and accepts first, then setup.sh).
+#[test]
+fn test_sdp28_optional_tools_are_guarded() {
+    for (snippet, bad) in [
+        ("f() {\n    loginctl x\n}\nf\n", true),
+        ("loginctl x\n", true),
+        ("g() {\n    f\n}\nf() {\n    loginctl x\n}\n", true),
+        (
+            "f() {\n    command -v loginctl >/dev/null || return 0\n    loginctl x\n}\n",
+            false,
+        ),
+        (
+            "p() {\n    command -v loginctl >/dev/null\n}\nf() {\n    p || return 0\n    loginctl x\n}\n",
+            false,
+        ),
+        (
+            "g() {\n    command -v loginctl >/dev/null || return 0\n    f\n}\nf() {\n    loginctl x\n}\n",
+            false,
+        ),
+    ] {
+        let found = unguarded_optional_calls(snippet, &["loginctl"]);
+        assert_eq!(!found.is_empty(), bad, "{snippet:?}: {found:?}");
+    }
+    let tools = required_tools();
+    let optional: Vec<&str> = tools
+        .iter()
+        .filter(|(_, s)| s.as_str() == "optional")
+        .map(|(t, _)| t.as_str())
+        .collect();
+    assert!(optional.len() >= 5, "{optional:?}");
+    let found = unguarded_optional_calls(&read_repo(SETUP), &optional);
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// SDP29 (review N1): install.sh and uninstall.sh read install.sh's marker on the FIRST line
+/// only (like setup.sh): a file that names it on a later line is the administrator's and kept;
+/// install.sh checks a regular file that is not a link before its journaled copy and removal.
+#[test]
+fn test_sdp29_drop_in_marker_on_the_first_line_only() {
+    let later = "# An administrator's override.\n# Written by scripts/install.sh for --prefix /x (copied)\n[Service]\nEnvironment=X=1\n";
+    let dir = scratch("marker_first");
+    let (stage, art) = (dir.join("stage"), dir.join("art"));
+    artifacts(&art);
+    let drop_in = stage.join(DROP_IN_REL);
+    fs::create_dir_all(drop_in.parent().unwrap()).unwrap();
+    fs::write(&drop_in, later).unwrap();
+    let out = run_install(&stage, &art, &[]);
+    assert!(out.status.success(), "install.sh failed:\n{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(&drop_in).unwrap(),
+        later,
+        "install.sh keeps it"
+    );
+    let out = run_uninstall(&stage, "/usr");
+    assert!(out.status.success(), "uninstall.sh failed:\n{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(&drop_in).unwrap(),
+        later,
+        "uninstall.sh keeps it"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let install = code_of("scripts/install.sh");
+    assert!(
+        install.contains("-f \"${PUSH_SENDER_DROP_IN_DIR}/prefix.conf\" && ! -L \"${PUSH_SENDER_DROP_IN_DIR}/prefix.conf\""),
+        "install.sh checks a regular file, not a link, before the journaled copy and removal"
+    );
+}
