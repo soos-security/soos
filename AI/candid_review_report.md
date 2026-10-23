@@ -1,97 +1,139 @@
 # Candid Review Report
 
 - **Date**: 2026-10-23
-- **Target Branch**: `chore/android-owner-checks`
-- **Base (merge-base)**: `e7826de`
-- **Reviewed-Diff-Fingerprint**: `9ad38a754bb9aba8d395d881aaf35f67a97e5917c5a3f941b4e8289fc3a3d528`
-- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/254_android_owner_checks.md`,
-  `Docs/REMOTE_COMPANION.md`
+- **Target Branch**: `fix/push-sender-system-service`
+- **Base (merge-base)**: `c3ad0ee`
+- **Reviewed-Diff-Fingerprint**: `618c3ffd099407b19ce2f4c44a1870ddd6cc0757446b761d796df93c21499001`
+- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`,
+  `.github/workflows/ci.yml`, `AGENTS.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`,
+  `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_push_sender_system_service.md`,
+  `AI/auditor_constraints_push_sender_system.md`,
+  `AI/walkthroughs/255_push_sender_system_service.md`, `Docs/CI_CD_AND_SECURITY.md`,
+  `Docs/DISTRIBUTION_DEPLOYMENT.md`, `Docs/PACKAGING_AND_PROVISIONING.md`,
+  `Docs/REMOTE_COMPANION.md`, `crates/gui/src/onboarding.rs`, `crates/push-protocol/src/lib.rs`,
+  `crates/push-protocol/tests/system_socket_tests.rs`, `crates/push-sender/src/lib.rs`,
+  `crates/push-sender/src/main.rs`, `crates/push-sender/tests/system_instance_tests.rs`,
+  `crates/remote/src/main.rs`, `crates/remote/src/push.rs`,
+  `crates/remote/tests/push_system_socket_tests.rs`, `packaging/arch/PKGBUILD`,
+  `packaging/arch/soos.install`, `packaging/debian/prerm`, `packaging/rpm/soos.spec`,
+  `packaging/soos-push-sender@.service`, `packaging/soos-push-sender@.socket`,
+  `scripts/install.sh`, `scripts/install_remote.sh`, `scripts/setup.sh`, `scripts/uninstall.sh`,
+  `tests/docker/push_sender_system_unit_test.sh`, `tests/docker/setup_root_preview_test.sh`,
+  `tests/invariants/src/lib.rs`, `tests/invariants/src/push_sender_system_contract.rs`,
+  `tests/invariants/src/setup_user_phase_contract.rs`
 
 ## 1. Executive Summary
 
-Documentation-only change recording the owner's Android checks of 2026-10-23 and the CI evidence
-of the JVM-only Android rows. A first review of commit bb65d35 requested changes: AAF4 claimed its
-untested expired-session clause, ATR9 and ANA14 rested on a general "everything works" while the
-walkthrough presented specific observations, and the walkthrough claimed a `remote.toml`
-troubleshooting row that did not exist. Commits 1515ad4 and 02c6dc0 fix all three. AAF4, ATR9 and
-ANA14 are back to Pending, and their notes state exactly what was reported. ANA15 is also back to
-Pending because the system bars were not confirmed. The missing troubleshooting row now exists.
-No row now claims more than the owner reported or CI proved.
+The push sender moves from the user unit (which exits `226/NAMESPACE` on Ubuntu 23.10+) to a
+socket-activated `DynamicUser` system template (`soos-push-sender@<uid>.socket/.service`), per
+the owner decision of 2026-10-23. Second review round: round 1 raised two MAJOR findings
+(setup reported the sender "done" for a non-`/usr` prefix whose unit ran a missing/stale
+binary; `system_up_to_date` ignored the sender binary and units) plus two MINOR ones (rollback
+leaves the socket enabled; packages did not disable instances on removal). All four are
+resolved: an install.sh prefix drop-in resetting `ExecStart=` (validated prefix, journaled,
+symlink-refusing, proven under real systemd with `/usr/local`), the sender binary and both units
+in `system_up_to_date`, a documented and printed kept socket on companion failure, and
+RPM/Arch/Debian removal hooks that only pass `soos-push-sender@<digits>.socket` names. Gates
+re-run on this tree: `cargo fmt --check`, workspace clippy (all targets/features, `-D
+warnings`), tests of push-protocol, push-sender, remote, gui and soos-invariants (96 suites, 0
+failed), shellcheck (no finding beyond those already on `origin/main`), and
+`tests/docker/push_sender_system_unit_test.sh` (all 7 cases pass, `systemd-analyze security`
+exposure 1.4). Remaining findings are MINOR only.
 
 ## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-None. No test, fixture, script or code file is touched.
+Removed or changed pre-existing assertion lines in `target/candid_diff.patch` (all others are
+additions):
+
+- `tests/docker/setup_root_preview_test.sh` `companion_ran`: expected
+  `[DONE] companion: soos-remote.service soos-push-sender.service running` becomes
+  `[DONE] companion: soos-remote.service running`. Owner-approved migration (2026-10-23).
+- `tests/invariants/src/setup_user_phase_contract.rs` SET24
+  `test_set_u6_full_run_sets_up_the_default_on_companion`: the user-unit enable line becomes the
+  root `systemctl enable --now soos-push-sender@<uid>.socket` line (plus an added ordering
+  assertion); `user_unit(push-sender, active)` becomes `!user_unit(push-sender, enabled)`.
+  Owner-approved.
+- SET33 `test_set_u22_rollback_stops_a_unit_started_by_the_run`: the failure trigger moves from
+  `STUB_USER_FAIL_UNIT=soos-push-sender.service` to `STUB_USER_DIE_UNIT=soos-remote.service`;
+  the single deleted assertion is `user_unit("soos-push-sender.service", "enabled")`. Every
+  soos-remote assertion (start/stop lines, inactive and enabled, restored file, exactly two
+  restarts, active after rollback) is kept. Owner-approved.
+- SET37 `test_set_u21_push_switched_on_later_enables_the_sender`: user-unit state assertions
+  retargeted to the system socket enable line and the `<socket> is not enabled` message, with
+  `STUB_SYSTEM_OFF_UNIT`. Owner-approved.
+- Stub knobs `STUB_USER_DIE_UNIT` / `STUB_SYSTEM_OFF_UNIT` are inert when unset (the latter
+  guarded by `-n`), so no other test can pass vacuously.
+- The round-2 commits (bca9e03..2247134) remove no test line at all; they add PSS16-PSS19
+  invariants and Docker case 7. No `#[ignore]`, `should_panic`, tolerance or inline
+  `mod tests` change in the patch.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-
-- **CI rows** (ANA18, ANA19, ANA22, ANA23, ANA24, AAF1, AHB4, AHB5, AHB6, ATR1) are now ✅ and
-  cite run 39622619945. Checked with `gh run view`: workflow `Android`, job `Android (debug build)`,
-  push on `main`, head `fb2a0bf29d5d`, conclusion success. The log shows
-  `> Task :app:testDebugUnitTest` executed and `BUILD SUCCESSFUL`. Nothing under `android/` changed
-  between fb2a0bf and the merge-base. Every cited method (31 in total) exists in its cited file
-  under `android/app/src/test/java/org/soos/remote/`. Every cited whole class also exists. PASS.
-- **Owner rows**:
-  - RAN12, RDB10, ANA26, AAF4, ANA15, ATR9 and ANA14 stay ⬜ Pending.
-  - Their notes match the owner's report as relayed: RAN12 parts 1–2; the RDB10 Android part; the
-    ANA26 battery card; the first AAF4 clause; the ANA15 icon, themed icon and header; and the
-    "everything works" basis of ATR9 and ANA14, with no item-by-item report.
-  - ANA16, ANA21 and AHB8 are unchanged.
-  - PASS.
-- **Troubleshooting rows**:
-  - The `chrome://net-internals/#dns` and `#sockets` paths are valid.
-  - The keytool row escapes its pipe (`\|`), so the table still renders.
-  - The `sdkmanager` versions `platforms;android-36` and `build-tools;35.0.0` match
-    `.github/workflows/android.yml`. `platform-tools` is now described as an addition for `adb`.
-  - The `remote.toml` row quotes the preflight message of `scripts/setup.sh` (line 1581). Its
-    `mv` path matches `${CONFIG_HOME}/soos/remote.toml`.
-  - The `226/NAMESPACE` workaround does not lower the sysctl.
-  - PASS.
-- **Walkthrough 254**: the number is free (253 is the latest). Its §2 table and header match the
-  matrix. The setup details (GNOME, Tailscale 1.104.1, laptop) come from the owner's pasted
-  `setup.sh` output. PASS.
+- Prefix `/usr/local` via setup.sh: install.sh writes
+  `soos-push-sender@.service.d/prefix.conf` (`ExecStart=` reset to
+  `<prefix>/libexec/soos/soos-push-sender --system-instance %i`) before the later
+  `daemon-reload`; Docker case 7 proves the instance runs the `/usr/local` binary with the
+  `/usr/libexec` one removed → PASS (round-1 finding 1 resolved).
+- Prefix validation (`^(/[A-Za-z0-9._+-]+)+$`, no `.`/`..`, outside sandbox-hidden trees) runs
+  only when the sender artifact exists and PREFIX ≠ `/usr`, as a preflight failure before any
+  change. Existing harnesses that pass `/tmp/...` prefixes to setup.sh use a stub install.sh,
+  AFC7 uses `/opt/soos`, packaging uses `/usr`: all existing tests still pass unchanged → PASS.
+  A trailing-slash or `/home` prefix is now refused for install.sh (fail closed, clear message).
+- Sender-only change or pre-unit install → `system_up_to_date` false → install.sh runs → PASS
+  (round-1 finding 2 resolved).
+- Client socket selection (system socket first, peer uid 0; then legacy; first existing only, no
+  downgrade); explicit `push_socket_path` single candidate → PASS.
 
 ### PAM Concurrency & Deadlines
-
-Not affected: no PAM code or configuration. PASS.
+- No change under `crates/pam`. Setup systemctl calls bounded by `run_bounded` → PASS.
 
 ### Panic Safety & Fail-Closed
-
-Not affected: no code. PASS.
+- `parse_run_mode`, `check_instance_identity`, `listener_from_fd`, `evaluate_system_sandbox`:
+  no `unwrap/expect`, every refusal exit 78 (`RestartPreventExitStatus=78`); uid 0 instance
+  exits 78 under real systemd → PASS.
 
 ### Test Integrity & Anti-Weakening
-
-- No test changed.
-- Status changes go only toward Pending where evidence is partial. ✅ is used only where a green
-  CI run executed the cited tests.
-- `cargo test --locked -p soos-invariants -- --test-threads=3`: 879 passed, 0 failed (matrix
-  citations and structure).
-- PASS.
+- Section 2: only the owner-approved migrations change pre-existing assertions → PASS.
+- New tests were committed red first (bca9e03, f765c3c) and target plausible wrong
+  implementations (missing drop-in, unsafe prefix, missing marker check in packages) → PASS.
 
 ### Memory, Bounds & Secrets
-
-- No credential, key, token, address or biometric data is recorded.
-- The troubleshooting rows recommend no weakening of the sandbox or of the AppArmor sysctl.
-- PASS.
+- Peer authentication: sender closes any peer whose `SO_PEERCRED` uid ≠ instance before reading;
+  bob gets `EACCES` at connect, root gets no reply (Docker). Socket 0600 owned by the user in
+  root-owned 0755 directories under root-only `/run`; PID 1 binds under its umask, so no
+  creation/chown race. Other DynamicUser instances cannot see `/run` → PASS.
+- Sandbox: strict superset of the old user unit (plus `DynamicUser`, `ProtectHome=yes`,
+  `ProtectProc=invisible`, `ProcSubset=pid`, `RemoveIPC`, `KeyringMode=private`,
+  `~@privileged`); DNS binds limited to the two resolved files, read-only → PASS.
+- Drop-in: content built from the validated prefix only (no `%`, space, quote or newline
+  possible), staged in the private `mktemp -d` backup directory, installed atomically by
+  `tracked_install`, refused through a symlinked directory or file, stale-removal journaled and
+  restored on rollback → PASS. Constant log strings, no secret logged → PASS.
 
 ### Supply Chain & Automation
-
-No workflow, dependency or script change. PASS.
+- CI job `push-sender-unit`: SHA-pinned checkout, `persist-credentials: false`, no
+  `github.event` interpolation, listed in `ci-success` needs (checked through
+  `needs.*.result`). No dependency change. Package hooks only pass digit-validated instance
+  names to `systemctl` → PASS.
 
 ### English-Only Policy
-
-All added text is in English. The French `keytool` label (`SHA 256:`) is quoted as tool output
-only. PASS.
+- All code, comments, docs and commit messages in English → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-- **[SUGGESTION]** `AI/VERIFICATION_MATRIX.md` (AAF4): the owner reported "on refresh" without
-  separating *Refresh* from pull to refresh. Confirm both during the remaining owner check. The row
-  is already Pending, so nothing is blocked.
-
-No CRITICAL or MAJOR finding remains.
+- **[MINOR]** `scripts/uninstall.sh:208-215` — removes `soos-push-sender@.service.d/prefix.conf`
+  without checking the install.sh marker line, unlike the RPM/Arch/Debian hooks. The template
+  unit is removed in the same run, so the effect is limited to an administrator file of that
+  exact name; align with the marker check for consistency.
+- **[MINOR]** `scripts/install.sh:1027-1035` — with `--prefix /usr` any existing `prefix.conf`
+  is removed (journaled) regardless of the marker; same consistency remark.
+- **[MINOR]** `scripts/setup.sh:1006-1015` — for a non-`/usr` prefix `system_up_to_date` does
+  not compare the drop-in, so a hand-deleted drop-in is not reinstalled by a re-run (only by
+  `--reinstall`).
+- **[SUGGESTION]** install.sh now refuses a non-normalised `--prefix` (for example a trailing
+  slash) whenever the sender is built; normalising a trailing slash in setup.sh would avoid a
+  surprising refusal.
 
 ## 5. Final Verdict
-
 **VERDICT: APPROVED**
