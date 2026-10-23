@@ -95,7 +95,18 @@ The lead applied M1/M2/M17 as `6209533`. Fixes on top, red first (`a25b60e`), th
   (`setup.sh` uses neither today); documented lexer limit.
 - **N4**: `USER_UNRECOGNIZED` lists each key once, in `COMPANION_KEYS` order.
 
-## 7. Residuals
+## 7. Lead review round 2 (two fail-open residuals)
+
+- A feature key spelled with a TOML escape (a backslash before the first `=` of a top-level
+  line, for example `"allow\u005ffunnel" = false`) is the same key for `soos-remote`; setup
+  cannot decode it, so all seven feature keys are turned off and named.
+- Inside a multi-line basic string the escaped pairs `\\` and `\"` are dropped before counting
+  `"""` delimiters, so `\"""` no longer ends the string early (a `[x]` line inside it is no
+  header and a later top-level key is still read); literal `'''` strings have no escapes.
+- `install.sh` initialises `drop_in_first` (step 5b is top-level code, so `local` does not apply).
+- Red first: two new SDP27 cases (`escapedkey`, `escapedquotes`).
+
+## 8. Residuals
 
 - Fedora JDK for `--android`: owner decision in PR C (pinned JDK archive, third-party repository
   or Gradle upgrade).
