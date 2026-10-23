@@ -205,12 +205,19 @@ for unit in soos-push-sender@.socket soos-push-sender@.service; do
 done
 rm -f "${TARGET_SYSTEMD_DIR}/soos-push-sender@.socket"
 rm -f "${TARGET_SYSTEMD_DIR}/soos-push-sender@.service"
-# The --prefix drop-in of install.sh; a symbolic link is never followed.
+# The --prefix drop-in of install.sh, recognised by its marker line like the package hooks (an
+# administrator's file of that name is kept); a symbolic link is never followed.
 PUSH_SENDER_DROP_IN_DIR="${TARGET_SYSTEMD_DIR}/soos-push-sender@.service.d"
 if [[ -L "${PUSH_SENDER_DROP_IN_DIR}" ]]; then
     warn "${PUSH_SENDER_DROP_IN_DIR} is a symbolic link: not followed, left in place."
 elif [[ -d "${PUSH_SENDER_DROP_IN_DIR}" ]]; then
-    rm -f "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
+    drop_in="${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
+    if [[ -f "${drop_in}" && ! -L "${drop_in}" ]] \
+            && grep -q '^# Written by scripts/install.sh for --prefix ' "${drop_in}"; then
+        rm -f "${drop_in}"
+    elif [[ -e "${drop_in}" || -L "${drop_in}" ]]; then
+        warn "Keeping ${drop_in}: it was not written by scripts/install.sh"
+    fi
     rmdir "${PUSH_SENDER_DROP_IN_DIR}" 2>/dev/null || true
 fi
 if [[ "${LIVE_SYSTEMD}" = true ]]; then

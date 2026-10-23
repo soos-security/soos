@@ -1,0 +1,16 @@
+# Managed by scripts/setup.sh (soos-setup): re-running setup rewrites this file.
+# A feature turned off later (for example in the soos-gui feature tour) stays off until
+# setup runs with its --<feature> on flag. Reference: Docs/REMOTE_COMPANION.md section 5.
+allowed_logins = ["owner.login@example.com"]
+rp_id = "pc.tail1234.ts.net"
+allow_funnel = true
+allow_unlock = true
+password_alerts = true
+push_notifications = true
+offline_alerts = true
+camera_view = true
+camera_view_funnel = true
+
+[android]
+package = "org.soos.remote"
+sha256_cert_fingerprints = ["AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99", "01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF"]
