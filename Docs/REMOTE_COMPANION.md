@@ -1447,7 +1447,9 @@ Matrix rows PTR1–PTR11; invariant `remote_tour_contract`.
 (run as yourself, not with `sudo`) installs soos and then this companion with every feature on
 (Funnel, remote unlock, camera view also over Funnel, password alerts, push, offline alerts; owner
 decisions of 2026-10-12 and 2026-10-15, GitHub #400): it writes a setup-managed `remote.toml`
-(mode 0600; a key you turned off later, for example in the soos-gui feature tour, stays off),
+(mode 0600; a key you turned off later, for example in the soos-gui feature tour, stays off;
+a `remote.toml` you wrote yourself is first saved as `remote.toml.bak-<UTC>`, mode 0600, and its
+explicit `false` values and a valid trailing `[android]` table are kept),
 runs `scripts/install_remote.sh`, validates the file with `soos-remote passkeys list`, enables
 and starts the user units, creates the daemon `[preview]` section when `/etc/soos/daemon.toml`
 does not exist yet, and prints the steps below that need your Tailscale account (it runs no
@@ -1742,7 +1744,8 @@ reason classes.
 | Phone with the Tailscale app turned off still fails with `ERR_CONNECTION_CLOSED` after Funnel works | Chrome kept the tailnet (`100.x`) address of the name from when the VPN was on | In Chrome open `chrome://net-internals/#dns` → *Clear host cache* and `chrome://net-internals/#sockets` → *Flush socket pools*, or use mobile data |
 | `keytool -list -v … \| grep SHA256` prints nothing (exit status 1) | `keytool` output is localised: the French one prints `SHA 256:` with a space | Run it without the filter and copy the `SHA256`/`SHA 256` line, or use `apksigner verify --print-certs app.apk` |
 | `scripts/android_build.sh`: `SDK location not found` | No Android SDK or `ANDROID_HOME` unset | Install the command-line tools to `~/Android/Sdk/cmdline-tools/latest`, export `ANDROID_HOME=$HOME/Android/Sdk`, accept `sdkmanager --licenses`, then `sdkmanager "platforms;android-36" "build-tools;35.0.0" "platform-tools"` (`platforms;android-36` and `build-tools;35.0.0` are the versions of the CI job; `platform-tools` adds `adb`) |
-| `scripts/setup.sh` stops at preflight: `remote.toml was not written by setup, which never edits it` | A `remote.toml` from a manual install or an older version exists | Move it aside (`mv ~/.config/soos/remote.toml ~/.config/soos/remote.toml.mine`) and run setup again; the one-command setup (GitHub #362, owner decision of 2026-10-23) will back it up automatically |
+| `scripts/setup.sh` stops at preflight: `remote.toml was not written by setup and names no usable Tailscale login and node name` | A `remote.toml` from a manual install or an older version without exactly one valid `allowed_logins` entry and a valid `rp_id`, and options without `--tailscale-login`/`--rp-id` | Pass `--tailscale-login you@example.com --rp-id <pc>.<tailnet>.ts.net`: setup then saves your file as `~/.config/soos/remote.toml.bak-<UTC>` (mode 0600) and writes its own, keeping your explicit `false` values (GitHub #362, owner decision of 2026-10-23); `diff` the two files to re-apply a key it lists as not carried over |
+| `scripts/setup.sh`: `the Android app needs Funnel: remove the [android] table or keep Funnel on` | Your `remote.toml` has an `[android]` table and Funnel resolves off (`--funnel off` or `allow_funnel = false`); `soos-remote` refuses that combination | Keep Funnel on, or remove the `[android]` table first |
 
 ## 8. Residual limitations
 

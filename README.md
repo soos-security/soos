@@ -111,7 +111,9 @@ With your Tailscale login and node name (`--tailscale-login you@example.com --rp
 asked interactively) it also sets up the phone companion as you, with every feature on (all but the failed-password
 alerts can be turned off later in soos-gui, and every key in `remote.toml` together with the keys that depend
 on it, see the [Security model](#security-model)), and prints the Tailscale and passkey steps it never runs
-itself; `--no-remote` skips it.
+itself; `--no-remote` skips it. A `remote.toml` you wrote yourself is first saved as
+`~/.config/soos/remote.toml.bak-<UTC>` (your explicit `false` values are kept), and every package and command
+it needs is checked before the build, so nothing is found missing halfway through.
 Details, flags and exit codes:
 [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0.
 
