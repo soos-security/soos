@@ -407,8 +407,34 @@ fn uncovered_commands(script: &str, keys: &BTreeSet<String>) -> Vec<String> {
             "line {line}: `{name}` has no REQUIRED_TOOLS entry: {text}"
         ))
     };
+    // A `case` pattern list is read as a "command" ending with an unbalanced `)`; its
+    // alternatives before each `|` are single-word "commands" on the same line. They run
+    // nothing.
+    let unbalanced_close =
+        |w: &String| w.ends_with(')') && w.matches('(').count() < w.matches(')').count();
+    let mut skip = vec![false; cmds.len()];
+    for i in 0..cmds.len() {
+        let is_pattern =
+            cmds[i].words.len() == 1 && cmds[i].words.last().is_some_and(unbalanced_close);
+        if !is_pattern {
+            continue;
+        }
+        skip[i] = true;
+        let mut j = i;
+        while j > 0
+            && cmds[j - 1].line == cmds[i].line
+            && cmds[j - 1].words.len() == 1
+            && !skip[j - 1]
+        {
+            j -= 1;
+            skip[j] = true;
+        }
+    }
     let mut found = Vec::new();
-    for cmd in &cmds {
+    for (i, cmd) in cmds.iter().enumerate() {
+        if skip[i] {
+            continue;
+        }
         let Some(k) = command_word_index(&cmd.words) else {
             continue;
         };
@@ -434,6 +460,20 @@ fn uncovered_commands(script: &str, keys: &BTreeSet<String>) -> Vec<String> {
         if plain.starts_with('(') || plain.ends_with("()") {
             continue;
         }
+        // Only redirections after a subshell (`( ... ) 2>/dev/null`): nothing runs.
+        let redirection = plain
+            .trim_start_matches(|c: char| c.is_ascii_digit() || c == '&')
+            .starts_with(['>', '<']);
+        if redirection {
+            continue;
+        }
+        // The one exemption: the bounded read-only `tailscale version` (guarded by
+        // `command -v`), which SCN3 forbids naming in any variable, the table included.
+        if plain == "tailscale"
+            && cmd.words.get(k + 1).map(|w| unquote(w)).as_deref() == Some("version")
+        {
+            continue;
+        }
         found.extend(check(&plain, cmd.line, &text));
     }
     found
@@ -455,6 +495,8 @@ fn test_sdp3_every_external_command_has_a_required_tools_entry() {
         ("run_bounded 5 systemctl \\\n  frob\nfoo2 a\n", true),
         ("T=(wget -q)\n\"${T[@]}\" x\n", true),
         ("/usr/bin/evil x\n", true),
+        ("tailscale serve --bg x\n", true),
+        ("out=\"$(run_bounded 5 tailscale version)\"\n", false),
         ("grep -q x f\n", false),
         ("f() { :; }\nf a\n", false),
         ("E=(sudo --)\n\"${E[@]}\" ls\n", false),
@@ -522,7 +564,6 @@ fn test_sdp4_required_tools_table_is_scoped() {
         ("runuser", "root-start"),
         ("cargo", "toolchain"),
         ("gnome-extensions", "optional"),
-        ("tailscale", "optional"),
         ("systemctl", "base"),
         ("bash", "base"),
         ("date", "base"),
@@ -533,6 +574,9 @@ fn test_sdp4_required_tools_table_is_scoped() {
             "REQUIRED_TOOLS[{tool}]"
         );
     }
+    // SCN3 forbids the word `tailscale` in any variable of setup.sh, the table included: the
+    // bounded `tailscale version` is the one exempted command (SDP-S3, spec §20 F11).
+    assert!(!tools.contains_key("tailscale"), "SCN3: no tailscale key");
     let code = code_of(SETUP);
     for needle in [
         "check_scope_tools base",

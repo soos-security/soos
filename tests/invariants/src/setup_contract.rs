@@ -284,6 +284,8 @@ const SAFE_TOOLS: &[&str] = &[
     "cut", "sort", "wc", "stat", "touch", "find", "mktemp", "dirname", "basename", "cmp",
     "install", "timeout", "ln", "readlink", "uname", "ls", "rmdir", "sleep", "tee", "date",
     "realpath", "printf", "true", "false", "od",
+    // Harness wiring M3 (spec §12.2): `cksum` joins the base scope of REQUIRED_TOOLS.
+    "cksum",
 ];
 
 /// Common prologue of every stub: logs `uid=<0|1000> <name> <args>`. `uid=1000` is a role label
