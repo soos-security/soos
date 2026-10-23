@@ -1066,6 +1066,26 @@ pub trait PushTransport: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<DeliveryReply, TransportError>>;
 }
 
+/// One sender socket `soos-remote` may use and the peer uid it requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushSocketCandidate {
+    /// The socket path.
+    pub path: PathBuf,
+    /// The `SO_PEERCRED` uid of the listener.
+    pub peer_uid: u32,
+}
+
+/// Stub.
+#[must_use]
+pub fn push_socket_candidates(
+    configured: &Path,
+    derived_default: Option<&Path>,
+    owner_uid: u32,
+) -> Vec<PushSocketCandidate> {
+    let _ = (configured, derived_default, owner_uid);
+    Vec::new()
+}
+
 /// Production transport: one connection to the `soos-push-sender` socket per request.
 pub struct UnixPushTransport {
     socket_path: PathBuf,
@@ -1086,6 +1106,20 @@ impl UnixPushTransport {
     /// The sender socket at `socket_path`, which must be a socket owned by `owner_uid`.
     #[must_use]
     pub fn new(socket_path: PathBuf, owner_uid: u32) -> Self {
+        Self {
+            socket_path,
+            owner_uid,
+        }
+    }
+
+    /// Stub.
+    #[must_use]
+    pub fn with_candidates(candidates: Vec<PushSocketCandidate>, owner_uid: u32) -> Self {
+        let socket_path = candidates
+            .into_iter()
+            .next()
+            .map(|c| c.path)
+            .unwrap_or_default();
         Self {
             socket_path,
             owner_uid,

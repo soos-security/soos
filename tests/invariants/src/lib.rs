@@ -440,6 +440,16 @@ mod setup_user_phase_contract;
 #[cfg(all(test, unix))]
 mod setup_scanner_contract;
 
+/// The push sender as a sandboxed system service: exact `soos-push-sender@.socket` and
+/// `soos-push-sender@.service` template units (`DynamicUser=yes`, socket-activated, instance =
+/// the desktop uid), their protocol constants, the system-instance dispatch of `main.rs`,
+/// `install.sh`/`uninstall.sh`/RPM staging and documentation (owner hardware report of
+/// 2026-10-23, `226/NAMESPACE` on Ubuntu 24.04; ADR 2026-10-23 "Push Sender as a Sandboxed
+/// System Service"; spec AI/architect_spec_push_sender_system_service.md; rows PSS1, PSS2,
+/// PSS9, PSS11, PSS13).
+#[cfg(all(test, unix))]
+mod push_sender_system_contract;
+
 /// Distribution build against the system ONNX Runtime: feature tables, MSRV, resolved feature
 /// graphs, daemon CPU execution provider check order, offline Arch CI job, PAM isolation and
 /// documentation (GitHub #375, PR 1 of #361, ADR 2026-10-13 "Distribution Builds: System ONNX

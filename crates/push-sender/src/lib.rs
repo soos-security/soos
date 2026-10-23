@@ -725,3 +725,75 @@ pub fn probe_sandbox() -> Result<(), SandboxError> {
     let logs_listable = fs::read_dir(SANDBOX_HIDDEN_LOG_DIR).is_ok();
     evaluate_sandbox(&mountinfo, &exe, logs_listable)
 }
+
+// ---------------------------------------------------------------------------------------
+// System instance mode (ADR 2026-10-23 "Push Sender as a Sandboxed System Service")
+// ---------------------------------------------------------------------------------------
+
+/// How the sender runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    /// The legacy user unit.
+    User,
+    /// The system template unit for the desktop user `allowed_uid`.
+    System {
+        /// The only peer uid served.
+        allowed_uid: u32,
+    },
+}
+
+/// Refused system instance start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InstanceError {
+    /// The arguments are not exactly `--system-instance <uid>` or nothing.
+    #[error("push sender arguments refused")]
+    Usage,
+    /// Root, or the sender shares the instance uid.
+    #[error("push sender instance identity refused")]
+    Identity,
+}
+
+/// Parses the process arguments (without the program name).
+///
+/// # Errors
+/// [`InstanceError::Usage`].
+pub fn parse_run_mode<I: IntoIterator<Item = std::ffi::OsString>>(
+    args: I,
+) -> Result<RunMode, InstanceError> {
+    let _ = args.into_iter().count();
+    Err(InstanceError::Usage)
+}
+
+/// Refuses root and an instance uid equal to the sender's own uid.
+///
+/// # Errors
+/// [`InstanceError::Identity`].
+pub fn check_instance_identity(uid: u32, euid: u32, allowed_uid: u32) -> Result<(), InstanceError> {
+    let _ = (uid, euid, allowed_uid);
+    Ok(())
+}
+
+/// Pure sandbox decision of the system unit.
+///
+/// # Errors
+/// The first [`SandboxError`] rule that fails.
+pub fn evaluate_system_sandbox(mountinfo: &str, logs_listable: bool) -> Result<(), SandboxError> {
+    let _ = (mountinfo, logs_listable);
+    Ok(())
+}
+
+/// I/O wrapper of [`evaluate_system_sandbox`].
+///
+/// # Errors
+/// [`SandboxError`].
+pub fn probe_system_sandbox() -> Result<(), SandboxError> {
+    Ok(())
+}
+
+/// The inherited listening socket.
+///
+/// # Errors
+/// [`SocketError::Io`].
+pub fn listener_from_fd(fd: std::os::fd::OwnedFd) -> Result<UnixListener, SocketError> {
+    Ok(UnixListener::from(fd))
+}

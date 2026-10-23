@@ -2302,3 +2302,138 @@ fn test_srp10_artifact_dir_resolution_documented() {
     let walkthrough = read_repo("AI/walkthroughs/244_setup_read_paths.md");
     assert!(walkthrough.contains("CARGO_TARGET_DIR"), "walkthrough 244");
 }
+
+// ---------------------------------------------------------------------------
+// PSS12 — the push sender as a system service (ADR 2026-10-23 "Push Sender as a Sandboxed
+// System Service"; spec AI/architect_spec_push_sender_system_service.md §7). New functions
+// only: the SET contracts above are unchanged.
+// ---------------------------------------------------------------------------
+
+/// PSS12: with push on, the root half enables `soos-push-sender@<uid>.socket` (system manager)
+/// after install.sh; the companion verifies that socket as the user and never enables or starts
+/// the user unit `soos-push-sender.service`.
+#[test]
+fn test_pss12_setup_enables_the_system_sender_not_the_user_unit() {
+    let h = Harness::new("pss_sys");
+    let uid = real_uid();
+    let socket = format!("soos-push-sender@{uid}.socket");
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let lines = h.log_lines();
+    let install = find_line(&lines, &["uid=0 install.sh"]);
+    let enable = find_line(&lines, &["uid=0 systemctl enable --now", &socket]);
+    let remote_install = find_line(&lines, &[&format!("uid={uid} install_remote.sh")]);
+    assert!(
+        install < enable && enable < remote_install,
+        "the root half enables the socket after install.sh and before the companion"
+    );
+    find_line(
+        &lines,
+        &[&format!("uid={uid} systemctl is-active"), &socket],
+    );
+    assert!(
+        !has_line(&lines, &["systemctl --user enable", "soos-push-sender"]),
+        "the user unit is never enabled: {lines:?}"
+    );
+    assert!(
+        !has_line(&lines, &["systemctl --user start", "soos-push-sender"]),
+        "the user unit is never started: {lines:?}"
+    );
+    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
+    assert!(!h.user_unit("soos-push-sender.service", "active"));
+    assert!(h.user_unit("soos-remote.service", "active"));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!("[DONE] push sender: {socket} enabled")),
+        "{t}"
+    );
+}
+
+/// PSS12: push off: no instance is enabled.
+#[test]
+fn test_pss12_push_off_enables_no_system_sender() {
+    let h = Harness::new("pss_off");
+    let out = h.run_companion(&["--push", "off"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let lines = h.log_lines();
+    assert!(
+        !has_line(&lines, &["systemctl enable", "soos-push-sender@"]),
+        "{lines:?}"
+    );
+    assert!(!has_line(&lines, &["--push-sender"]), "{lines:?}");
+}
+
+/// PSS12: a legacy user unit enabled by an earlier setup is disabled and stopped (migration);
+/// the companion succeeds.
+#[test]
+fn test_pss12_setup_disables_a_legacy_user_unit() {
+    let h = Harness::new("pss_legacy");
+    let uid = real_uid();
+    for what in ["enabled", "active"] {
+        fs::write(
+            h.state
+                .join(format!("user_soos-push-sender.service_{what}")),
+            "",
+        )
+        .unwrap();
+    }
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let lines = h.log_lines();
+    find_line(
+        &lines,
+        &[&format!(
+            "uid={uid} systemctl --user disable --now soos-push-sender.service"
+        )],
+    );
+    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
+    assert!(!h.user_unit("soos-push-sender.service", "active"));
+    assert!(
+        text(&out).contains("soos-push-sender.service disabled"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// PSS12: a companion failure after the migration re-enables the legacy user unit (the rollback
+/// restores the state before the run).
+#[test]
+fn test_pss12_rollback_restores_the_legacy_user_unit() {
+    let mut h = Harness::new("pss_legacy_rb");
+    for what in ["enabled", "active"] {
+        fs::write(
+            h.state
+                .join(format!("user_soos-push-sender.service_{what}")),
+            "",
+        )
+        .unwrap();
+    }
+    h.set_env("STUB_USER_FAIL_UNIT", "soos-remote.service");
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 5, "{}", text(&out));
+    assert!(h.user_unit("soos-push-sender.service", "enabled"));
+    assert!(h.user_unit("soos-push-sender.service", "active"));
+}
+
+/// PSS12: the dry run plans the system sender and writes nothing.
+#[test]
+fn test_pss12_dry_run_plans_the_system_sender_without_change() {
+    let h = Harness::new("pss_dry");
+    let uid = real_uid();
+    let before = h.snapshot();
+    let out = h.run(&["--dry-run", "--tailscale-login", LOGIN, "--rp-id", RP_ID]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!(
+            "[PLAN] push sender: will run - enable soos-push-sender@{uid}.socket"
+        )),
+        "{t}"
+    );
+    let lines = h.log_lines();
+    assert!(
+        lines.iter().all(|l| is_read_only_call(l)),
+        "dry-run must only query: {lines:?}"
+    );
+    assert_eq!(before, h.snapshot(), "dry-run must write nothing");
+}
