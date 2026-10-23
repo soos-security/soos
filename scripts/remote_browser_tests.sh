@@ -20,8 +20,9 @@
 # built into a shipped artifact.
 #
 # Usage: scripts/remote_browser_tests.sh [--fixture-server <path>] [-- <playwright args>]
-#   Without --fixture-server, the fixture server (the single example of the
-#   soos-test-fixtures crate) is built with cargo (--locked). Extra arguments
+#   Without --fixture-server, the fixture server (the
+#   readme_web_fixture_server example of soos-test-fixtures) is built with
+#   cargo (--locked). Extra arguments
 #   go to `playwright test` (for example `-- --project=firefox`).
 # Exit status: the status of `playwright test`; 2 for a usage or setup error.
 # =============================================================================
@@ -67,16 +68,16 @@ done
 command -v docker > /dev/null 2>&1 || usage_error "docker is required"
 docker info > /dev/null 2>&1 || usage_error "the docker daemon is not reachable"
 
-# The loopback fixture server is the single example of the soos-test-fixtures
-# crate. RAC15 (tests/invariants readme_assets_contract) reserves its name, in
-# scripts/ and .github/, to the two README capture scripts, so this script
-# takes the executable from cargo's own build report and refuses to guess when
-# the crate has any other number of examples.
+# The loopback fixture server is the readme_web_fixture_server example of the
+# soos-test-fixtures crate. This script is a named RAC15 exception
+# (tests/invariants readme_assets_contract): it may build the example by name
+# and enables no cargo feature. The executable path comes from cargo's
+# own build report, so a custom CARGO_TARGET_DIR is honoured.
 if [[ -z "$fixture" ]]; then
-    echo "[INFO]  building the loopback fixture server (soos-test-fixtures example)"
-    report="$(cargo build --locked -p soos-test-fixtures --examples \
+    echo "[INFO]  building the loopback fixture server (readme_web_fixture_server)"
+    report="$(cargo build --locked -p soos-test-fixtures --example readme_web_fixture_server \
         --message-format=json-render-diagnostics)" \
-        || usage_error "cargo could not build the soos-test-fixtures examples"
+        || usage_error "cargo could not build the readme_web_fixture_server example"
     built=()
     while IFS= read -r line; do
         if [[ -n "$line" ]]; then
@@ -87,7 +88,7 @@ if [[ -z "$fixture" ]]; then
         | grep -F '"kind":["example"]' \
         | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')
     [[ ${#built[@]} -eq 1 ]] \
-        || usage_error "expected one soos-test-fixtures example executable, cargo reported ${#built[@]}"
+        || usage_error "expected one readme_web_fixture_server executable, cargo reported ${#built[@]}"
     fixture="${built[0]}"
 fi
 [[ -f "$fixture" && -x "$fixture" ]] || usage_error "fixture server '$fixture' is not an executable file"

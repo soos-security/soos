@@ -121,6 +121,10 @@ scripts/capture_readme_assets.sh   # refresh MANIFEST.toml afterwards
   Ctrl-C (INT) and TERM stop the script at once (status 130 and 143) through the same exit trap.
   Chrome's crashpad handlers start their own session and exit on their own. The capture output is
   unchanged (RAC25).
+- **Other user of the fixture server**: the Playwright bench of the web app
+  (`scripts/remote_browser_tests.sh`, GitHub #464) also builds `readme_web_fixture_server`, by its
+  name and with `--locked`. It is the only other named RAC15 exception, and a narrow one: it may
+  name the example but never the capture feature (RAC26).
 - **First-run tour**: the web app's feature tour (ADR 2026-10-17, GitHub #414/#418) opens on a fresh
   browser profile and would cover the page. The browser therefore first opens the fixture page
   `/readme/tour-seen` (`soos_test_fixtures::readme_web::TOUR_SEEN_PAGE`), which sets the app's own
