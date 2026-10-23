@@ -1530,9 +1530,14 @@ bracket_depth() {
     printf '%s' "$(( ${#open} - ${#close} ))"
 }
 
-# Number of occurrences of the delimiter $2 in $1.
+# Number of occurrences of the delimiter $2 in $1. In a basic string (`"""`) the escaped pairs
+# `\\` and `\"` are dropped first, so `\"""` never ends it (literal `'''` strings have no escapes).
 count_of() {
     local text="$1" delim="$2" rest
+    if [[ "${delim}" == '"""' ]]; then
+        text="${text//\\\\/}"
+        text="${text//\\\"/}"
+    fi
     rest="${text//"${delim}"/}"
     printf '%s' "$(( (${#text} - ${#rest}) / ${#delim} ))"
 }
@@ -1615,6 +1620,16 @@ parse_user_remote_config() {
                 2) parse_android_fps "${norm}" && android=3 || strict=false ;;
                 *) strict=false ;;
             esac
+            continue
+        fi
+        # A key spelled with a TOML escape (a backslash before the first `=`) may be any of the
+        # feature keys for soos-remote: every feature key is turned off (lead review round 2).
+        if [[ "${line}" == *=* && "${line%%=*}" == *\\* ]]; then
+            for key in "${COMPANION_KEYS[@]}"; do
+                FILE_BOOL[${key}]=false
+                USER_BOOL_PRESENT[${key}]=1
+                unrecognized[${key}]=1
+            done
             continue
         fi
         if [[ ! "${line}" =~ ${re_key} ]]; then

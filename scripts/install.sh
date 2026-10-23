@@ -1011,6 +1011,9 @@ if [[ -n "${ARTIFACT_PATHS[${PUSH_SENDER_ARTIFACT}]:-}" ]]; then
         error "Refusing to write the push sender drop-in through the symbolic link ${PUSH_SENDER_DROP_IN_DIR}"
         exit 1
     fi
+    # First line of an existing drop-in (install.sh's marker check). Step 5b runs at the top
+    # level of the script, not in a function, so the variable is initialised, not `local`.
+    drop_in_first=""
     if [[ "${PREFIX}" != "/usr" ]]; then
         ensure_dir "${PUSH_SENDER_DROP_IN_DIR}" 0755
         PUSH_SENDER_DROP_IN_SRC="${BACKUP_DIR}/push-sender-prefix.conf"
