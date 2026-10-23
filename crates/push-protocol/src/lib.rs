@@ -88,6 +88,22 @@ pub const MAX_PUSH_RESPONSE_BODY_BYTES: usize = 1024;
 pub const PUSH_SOCKET_DIR_NAME: &str = "soos-push";
 /// Sender socket file name.
 pub const PUSH_SOCKET_FILE_NAME: &str = "push.sock";
+/// Root of the system sender sockets (ADR 2026-10-23 "Push Sender as a Sandboxed System
+/// Service"): `<root>/<uid>/push.sock`, the `ListenStream=` of
+/// `packaging/soos-push-sender@.socket`.
+pub const PUSH_SYSTEM_SOCKET_ROOT: &str = "/run/soos-push";
+/// Argument selecting the system instance mode of `soos-push-sender` (the `ExecStart=` of
+/// `packaging/soos-push-sender@.service`).
+pub const PUSH_SYSTEM_INSTANCE_ARG: &str = "--system-instance";
+
+/// The socket of the system sender instance of `uid`:
+/// `<PUSH_SYSTEM_SOCKET_ROOT>/<uid>/<PUSH_SOCKET_FILE_NAME>`.
+#[must_use]
+pub fn system_push_socket_path(uid: u32) -> std::path::PathBuf {
+    std::path::Path::new(PUSH_SYSTEM_SOCKET_ROOT)
+        .join(uid.to_string())
+        .join(PUSH_SOCKET_FILE_NAME)
+}
 /// Sender exit code of a configuration error (`EX_CONFIG`).
 pub const EXIT_CONFIG: i32 = 78;
 /// Sender exit code of a runtime error.

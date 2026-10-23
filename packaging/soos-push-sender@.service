@@ -1,0 +1,72 @@
+# soos push sender, system instance for one desktop user: soos-push-sender@<uid>.service
+# (ADR 2026-10-23 "Push Sender as a Sandboxed System Service", amending ADR 2026-10-06 "Web
+# Push Notifications for Failed-Password Alerts Through a Separate Sender Unit" and ADR
+# 2026-10-12 "soos-remote Security Hardening").
+#
+# Why a system unit: the user unit packaging/soos-push-sender.service needs an unprivileged
+# user namespace for every mount sandbox directive, which Ubuntu 23.10 and later deny
+# (kernel.apparmor_restrict_unprivileged_userns=1): it exits 226/NAMESPACE there. The system
+# manager applies the same sandbox without any user namespace.
+#
+# The only network-capable part of the remote companion. It holds no key: soos-remote hands it
+# an already-encrypted body and an already-signed Authorization value over
+# /run/soos-push/<uid>/push.sock (soos-push-sender@.socket, passed as the standard input), and
+# it makes one outbound HTTPS request to an allowlisted push service (web.push.apple.com,
+# fcm.googleapis.com, updates.push.services.mozilla.com). It runs as a dynamic uid
+# (DynamicUser=yes): never root, never the desktop user, no capability. It serves only the peer
+# whose SO_PEERCRED uid is the instance uid. The sandbox hides /home, /root and /run (except the
+# two systemd-resolved resolv.conf files, read only, so DNS works on Ubuntu); the system logs
+# (/var/log, the journal included, and /var/lib/systemd/coredump) are inaccessible. The sender
+# refuses to start (exit 78, not restarted) when it does not detect this sandbox.
+# PrivateUsers= is deliberately absent: inside a private user namespace SO_PEERCRED would
+# report the overflow uid and the peer check could not work.
+
+[Unit]
+Description=soos push sender for uid %i (outbound Web Push for the remote companion)
+Documentation=https://github.com/Mysticaly622/soos/blob/main/Docs/REMOTE_COMPANION.md
+Requires=soos-push-sender@%i.socket
+After=soos-push-sender@%i.socket
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/soos/soos-push-sender --system-instance %i
+StandardInput=socket
+StandardOutput=journal
+StandardError=journal
+DynamicUser=yes
+Restart=on-failure
+RestartSec=5
+# EXIT_CONFIG (78, EX_CONFIG): argument, identity, sandbox or socket refusals are not retried
+RestartPreventExitStatus=78
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+ProtectSystem=strict
+ProtectHome=yes
+TemporaryFileSystem=/run:ro
+InaccessiblePaths=-/var/log -/var/lib/systemd/coredump
+BindReadOnlyPaths=-/run/systemd/resolve/stub-resolv.conf -/run/systemd/resolve/resolv.conf
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+UMask=0077

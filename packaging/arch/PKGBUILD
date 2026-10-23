@@ -62,6 +62,11 @@ package() {
 
     # 3. Install systemd service unit
     install -Dm644 "packaging/soos-daemon.service" "${pkgdir}/usr/lib/systemd/system/soos-daemon.service"
+    # Push sender system service (ADR 2026-10-23): never enabled by the package; one
+    # instance per desktop user (systemctl enable --now soos-push-sender@<uid>.socket).
+    install -Dm755 "target/release/soos-push-sender" "${pkgdir}/usr/libexec/soos/soos-push-sender"
+    install -Dm644 "packaging/soos-push-sender@.socket" "${pkgdir}/usr/lib/systemd/system/soos-push-sender@.socket"
+    install -Dm644 "packaging/soos-push-sender@.service" "${pkgdir}/usr/lib/systemd/system/soos-push-sender@.service"
 
     # 4. Install PAM configuration snippet
     # Reference snippet only: a file in /etc/pam.d would be a PAM service (GitHub #209).

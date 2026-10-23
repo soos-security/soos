@@ -229,6 +229,9 @@ esac
 
 /// System units keep the PR 1 behaviour; `--user` units have their own state files
 /// (`user_<unit>_enabled`, `user_<unit>_active`). `STUB_USER_START_RC` fails every user start.
+/// `STUB_USER_DIE_UNIT` names a user unit that stops right after this run starts or restarts it
+/// (`is-active` then answers 3); `STUB_SYSTEM_OFF_UNIT` names a system unit the owner disabled
+/// and stopped (`is-active` 3, `is-enabled` 1), for the push sender socket (ADR 2026-10-23).
 const STUB_SYSTEMCTL: &str = r#"
 if [[ "${1:-}" == "--user" ]]; then
     shift
@@ -248,9 +251,20 @@ if [[ "${1:-}" == "--user" ]]; then
         if [[ "${u}" == "${STUB_USER_FAIL_UNIT:-}" ]]; then
             case "${verb}" in enable|start|restart) exit 1 ;; esac
         fi
+        if [[ "${u}" == "${STUB_USER_DIE_UNIT:-}" ]]; then
+            case "${verb}" in
+                start|restart) touch "${STUB_STATE}/user_${u}_died" ;;
+                enable) (( now )) && touch "${STUB_STATE}/user_${u}_died" ;;
+            esac
+        fi
         case "${verb}" in
             is-enabled) [[ -e "${STUB_STATE}/user_${u}_enabled" ]] || rc=1 ;;
-            is-active) [[ -e "${STUB_STATE}/user_${u}_active" ]] || rc=3 ;;
+            is-active)
+                if [[ -e "${STUB_STATE}/user_${u}_died" ]]; then
+                    rc=3
+                else
+                    [[ -e "${STUB_STATE}/user_${u}_active" ]] || rc=3
+                fi ;;
             enable)
                 touch "${STUB_STATE}/user_${u}_enabled"
                 if (( now )); then
@@ -268,6 +282,12 @@ if [[ "${1:-}" == "--user" ]]; then
         esac
     done
     exit "${rc}"
+fi
+if [[ -n "${STUB_SYSTEM_OFF_UNIT:-}" && " $* " == *" ${STUB_SYSTEM_OFF_UNIT} "* ]]; then
+    case "${1:-}" in
+        is-active) exit 3 ;;
+        is-enabled) exit 1 ;;
+    esac
 fi
 case "${1:-}" in
     is-enabled) [[ -e "${STUB_STATE}/unit_enabled" ]] ;;
@@ -1017,16 +1037,23 @@ fn test_set_u6_full_run_sets_up_the_default_on_companion() {
         &lines,
         &["uid=1000 systemctl --user enable --now soos-remote.service"],
     );
-    find_line(
+    let sender = find_line(
         &lines,
-        &["uid=1000 systemctl --user enable --now soos-push-sender.service"],
+        &[&format!(
+            "uid=0 systemctl enable --now soos-push-sender@{}.socket",
+            real_uid()
+        )],
     );
     let system = find_line(&lines, &["uid=0 install.sh"]);
     assert!(system < install && install < validate && validate < enable);
+    assert!(
+        system < sender && sender < install,
+        "the root half enables the sender socket between install.sh and install_remote.sh"
+    );
     assert!(!has_line(&lines, &["uid=0 install_remote.sh"]));
     assert!(!has_line(&lines, &["uid=0 soos-remote"]));
     assert!(h.user_unit("soos-remote.service", "active"));
-    assert!(h.user_unit("soos-push-sender.service", "active"));
+    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
 
     let t = text(&out);
     assert!(
@@ -1421,10 +1448,8 @@ fn test_set_u22_rollback_stops_a_unit_started_by_the_run() {
     let mut h = Harness::new("ustart");
     let first = h.run_companion(&[]);
     assert_eq!(code(&first), 0, "{}", text(&first));
-    for unit in ["soos-remote.service", "soos-push-sender.service"] {
-        fs::remove_file(h.state.join(format!("user_{unit}_active"))).unwrap();
-    }
-    h.set_env("STUB_USER_FAIL_UNIT", "soos-push-sender.service");
+    fs::remove_file(h.state.join("user_soos-remote.service_active")).unwrap();
+    h.set_env("STUB_USER_DIE_UNIT", "soos-remote.service");
     let out = h.run(&["--yes"]);
     assert_eq!(code(&out), 5, "{}", text(&out));
     let lines = h.log_lines();
@@ -1438,15 +1463,13 @@ fn test_set_u22_rollback_stops_a_unit_started_by_the_run() {
     );
     assert!(!h.user_unit("soos-remote.service", "active"));
     assert!(h.user_unit("soos-remote.service", "enabled"));
-    assert!(h.user_unit("soos-push-sender.service", "enabled"));
 
     // Active before the run and restarted by it: the rollback restarts it on the restored file.
     let mut h = Harness::new("urestart");
     let first = h.run_companion(&[]);
     assert_eq!(code(&first), 0, "{}", text(&first));
     let good = fs::read_to_string(h.remote_toml()).unwrap();
-    fs::remove_file(h.state.join("user_soos-push-sender.service_active")).unwrap();
-    h.set_env("STUB_USER_FAIL_UNIT", "soos-push-sender.service");
+    h.set_env("STUB_USER_DIE_UNIT", "soos-remote.service");
     let out = h.run(&["--yes", "--remote-unlock", "off"]);
     assert_eq!(code(&out), 5, "{}", text(&out));
     assert_eq!(fs::read_to_string(h.remote_toml()).unwrap(), good);
@@ -1575,32 +1598,32 @@ fn test_set_u19_disabled_unit_stays_disabled() {
 /// sender like a first write.
 #[test]
 fn test_set_u21_push_switched_on_later_enables_the_sender() {
-    let h = Harness::new("pushon");
+    let mut h = Harness::new("pushon");
+    let socket = format!("soos-push-sender@{}.socket", real_uid());
+    let enable_line = format!("uid=0 systemctl enable --now {socket}");
     let first = h.run_companion(&["--push", "off"]);
     assert_eq!(code(&first), 0, "{}", text(&first));
-    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
+    assert!(!has_line(&h.log_lines(), &[&enable_line]));
     let out = h.run(&["--yes", "--push", "on"]);
     assert_eq!(code(&out), 0, "{}", text(&out));
-    assert!(h.user_unit("soos-push-sender.service", "enabled"));
-    assert!(h.user_unit("soos-push-sender.service", "active"));
+    find_line(&h.log_lines(), &[&enable_line]);
+    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
     assert!(
-        !text(&out).contains("soos-push-sender.service is not enabled"),
+        !text(&out).contains(&format!("{socket} is not enabled")),
         "{}",
         text(&out)
     );
     // Push already on and the sender disabled later: it stays disabled.
-    for what in ["enabled", "active"] {
-        fs::remove_file(
-            h.state
-                .join(format!("user_soos-push-sender.service_{what}")),
-        )
-        .unwrap();
-    }
+    h.set_env("STUB_SYSTEM_OFF_UNIT", &socket);
     let out = h.run(&["--yes"]);
     assert_eq!(code(&out), 0, "{}", text(&out));
-    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
     assert!(
-        text(&out).contains("soos-push-sender.service is not enabled"),
+        !has_line(&h.log_lines(), &[&enable_line]),
+        "{:?}",
+        h.log_lines()
+    );
+    assert!(
+        text(&out).contains(&format!("{socket} is not enabled")),
         "{}",
         text(&out)
     );
@@ -2301,4 +2324,256 @@ fn test_srp10_artifact_dir_resolution_documented() {
     }
     let walkthrough = read_repo("AI/walkthroughs/244_setup_read_paths.md");
     assert!(walkthrough.contains("CARGO_TARGET_DIR"), "walkthrough 244");
+}
+
+// ---------------------------------------------------------------------------
+// PSS12 — the push sender as a system service (ADR 2026-10-23 "Push Sender as a Sandboxed
+// System Service"; spec AI/architect_spec_push_sender_system_service.md §7). New functions
+// only: the SET contracts above are unchanged.
+// ---------------------------------------------------------------------------
+
+/// PSS12: with push on, the root half enables `soos-push-sender@<uid>.socket` (system manager)
+/// after install.sh; the companion verifies that socket as the user and never enables or starts
+/// the user unit `soos-push-sender.service`.
+#[test]
+fn test_pss12_setup_enables_the_system_sender_not_the_user_unit() {
+    let h = Harness::new("pss_sys");
+    let uid = real_uid();
+    let socket = format!("soos-push-sender@{uid}.socket");
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let lines = h.log_lines();
+    let install = find_line(&lines, &["uid=0 install.sh"]);
+    let enable = find_line(&lines, &["uid=0 systemctl enable --now", &socket]);
+    let remote_install = find_line(&lines, &["uid=1000 install_remote.sh"]);
+    assert!(
+        install < enable && enable < remote_install,
+        "the root half enables the socket after install.sh and before the companion"
+    );
+    find_line(&lines, &["uid=1000 systemctl is-active", &socket]);
+    assert!(
+        !has_line(&lines, &["systemctl --user enable", "soos-push-sender"]),
+        "the user unit is never enabled: {lines:?}"
+    );
+    assert!(
+        !has_line(&lines, &["systemctl --user start", "soos-push-sender"]),
+        "the user unit is never started: {lines:?}"
+    );
+    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
+    assert!(!h.user_unit("soos-push-sender.service", "active"));
+    assert!(h.user_unit("soos-remote.service", "active"));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!("[DONE] push sender: {socket} enabled")),
+        "{t}"
+    );
+}
+
+/// PSS12: push off: no instance is enabled.
+#[test]
+fn test_pss12_push_off_enables_no_system_sender() {
+    let h = Harness::new("pss_off");
+    let out = h.run_companion(&["--push", "off"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let lines = h.log_lines();
+    assert!(
+        !has_line(&lines, &["systemctl enable", "soos-push-sender@"]),
+        "{lines:?}"
+    );
+    assert!(!has_line(&lines, &["--push-sender"]), "{lines:?}");
+}
+
+/// PSS12: a legacy user unit enabled by an earlier setup is disabled and stopped (migration);
+/// the companion succeeds.
+#[test]
+fn test_pss12_setup_disables_a_legacy_user_unit() {
+    let h = Harness::new("pss_legacy");
+    for what in ["enabled", "active"] {
+        fs::write(
+            h.state
+                .join(format!("user_soos-push-sender.service_{what}")),
+            "",
+        )
+        .unwrap();
+    }
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let lines = h.log_lines();
+    find_line(
+        &lines,
+        &["uid=1000 systemctl --user disable --now soos-push-sender.service"],
+    );
+    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
+    assert!(!h.user_unit("soos-push-sender.service", "active"));
+    assert!(
+        text(&out).contains("soos-push-sender.service disabled"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// PSS12: a companion failure after the migration re-enables the legacy user unit (the rollback
+/// restores the state before the run).
+#[test]
+fn test_pss12_rollback_restores_the_legacy_user_unit() {
+    let mut h = Harness::new("pss_legacy_rb");
+    for what in ["enabled", "active"] {
+        fs::write(
+            h.state
+                .join(format!("user_soos-push-sender.service_{what}")),
+            "",
+        )
+        .unwrap();
+    }
+    h.set_env("STUB_USER_FAIL_UNIT", "soos-remote.service");
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 5, "{}", text(&out));
+    assert!(h.user_unit("soos-push-sender.service", "enabled"));
+    assert!(h.user_unit("soos-push-sender.service", "active"));
+}
+
+/// PSS12: the dry run plans the system sender and writes nothing.
+#[test]
+fn test_pss12_dry_run_plans_the_system_sender_without_change() {
+    let h = Harness::new("pss_dry");
+    let uid = real_uid();
+    let before = h.snapshot();
+    let out = h.run(&["--dry-run", "--tailscale-login", LOGIN, "--rp-id", RP_ID]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!(
+            "[PLAN] push sender: will run - enable soos-push-sender@{uid}.socket"
+        )),
+        "{t}"
+    );
+    let lines = h.log_lines();
+    assert!(
+        lines.iter().all(|l| is_read_only_call(l)),
+        "dry-run must only query: {lines:?}"
+    );
+    assert_eq!(before, h.snapshot(), "dry-run must write nothing");
+}
+
+/// PSS16 (candid review of 2026-10-23): the "system: already done" check covers the push
+/// sender when this checkout and build have it: the installed binary must equal the artifact
+/// and both template units must equal `packaging/`, so a sender-only change or an install
+/// made before the units existed runs install.sh again. The fake checkout of the harness gets
+/// the two units here (additive setup; the stub install.sh never installs them).
+#[test]
+fn test_pss16_system_up_to_date_includes_the_push_sender() {
+    let h = Harness::new("pss_uptodate");
+    for unit in ["soos-push-sender@.socket", "soos-push-sender@.service"] {
+        fs::copy(
+            workspace_root().join("packaging").join(unit),
+            h.repo.join("packaging").join(unit),
+        )
+        .unwrap();
+    }
+    let first = h.run_companion(&[]);
+    assert_eq!(code(&first), 0, "{}", text(&first));
+    let artifact = h.repo.join("target/release/soos-push-sender");
+    assert!(
+        artifact.is_file(),
+        "the stub build wrote the sender artifact"
+    );
+
+    // Nothing of the sender installed (an install from before the units existed).
+    let dry = h.run(&["--dry-run"]);
+    assert!(
+        text(&dry).contains("[PLAN] system: will run"),
+        "a missing sender makes the system phase run:\n{}",
+        text(&dry)
+    );
+
+    // Everything installed and equal: already done.
+    let binary = h.root.join("usr/libexec/soos/soos-push-sender");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    fs::copy(&artifact, &binary).unwrap();
+    let unit_dir = h.root.join("etc/systemd/system");
+    for unit in ["soos-push-sender@.socket", "soos-push-sender@.service"] {
+        fs::copy(h.repo.join("packaging").join(unit), unit_dir.join(unit)).unwrap();
+    }
+    let dry = h.run(&["--dry-run"]);
+    assert!(
+        text(&dry).contains("[PLAN] system: already done"),
+        "{}",
+        text(&dry)
+    );
+
+    // A sender-only change: will run.
+    fs::write(&binary, "older sender\n").unwrap();
+    let dry = h.run(&["--dry-run"]);
+    assert!(
+        text(&dry).contains("[PLAN] system: will run"),
+        "a changed sender binary makes the system phase run:\n{}",
+        text(&dry)
+    );
+    fs::copy(&artifact, &binary).unwrap();
+
+    // A missing or different template unit: will run.
+    for unit in ["soos-push-sender@.socket", "soos-push-sender@.service"] {
+        let installed = unit_dir.join(unit);
+        fs::remove_file(&installed).unwrap();
+        let dry = h.run(&["--dry-run"]);
+        assert!(
+            text(&dry).contains("[PLAN] system: will run"),
+            "missing {unit}:\n{}",
+            text(&dry)
+        );
+        fs::write(&installed, "[Unit]\n").unwrap();
+        let dry = h.run(&["--dry-run"]);
+        assert!(
+            text(&dry).contains("[PLAN] system: will run"),
+            "different {unit}:\n{}",
+            text(&dry)
+        );
+        fs::copy(h.repo.join("packaging").join(unit), &installed).unwrap();
+    }
+    let dry = h.run(&["--dry-run"]);
+    assert!(
+        text(&dry).contains("[PLAN] system: already done"),
+        "{}",
+        text(&dry)
+    );
+}
+
+/// PSS17 (candid review of 2026-10-23): a companion rollback keeps the push sender socket the
+/// root half enabled (idle without soos-remote) and says how to disable it.
+#[test]
+fn test_pss17_companion_failure_names_the_kept_socket() {
+    let mut h = Harness::new("pss_kept_socket");
+    let uid = real_uid();
+    h.set_env("STUB_USER_FAIL_UNIT", "soos-remote.service");
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 5, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!(
+            "soos-push-sender@{uid}.socket enabled by the system phase is kept"
+        )) && t.contains(&format!(
+            "sudo systemctl disable --now soos-push-sender@{uid}.socket"
+        )),
+        "{t}"
+    );
+    assert!(
+        !has_line(
+            &h.log_lines(),
+            &[
+                "systemctl disable",
+                &format!("soos-push-sender@{uid}.socket")
+            ]
+        ),
+        "the companion never touches the system socket"
+    );
+    // Push off: nothing about the socket.
+    let mut h = Harness::new("pss_kept_socket_off");
+    h.set_env("STUB_USER_FAIL_UNIT", "soos-remote.service");
+    let out = h.run_companion(&["--push", "off"]);
+    assert_eq!(code(&out), 5, "{}", text(&out));
+    assert!(
+        !text(&out).contains("enabled by the system phase is kept"),
+        "{}",
+        text(&out)
+    );
 }

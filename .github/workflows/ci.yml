@@ -34,6 +34,8 @@
 #                        nothing uploaded or published)
 #   6g. setup-root-preview — scripts/setup.sh camera view, daemon side, as real
 #                        root under a real systemd in ubuntu:24.04 (after lint)
+#   6h. push-sender-unit — the socket-activated DynamicUser push sender system
+#                        service under a real systemd in ubuntu:24.04 (after lint)
 #   7. ci-success      — single aggregate status for merge gating
 #   7b. ci-success-main — push/dispatch-only aggregate: CI Success and
 #                        system-onnxruntime must both succeed on main
@@ -405,6 +407,29 @@ jobs:
         run: ./tests/docker/setup_root_preview_test.sh
 
   # ---------------------------------------------------------------------------
+  # Job 6h: the push sender system service (ADR 2026-10-23 "Push Sender as a
+  # Sandboxed System Service", matrix PSS14): release soos-push-sender built in the
+  # tests/docker/Dockerfile.ubuntu image, packaging/soos-push-sender@.{socket,service}
+  # under a real systemd (PID 1, privileged ubuntu:24.04 image of
+  # tests/docker/Dockerfile.systemd): socket owner and mode, socket activation as a
+  # dynamic uid with no capability, the sender's own sandbox check, peer refusal,
+  # uid 0 refusal, removal (tests/docker/push_sender_system_unit_test.sh).
+  # ---------------------------------------------------------------------------
+  push-sender-unit:
+    name: "push sender system unit (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Drive soos-push-sender@.socket with systemd as PID 1 (ubuntu:24.04)
+        run: ./tests/docker/push_sender_system_unit_test.sh
+
+  # ---------------------------------------------------------------------------
   # Job 6f: distribution build against the system ONNX Runtime (GitHub #375,
   # PR 1 of #361): digest-pinned Arch image with onnxruntime-cpu from [extra]
   # and Rust = [workspace.package] rust-version; crates and models are fetched
@@ -673,7 +698,7 @@ jobs:
   ci-success:
     name: "CI Success"
     if: always() && github.event_name != 'schedule'
-    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit, network-lock-polkit, setup-root-preview]
+    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit, network-lock-polkit, setup-root-preview, push-sender-unit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

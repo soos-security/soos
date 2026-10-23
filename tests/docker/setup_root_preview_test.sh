@@ -533,7 +533,7 @@ no_temp_files() {
 companion_ran() {
     [[ -s "${COMPANION_LOG}" && -f "/home/${TEST_USER}/.config/soos/remote.toml" ]] \
         || case_fail "$1: the phone companion did not run"
-    expect_out "[DONE] companion: soos-remote.service soos-push-sender.service running" "$1"
+    expect_out "[DONE] companion: soos-remote.service running" "$1"
 }
 
 companion_not_run() {

@@ -1,0 +1,23 @@
+# soos push sender socket, one instance per desktop user: soos-push-sender@<uid>.socket
+# (ADR 2026-10-23 "Push Sender as a Sandboxed System Service"). PID 1 creates
+# /run/soos-push/<uid>/push.sock owned by that uid, mode 0600: only that user (and root) can
+# connect; /run/soos-push and /run/soos-push/<uid> are root-owned 0755, so no other user can
+# create or replace anything there. The first connection starts soos-push-sender@<uid>.service
+# (DynamicUser=yes), which serves only peer <uid> (SO_PEERCRED).
+# Install: scripts/install.sh; enable (root): systemctl enable --now soos-push-sender@<uid>.socket
+# (scripts/setup.sh does it for the session owner when push notifications are on).
+
+[Unit]
+Description=soos push sender socket for uid %i
+Documentation=https://github.com/Mysticaly622/soos/blob/main/Docs/REMOTE_COMPANION.md
+
+[Socket]
+ListenStream=/run/soos-push/%i/push.sock
+SocketUser=%i
+SocketMode=0600
+DirectoryMode=0755
+RemoveOnStop=yes
+Accept=no
+
+[Install]
+WantedBy=sockets.target

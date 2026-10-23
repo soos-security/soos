@@ -47,6 +47,9 @@ rm -rf %{buildroot}
 install -d -m 0755 %{buildroot}/usr/libexec/soos
 install -m 0755 target/release/soos-daemon %{buildroot}/usr/libexec/soos/soos-daemon
 install -m 0755 scripts/provision_master_key.sh %{buildroot}/usr/libexec/soos/provision-master-key
+# Push sender system service (ADR 2026-10-23): never enabled by the package; one instance per
+# desktop user (systemctl enable --now soos-push-sender@<uid>.socket).
+install -m 0755 target/release/soos-push-sender %{buildroot}/usr/libexec/soos/soos-push-sender
 
 install -d -m 0755 %{buildroot}%{_bindir}
 install -m 0755 target/release/soos-admin %{buildroot}%{_bindir}/soos-admin
@@ -71,6 +74,8 @@ install -m 0644 target/release/libpam_soos.so %{buildroot}%{_libdir}/security/pa
 # Install systemd service unit
 install -d -m 0755 %{buildroot}%{_unitdir}
 install -m 0644 packaging/soos-daemon.service %{buildroot}%{_unitdir}/soos-daemon.service
+install -m 0644 packaging/soos-push-sender@.socket %{buildroot}%{_unitdir}/soos-push-sender@.socket
+install -m 0644 packaging/soos-push-sender@.service %{buildroot}%{_unitdir}/soos-push-sender@.service
 
 # Install Fedora custom authselect profile
 install -d -m 0755 %{buildroot}%{_sysconfdir}/authselect/custom/soos
@@ -135,6 +140,38 @@ fi
 %preun
 %systemd_preun soos-daemon.service
 
+# On package removal only (never on upgrade):
+if [ "$1" -eq 0 ]; then
+    # Push sender system service (ADR 2026-10-23): disable and stop every enabled
+    # per-user instance before its template units go; only soos-push-sender@<digits>.socket
+    # names reach systemctl.
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        for link in /etc/systemd/system/sockets.target.wants/soos-push-sender@*.socket; do
+            [ -e "$link" ] || [ -L "$link" ] || continue
+            unit="${link##*/}"
+            instance="${unit#soos-push-sender@}"
+            instance="${instance%%.socket}"
+            case "$unit" in
+                soos-push-sender@[0-9]*.socket) ;;
+                *) continue ;;
+            esac
+            case "$instance" in
+                ""|*[!0-9]*) continue ;;
+            esac
+            systemctl disable --now "$unit" || true
+            systemctl stop "soos-push-sender@${instance}.service" || true
+        done
+    fi
+    # A prefix drop-in written by scripts/install.sh (recognised by its marker line) would
+    # override the packaged unit later: remove it with the package.
+    drop_in=/etc/systemd/system/soos-push-sender@.service.d/prefix.conf
+    if [ -f "$drop_in" ] && [ ! -L "$drop_in" ] \
+            && grep -q '^# Written by scripts/install.sh for --prefix ' "$drop_in"; then
+        rm -f "$drop_in"
+        rmdir /etc/systemd/system/soos-push-sender@.service.d 2>/dev/null || true
+    fi
+fi
+
 # On package removal, leave authselect on a valid profile before the custom
 # profile files disappear: restore the recorded profile, else a stock one.
 if [ "$1" -eq 0 ] && command -v authselect >/dev/null 2>&1; then
@@ -195,6 +232,7 @@ fi
 %files
 /usr/libexec/soos/soos-daemon
 /usr/libexec/soos/provision-master-key
+/usr/libexec/soos/soos-push-sender
 %{_bindir}/soos-admin
 %{_bindir}/soos-enroll
 %{_bindir}/soos-gui
@@ -206,6 +244,8 @@ fi
 %{_datadir}/soos/lockscreen/hyprlock-soos.conf
 %{_libdir}/security/pam_soos.so
 %{_unitdir}/soos-daemon.service
+%{_unitdir}/soos-push-sender@.socket
+%{_unitdir}/soos-push-sender@.service
 %{_sysconfdir}/authselect/custom/soos
 %dir %attr(0755, root, root) %{_sysconfdir}/soos
 %ghost %{_sysconfdir}/soos/authselect.previous

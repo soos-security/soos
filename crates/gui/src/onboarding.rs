@@ -385,7 +385,7 @@ fn remote_prerequisites(switch: RemoteSwitch) -> &'static str {
         RemoteSwitch::Unlock => "It needs `rp_id` and a registered passkey.",
         RemoteSwitch::Funnel => "It needs `rp_id` and the Tailscale Funnel policy of your tailnet.",
         RemoteSwitch::Push => {
-            "It needs `password_alerts = true`, `rp_id` and the soos-push-sender user unit."
+            "It needs `password_alerts = true`, `rp_id` and the soos-push-sender system service."
         }
         RemoteSwitch::CameraView => {
             "It needs `rp_id`, and [preview] of /etc/soos/daemon.toml must allow your uid \

@@ -57,6 +57,9 @@ readonly CAMERA_TIMEOUT_S=15
 readonly LOGINCTL_TIMEOUT_S=5
 readonly MAX_USER_LEN=32
 readonly QUERY_TIMEOUT_S=10
+# Bound of every systemctl enable|disable|stop of the push sender socket
+# soos-push-sender@<uid>.socket (ADR 2026-10-23): a socket unit starts no process.
+readonly SENDER_UNIT_TIMEOUT_S=30
 # Bound of every systemctl start|restart|stop|try-restart of soos-daemon.service
 # (GitHub #437): TimeoutStartSec=60 of packaging/soos-daemon.service plus a 30 s
 # margin for a graceful stop (the first half of a restart) and the job hand-off,
@@ -156,6 +159,7 @@ PAM_DIR=""
 ARTIFACT_DIR_ARG=""
 LOCAL_SEAT_ARG=""
 SYSTEM_PHASE=false
+PUSH_SENDER_ARG=""
 NO_REMOTE=false
 TS_LOGIN=""
 RP_ID=""
@@ -231,7 +235,8 @@ setup-managed remote.toml stays off unless its option says on:
   --password-alerts <on|off>
                            Failed-password alerts from the journal (password_alerts)
   --push <on|off>          Push notifications (push_notifications and the
-                           soos-push-sender unit; needs password alerts)
+                           soos-push-sender@<uid>.socket system service;
+                           needs password alerts)
   --offline-alerts <on|off>
                            Back-online notification (offline_alerts; needs push)
   --camera-view <on|off>   Live camera view (camera_view; the daemon [preview]
@@ -245,6 +250,8 @@ setup-managed remote.toml stays off unless its option says on:
   --artifact-dir <DIR>     Internal: release artifacts for --system-phase
   --local-seat <yes|no>    Internal: local-seat verdict of the user half for
                            --system-phase
+  --push-sender on         Internal: enable soos-push-sender@<uid>.socket of
+                           --user in --system-phase (decided by the user half)
   -h, --help               Display this help message and exit
 
 Lock screen (Docs/LOCKSCREEN_WIDGET.md): install.sh installs soos-lockstatus,
@@ -436,6 +443,14 @@ while [[ $# -gt 0 ]]; do
             SYSTEM_PHASE=true
             shift
             ;;
+        --push-sender)
+            require_value "$@"
+            case "$2" in
+                on) PUSH_SENDER_ARG="$2" ;;
+                *) usage_error "--push-sender takes on: '$2'" ;;
+            esac
+            shift 2
+            ;;
         --no-remote)
             NO_REMOTE=true
             shift
@@ -484,8 +499,8 @@ if [[ "${SYSTEM_PHASE}" == true ]]; then
             || -z "${LOCAL_SEAT_ARG}" || "${DRY_RUN}" == true ]]; then
         usage_error "--system-phase is internal: it runs as root with --user, --artifact-dir and --local-seat, without --dry-run"
     fi
-elif [[ -n "${ARTIFACT_DIR_ARG}" || -n "${LOCAL_SEAT_ARG}" ]]; then
-    usage_error "--artifact-dir and --local-seat are internal to --system-phase"
+elif [[ -n "${ARTIFACT_DIR_ARG}" || -n "${LOCAL_SEAT_ARG}" || -n "${PUSH_SENDER_ARG}" ]]; then
+    usage_error "--artifact-dir, --local-seat and --push-sender are internal to --system-phase"
 fi
 
 # Feature values: the option, else an explicit false of the setup-managed remote.toml
@@ -586,6 +601,12 @@ run_bounded() {
 unit_query() {
     command -v systemctl >/dev/null 2>&1 || return 1
     run_bounded "${QUERY_TIMEOUT_S}" systemctl "$1" --quiet "${UNIT}" 2>/dev/null
+}
+
+# Read-only query of a system unit other than the daemon (no root needed).
+system_unit_query() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    run_bounded "${QUERY_TIMEOUT_S}" systemctl "$1" --quiet "$2" 2>/dev/null
 }
 
 # =============================================================================
@@ -982,6 +1003,16 @@ system_up_to_date() {
             cmp -s -- "${artifacts}/${name}" "${PREFIX}/bin/${name}" || return 1
         fi
     done
+    # Push sender system service (ADR 2026-10-23): compared when this build has the sender and
+    # this checkout has both template units (install.sh installs them only then).
+    if [[ -f "${artifacts}/soos-push-sender" && -s "${artifacts}/soos-push-sender" \
+            && -f "${WORKSPACE_ROOT}/packaging/soos-push-sender@.socket" \
+            && -f "${WORKSPACE_ROOT}/packaging/soos-push-sender@.service" ]]; then
+        cmp -s -- "${artifacts}/soos-push-sender" "${PREFIX}/libexec/soos/soos-push-sender" || return 1
+        for name in soos-push-sender@.socket soos-push-sender@.service; do
+            cmp -s -- "${WORKSPACE_ROOT}/packaging/${name}" "${SYSCONFDIR}/systemd/system/${name}" || return 1
+        done
+    fi
     if gnome_extension_in_checkout; then
         for name in "${GNOME_EXTENSION_FILES[@]}"; do
             cmp -s -- "${GNOME_EXT_SRC}/${name}" "${GNOME_EXT_DIR}/${name}" || return 1
@@ -1299,6 +1330,12 @@ COMPANION_RP_ID=""
 UNITS_CURRENT=false
 REMOTE_UNIT_KEPT_OFF=false
 SENDER_UNIT_KEPT_OFF=false
+# Push sender (ADR 2026-10-23 "Push Sender as a Sandboxed System Service"): the system socket
+# soos-push-sender@<uid>.socket, enabled by the root half when PUSH_SENDER_PLAN is on; the
+# user unit of earlier versions is migrated (disabled), never enabled.
+readonly LEGACY_SENDER_UNIT="soos-push-sender.service"
+SENDER_SOCKET_UNIT=""
+PUSH_SENDER_PLAN=""
 DAEMON_PREVIEW_STATE=""
 
 # The daemon.toml setup creates when none exists (camera view, daemon side).
@@ -1479,10 +1516,65 @@ user_unit_query() {
 companion_units_current() {
     user_unit_query is-enabled soos-remote.service || return 1
     user_unit_query is-active soos-remote.service || return 1
-    if [[ "${FEATURE_VALUE[push_notifications]}" == true && "${SENDER_UNIT_KEPT_OFF}" != true ]]; then
-        user_unit_query is-enabled soos-push-sender.service || return 1
-        user_unit_query is-active soos-push-sender.service || return 1
+    if [[ "${PUSH_SENDER_PLAN}" == on ]]; then
+        push_sender_current || return 1
     fi
+}
+
+# The system socket is enabled and listening and no user unit of an earlier version is left.
+push_sender_current() {
+    system_unit_query is-enabled "${SENDER_SOCKET_UNIT}" || return 1
+    system_unit_query is-active "${SENDER_SOCKET_UNIT}" || return 1
+    ! legacy_sender_present
+}
+
+# The template units are not installed (`systemctl is-enabled` exits 4, "not-found"): an
+# artifact set without soos-push-sender, or an install.sh run before this version.
+sender_units_missing() {
+    local rc=0
+    command -v systemctl >/dev/null 2>&1 || return 1
+    run_bounded "${QUERY_TIMEOUT_S}" systemctl is-enabled --quiet "$1" 2>/dev/null || rc=$?
+    [[ "${rc}" -eq 4 ]]
+}
+
+# The session owner's socket is installed but disabled and stopped (is-active 3 and
+# is-enabled 1): never concluded from a failed query (no system bus answers 1 to both).
+sender_socket_disabled() {
+    local rc=0
+    command -v systemctl >/dev/null 2>&1 || return 1
+    run_bounded "${QUERY_TIMEOUT_S}" systemctl is-active --quiet "${SENDER_SOCKET_UNIT}" 2>/dev/null || rc=$?
+    [[ "${rc}" -eq 3 ]] || return 1
+    rc=0
+    run_bounded "${QUERY_TIMEOUT_S}" systemctl is-enabled --quiet "${SENDER_SOCKET_UNIT}" 2>/dev/null || rc=$?
+    [[ "${rc}" -eq 1 ]]
+}
+
+# State of the session owner's socket as the system manager reports it to that user, from the
+# exit codes only: listening (is-active 0), missing (inactive and not-found: units not
+# installed), stopped (inactive but installed), unknown (no answer, for example no system bus).
+sender_socket_state() {
+    local rc=0
+    if ! command -v systemctl >/dev/null 2>&1; then
+        printf 'unknown'
+        return 0
+    fi
+    run_bounded "${QUERY_TIMEOUT_S}" systemctl is-active --quiet "${SENDER_SOCKET_UNIT}" 2>/dev/null || rc=$?
+    case "${rc}" in
+        0) printf 'listening' ;;
+        3)
+            if sender_units_missing "${SENDER_SOCKET_UNIT}"; then
+                printf 'missing'
+            else
+                printf 'stopped'
+            fi
+            ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+# The user unit of earlier versions is enabled or running (migrated by the companion phase).
+legacy_sender_present() {
+    user_unit_query is-enabled "${LEGACY_SENDER_UNIT}" || user_unit_query is-active "${LEGACY_SENDER_UNIT}"
 }
 
 features_summary() {
@@ -1637,10 +1729,20 @@ resolve_companion() {
     # enables the units only for a configuration it writes for the first time.
     if [[ "${CONFIG_STATE}" == managed ]]; then
         user_unit_query is-enabled soos-remote.service || REMOTE_UNIT_KEPT_OFF=true
-        # The sender only when push was already on in that file: switching push on now
-        # enables it like a first write.
-        if [[ "${FEATURE_VALUE[push_notifications]}" == true && "${FILE_BOOL[push_notifications]:-}" == true ]]; then
-            user_unit_query is-enabled soos-push-sender.service || SENDER_UNIT_KEPT_OFF=true
+    fi
+    # The push sender is the system socket soos-push-sender@<uid>.socket (ADR 2026-10-23),
+    # enabled by the root half. Kept off only when push was already on in the managed file and
+    # neither that socket nor a user unit of an earlier version is enabled (the owner disabled
+    # it); switching push on now enables it like a first write, and an enabled user unit is
+    # migrated, never "kept off".
+    SENDER_SOCKET_UNIT="soos-push-sender@${TARGET_UID}.socket"
+    if [[ "${FEATURE_VALUE[push_notifications]}" == true ]]; then
+        PUSH_SENDER_PLAN=on
+        if [[ "${CONFIG_STATE}" == managed && "${FILE_BOOL[push_notifications]:-}" == true ]] \
+                && sender_socket_disabled \
+                && ! user_unit_query is-enabled "${LEGACY_SENDER_UNIT}"; then
+            SENDER_UNIT_KEPT_OFF=true
+            PUSH_SENDER_PLAN=""
         fi
     fi
     if [[ "${CONFIG_ACTION}" == "already done" ]] && companion_units_current; then
@@ -1676,13 +1778,28 @@ print_companion_plan() {
             if [[ "${REMOTE_UNIT_KEPT_OFF}" == true ]]; then
                 plan "companion units" "kept off" "soos-remote.service is not enabled; setup only enables it for a configuration it writes for the first time (systemctl --user enable --now soos-remote.service)"
             elif [[ "${UNITS_CURRENT}" == true ]]; then
-                plan "companion units" "already done" "soos-remote.service$([[ "${FEATURE_VALUE[push_notifications]}" == true ]] && printf ' and soos-push-sender.service') enabled and running"
+                plan "companion units" "already done" "soos-remote.service enabled and running"
             else
-                plan "companion units" "will run" "validate the configuration, then enable and start soos-remote.service$([[ "${FEATURE_VALUE[push_notifications]}" == true ]] && printf ' and soos-push-sender.service') (systemctl --user)"
+                plan "companion units" "will run" "validate the configuration, then enable and start soos-remote.service (systemctl --user)"
             fi
+            print_push_sender_plan
             ;;
     esac
     plan "tailscale" "printed only" "setup runs no tailscale serve or funnel command; the steps are printed at the end"
+}
+
+# Push sender, system side (ADR 2026-10-23): the root half enables the socket; the companion
+# phase disables a user unit of an earlier version.
+print_push_sender_plan() {
+    if [[ "${SENDER_UNIT_KEPT_OFF}" == true ]]; then
+        plan "push sender" "kept off" "${SENDER_SOCKET_UNIT} is not enabled; setup only enables it for a configuration it writes for the first time or when push is switched on (sudo systemctl enable --now ${SENDER_SOCKET_UNIT})"
+    elif [[ "${PUSH_SENDER_PLAN}" != on ]]; then
+        plan "push sender" "skipped" "push notifications off"
+    elif push_sender_current; then
+        plan "push sender" "already done" "${SENDER_SOCKET_UNIT} enabled and listening (system service)"
+    else
+        plan "push sender" "will run" "enable ${SENDER_SOCKET_UNIT} as root (system service, DynamicUser, socket /run/soos-push/${TARGET_UID}/push.sock)$(legacy_sender_present && printf '; then disable the user unit %s of an earlier version' "${LEGACY_SENDER_UNIT}")"
+    fi
 }
 
 print_daemon_preview_plan() {
@@ -1852,6 +1969,12 @@ rollback_journal() {
                 rm -f -- "${DAEMON_TOML}"
                 run_bounded "${UNIT_START_TIMEOUT_S}" systemctl try-restart "${UNIT}" >/dev/null 2>&1
                 ;;
+            push_sender_enabled:*)
+                run_bounded "${SENDER_UNIT_TIMEOUT_S}" systemctl disable --now "${JOURNAL[i]#push_sender_enabled:}" >/dev/null 2>&1
+                ;;
+            push_sender_started:*)
+                run_bounded "${SENDER_UNIT_TIMEOUT_S}" systemctl stop "${JOURNAL[i]#push_sender_started:}" >/dev/null 2>&1
+                ;;
         esac
     done
     JOURNAL=()
@@ -1908,6 +2031,29 @@ phase_system() {
     info "Running scripts/install.sh --start (transactional; rolls back its own changes on failure)"
     bash "${SCRIPT_DIR}/install.sh" "${args[@]}" || rc=$?
     return "${rc}"
+}
+
+# Push sender, system side (only with --push-sender on from the user half; ADR 2026-10-23):
+# enables and starts the socket soos-push-sender@<uid>.socket (idempotent), the socket
+# soos-remote reads (/run/soos-push/<uid>/push.sock); a first connection starts the
+# DynamicUser service. Reported done only once systemd reports the socket listening.
+phase_push_sender() {
+    [[ "${PUSH_SENDER_ARG}" == on ]] || return 0
+    [[ "${TARGET_UID}" =~ ^[0-9]+$ ]] || return 1
+    local unit="soos-push-sender@${TARGET_UID}.socket"
+    if sender_units_missing "${unit}"; then
+        printf '[SKIP] push sender: not applied, %s is not installed (scripts/install.sh installs the soos-push-sender units when the workspace build has the sender); push notifications stay unavailable\n' "${unit}"
+        return 0
+    fi
+    if ! system_unit_query is-enabled "${unit}"; then
+        # Journaled first: a failed enable --now may leave the socket enabled.
+        JOURNAL+=("push_sender_enabled:${unit}")
+    elif ! system_unit_query is-active "${unit}"; then
+        JOURNAL+=("push_sender_started:${unit}")
+    fi
+    run_bounded "${SENDER_UNIT_TIMEOUT_S}" systemctl enable --now "${unit}" || return 1
+    system_unit_query is-active "${unit}" || return 1
+    printf '[DONE] push sender: %s enabled and listening (system service, DynamicUser)\n' "${unit}"
 }
 
 phase_access() {
@@ -2256,6 +2402,7 @@ run_system_phase() {
     phase_access || fail_and_rollback "access"
     phase_presence || fail_and_rollback "presence"
     phase_lock_widget || fail_and_rollback "lock widget"
+    phase_push_sender || fail_and_rollback "push sender"
     if ! phase_preview; then
         if [[ "${PREVIEW_DAEMON_DOWN}" == true ]]; then
             printf '[FAIL] camera view (daemon): %s is not ready even without %s (exit 70; nothing else rolled back)\n' "${UNIT}" "${DAEMON_TOML}"
@@ -2540,6 +2687,9 @@ rollback_companion() {
             unit_restarted:*)
                 restart_units+=("${entry#unit_restarted:}")
                 ;;
+            user_unit_disabled:*)
+                run_bounded "${QUERY_TIMEOUT_S}" systemctl --user enable --now "${entry#user_unit_disabled:}" >/dev/null 2>&1
+                ;;
             config_dir_created)
                 rmdir -- "${CONFIG_DIR}" 2>/dev/null
                 ;;
@@ -2659,6 +2809,9 @@ companion_failed() {
     if [[ "${CAMERA_DAEMON}" == on && "${DAEMON_PREVIEW_STATE}" == absent ]]; then
         error "The [preview] section the root half created in ${DAEMON_TOML} is kept (an administrator file; remove it by hand if unwanted)."
     fi
+    if [[ "${PUSH_SENDER_PLAN}" == on ]]; then
+        error "The push sender socket ${SENDER_SOCKET_UNIT} enabled by the system phase is kept (idle: the sender only starts when soos-remote connects); disable it with: sudo systemctl disable --now ${SENDER_SOCKET_UNIT}"
+    fi
     return "${EXIT_COMPANION}"
 }
 
@@ -2722,6 +2875,30 @@ run_companion_phase() {
         return
     fi
     local -a running=()
+    # Push sender (ADR 2026-10-23): the system socket the root half enabled replaces the user
+    # unit of earlier versions, which is disabled and stopped (re-enabled by a rollback).
+    local sender_state=""
+    if [[ "${PUSH_SENDER_PLAN}" == on ]]; then
+        sender_state="$(sender_socket_state)"
+        case "${sender_state}" in
+            missing)
+                printf '[SKIP] push sender: %s is not installed, so push notifications stay unavailable (scripts/install.sh installs it); a user unit of an earlier version is left as it is\n' "${SENDER_SOCKET_UNIT}"
+                ;;
+            unknown)
+                printf '[SKIP] push sender: the state of %s could not be read as %s (check: systemctl status %s); a user unit of an earlier version is left as it is\n' "${SENDER_SOCKET_UNIT}" "${TARGET_USER}" "${SENDER_SOCKET_UNIT}"
+                ;;
+            stopped)
+                companion_failed "${SENDER_SOCKET_UNIT} is not listening (journalctl -u ${SENDER_SOCKET_UNIT})"
+                return
+                ;;
+        esac
+    fi
+    if [[ "${sender_state}" == listening ]] && legacy_sender_present; then
+        COMPANION_JOURNAL+=("user_unit_disabled:${LEGACY_SENDER_UNIT}")
+        run_bounded "${QUERY_TIMEOUT_S}" systemctl --user disable --now "${LEGACY_SENDER_UNIT}" \
+            || { companion_failed "disabling the user unit ${LEGACY_SENDER_UNIT} of an earlier version"; return; }
+        printf '[DONE] push sender: the user unit %s disabled (replaced by the system service %s)\n' "${LEGACY_SENDER_UNIT}" "${SENDER_SOCKET_UNIT}"
+    fi
     if [[ "${REMOTE_UNIT_KEPT_OFF}" == true ]]; then
         printf '[SKIP] companion units: soos-remote.service is not enabled; setup only enables it for a configuration it writes for the first time: systemctl --user enable --now soos-remote.service\n'
     else
@@ -2730,11 +2907,7 @@ run_companion_phase() {
         running+=(soos-remote.service)
     fi
     if [[ "${push}" == true && "${SENDER_UNIT_KEPT_OFF}" == true ]]; then
-        printf '[SKIP] companion units: soos-push-sender.service is not enabled; setup only enables it for a configuration it writes for the first time or when push is switched on: systemctl --user enable --now soos-push-sender.service\n'
-    elif [[ "${push}" == true ]]; then
-        companion_unit soos-push-sender.service "${COMPANION_INSTALLED_NOW}" \
-            || { companion_failed "starting soos-push-sender.service"; return; }
-        running+=(soos-push-sender.service)
+        printf '[SKIP] push sender: %s is not enabled; setup only enables it for a configuration it writes for the first time or when push is switched on: sudo systemctl enable --now %s\n' "${SENDER_SOCKET_UNIT}" "${SENDER_SOCKET_UNIT}"
     fi
     # Type=exec: a configuration refusal (exit 78) shows only after the start returned.
     if [[ "${UNITS_STARTED_NOW}" == true ]]; then
@@ -2799,10 +2972,16 @@ print_companion_guide() {
     if [[ "${FEATURE_VALUE[push_notifications]}" != true ]] && user_unit_query is-enabled soos-push-sender.service; then
         info "  Push is off: soos-push-sender.service stays enabled but idle; stop it with: systemctl --user disable --now soos-push-sender.service"
     fi
+    if [[ "${FEATURE_VALUE[push_notifications]}" != true ]] && system_unit_query is-enabled "soos-push-sender@${TARGET_UID}.socket"; then
+        info "  Push is off: soos-push-sender@${TARGET_UID}.socket stays enabled but idle (the sender only starts on a connection); stop it with: sudo systemctl disable --now soos-push-sender@${TARGET_UID}.socket"
+    fi
     if [[ "${FEATURE_VALUE[push_notifications]}" == true ]]; then
         info "  4. Push: in the web app tap Enable notifications."
+        # The system unit binds the two systemd-resolved files read-only; any other target
+        # under /run stays hidden from the sender.
         target="$(readlink -f /etc/resolv.conf 2>/dev/null)" || target=""
-        if [[ "${target}" == /run/* ]]; then
+        if [[ "${target}" == /run/* && "${target}" != /run/systemd/resolve/stub-resolv.conf \
+                && "${target}" != /run/systemd/resolve/resolv.conf ]]; then
             warn "  /etc/resolv.conf resolves to ${target}, which the soos-push-sender sandbox hides: push notifications are NOT delivered until you add the resolver drop-in of Docs/REMOTE_COMPANION.md section 2d (setup never adds it)."
         fi
     fi
@@ -2891,6 +3070,10 @@ SYSTEM_ARGS=(--system-phase --yes --user "${TARGET_USER}" --artifact-dir "${ARTI
 [[ -n "${LOCK_WIDGET}" ]] && SYSTEM_ARGS+=(--lock-widget "${LOCK_WIDGET}")
 [[ "${ENROLL}" != true ]] && SYSTEM_ARGS+=(--no-enroll)
 [[ "${REINSTALL}" == true ]] && SYSTEM_ARGS+=(--reinstall)
+# The push sender socket of the session owner (decided by the companion plan above).
+if [[ "${COMPANION_RUN}" == true && "${PUSH_SENDER_PLAN}" == on ]]; then
+    SYSTEM_ARGS+=(--push-sender on)
+fi
 # The root half resolves the uid of the [preview] section itself; only the decision is passed.
 if [[ "${CAMERA_DAEMON}" == on && "${DAEMON_PREVIEW_STATE}" != elsewhere ]]; then
     SYSTEM_ARGS+=(--camera-view on)

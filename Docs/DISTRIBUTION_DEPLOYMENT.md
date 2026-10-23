@@ -400,6 +400,34 @@ sudo dpkg -r soos
 `gdm-password` copy made by `soos-admin gdm enable`) and verifies the result against the
 pre-install snapshot `/var/lib/soos/state/pam-backup` (see §7).
 
+### 3.6 Phone Companion Push Sender on Ubuntu 23.10 and Later
+
+Ubuntu 23.10 and later (24.04 included) set `kernel.apparmor_restrict_unprivileged_userns=1`:
+an unprivileged process, the systemd **user** manager included, cannot create a user namespace.
+The former user unit `soos-push-sender.service` needs one for its mount sandbox, so it fails:
+
+```text
+soos-push-sender.service: Failed to set up mount namespacing: Operation not supported
+Main process exited, code=exited, status=226/NAMESPACE
+```
+
+The push sender therefore runs as the sandboxed **system** service `soos-push-sender@<uid>.service`
+(ADR 2026-10-23 "Push Sender as a Sandboxed System Service"; `Docs/REMOTE_COMPANION.md` §2d):
+socket-activated by `soos-push-sender@<uid>.socket` (`/run/soos-push/<uid>/push.sock`, owned by
+`<uid>`, mode `0600`), running as a dynamic uid with no capability. `scripts/install.sh`
+installs the units and `/usr/libexec/soos/soos-push-sender`; `scripts/setup.sh` enables the
+socket of the session owner and disables a user unit left by an earlier version. By hand:
+
+```bash
+sudo systemctl enable --now soos-push-sender@$(id -u).socket
+systemctl --user disable --now soos-push-sender   # only if an earlier version enabled it
+systemctl --user restart soos-remote
+systemctl status soos-push-sender@$(id -u).socket  # active (listening)
+```
+
+The system manager needs no user namespace, so the same units work on Debian, Fedora and Arch.
+Do not relax `kernel.apparmor_restrict_unprivileged_userns` for soos.
+
 ---
 
 ## 4. Fedora 40 & RHEL 9 Deployment with `authselect`
