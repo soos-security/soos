@@ -219,10 +219,11 @@ wait_for_boot() {
 readonly CLIENT_PL='
 use strict; use warnings; use IO::Socket::UNIX; use Socket qw(SOCK_STREAM SOL_SOCKET SO_PEERCRED);
 my ($path, $payload) = @ARGV;
+$SIG{PIPE} = "IGNORE";
 my $s = IO::Socket::UNIX->new(Type => SOCK_STREAM, Peer => $path);
 if (!$s) { print "CONNECT_FAIL $!\n"; exit 0; }
 my ($pid, $uid, $gid) = unpack("lII", getsockopt($s, SOL_SOCKET, SO_PEERCRED));
-print {$s} pack("N", length $payload) . $payload;
+if (!print {$s} pack("N", length $payload) . $payload) { print "NO_REPLY\n"; exit 0; }
 my $hdr = ""; my $n = read($s, $hdr, 4);
 if (!defined $n || $n < 4) { print "NO_REPLY\n"; exit 0; }
 my $len = unpack("N", $hdr); my $body = ""; read($s, $body, $len);
@@ -332,7 +333,8 @@ while (( $(now_ms) < deadline )); do
     sleep 0.3
 done
 [[ "${result}" = "78" ]] || fail "soos-push-sender@0.service did not exit 78 (ExecMainStatus '${result}')"
-journalctl -u soos-push-sender@0.service --no-pager -o cat | grep -q "push sender instance identity refused\|push sender arguments refused" \
+grep -q "push sender instance identity refused\|push sender arguments refused" \
+    <<< "$(journalctl -u soos-push-sender@0.service --no-pager -o cat)" \
     || fail "the uid 0 instance did not log its refusal"
 systemctl stop soos-push-sender@0.socket soos-push-sender@0.service 2>/dev/null || true
 success "The uid 0 instance exits 78 and is not restarted."
@@ -379,7 +381,7 @@ info "carol: ${reply}"
 pid="$(systemctl show -p MainPID --value "${CAROL_SERVICE}")"
 [[ "$(readlink "/proc/${pid}/exe")" = "/usr/local/libexec/soos/soos-push-sender" ]] \
     || fail "the instance runs $(readlink "/proc/${pid}/exe"), not the /usr/local binary"
-journalctl -u "${CAROL_SERVICE}" --no-pager -o cat | grep -q "push sender ready" \
+grep -q "push sender ready" <<< "$(journalctl -u "${CAROL_SERVICE}" --no-pager -o cat)" \
     || fail "the /usr/local sender never reported ready"
 systemctl disable --now "${CAROL_SOCKET}"
 systemctl stop "${CAROL_SERVICE}"
