@@ -140,6 +140,30 @@ fi
 %preun
 %systemd_preun soos-daemon.service
 
+# On package removal only (never on upgrade):
+if [ "$1" -eq 0 ]; then
+    # Push sender system service (ADR 2026-10-23): disable and stop every enabled
+    # per-user instance before its template units go; only soos-push-sender@<digits>.socket
+    # names reach systemctl.
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        for link in /etc/systemd/system/sockets.target.wants/soos-push-sender@*.socket; do
+            [ -e "$link" ] || [ -L "$link" ] || continue
+            unit="${link##*/}"
+            instance="${unit#soos-push-sender@}"
+            instance="${instance%%.socket}"
+            case "$unit" in
+                soos-push-sender@[0-9]*.socket) ;;
+                *) continue ;;
+            esac
+            case "$instance" in
+                ""|*[!0-9]*) continue ;;
+            esac
+            systemctl disable --now "$unit" || true
+            systemctl stop "soos-push-sender@${instance}.service" || true
+        done
+    fi
+fi
+
 # On package removal, leave authselect on a valid profile before the custom
 # profile files disappear: restore the recorded profile, else a stock one.
 if [ "$1" -eq 0 ] && command -v authselect >/dev/null 2>&1; then

@@ -66,6 +66,27 @@ pre_remove() {
         systemctl stop soos-daemon.service || true
         systemctl disable soos-daemon.service || true
     fi
+
+    # Push sender system service (ADR 2026-10-23): disable and stop every enabled
+    # per-user instance before its template units go; only soos-push-sender@<digits>.socket
+    # names reach systemctl.
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        for link in /etc/systemd/system/sockets.target.wants/soos-push-sender@*.socket; do
+            [ -e "$link" ] || [ -L "$link" ] || continue
+            unit="${link##*/}"
+            instance="${unit#soos-push-sender@}"
+            instance="${instance%.socket}"
+            case "$unit" in
+                soos-push-sender@[0-9]*.socket) ;;
+                *) continue ;;
+            esac
+            case "$instance" in
+                ""|*[!0-9]*) continue ;;
+            esac
+            systemctl disable --now "$unit" || true
+            systemctl stop "soos-push-sender@${instance}.service" || true
+        done
+    fi
 }
 
 post_remove() {

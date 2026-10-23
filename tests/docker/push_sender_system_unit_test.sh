@@ -208,6 +208,9 @@ wait_for_boot() {
 # One request frame (4-byte big-endian length + JSON) to the socket $1 as user $2;
 # prints CONNECT_FAIL, NO_REPLY or REPLY peer=<listener uid> <json> (the SO_PEERCRED
 # uid soos-remote checks). perl-base ships IO::Socket::UNIX.
+# The single quotes are intended: the Perl program must reach perl with its own $ variables
+# unexpanded by the shell.
+# shellcheck disable=SC2016
 readonly CLIENT_PL='
 use strict; use warnings; use IO::Socket::UNIX; use Socket qw(SOCK_STREAM SOL_SOCKET SO_PEERCRED);
 my ($path, $payload) = @ARGV;
