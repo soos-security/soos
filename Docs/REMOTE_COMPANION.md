@@ -453,7 +453,11 @@ setup failed in its companion phase. The system manager applies the same sandbox
 (`ProtectControlGroups=`, `ProtectProc=invisible`, `ProcSubset=pid`, `RemoveIPC=`), without any
 user namespace, on Ubuntu, Debian, Fedora and Arch alike. `scripts/setup.sh` migrates an existing
 install: it enables the system socket, then runs
-`systemctl --user disable --now soos-push-sender` (a rollback re-enables it). `soos-remote`
+`systemctl --user disable --now soos-push-sender` (a rollback re-enables it). When the companion
+phase of setup fails and rolls back, the socket the root half enabled is kept: it is idle (the
+sender only starts when `soos-remote` connects) and setup prints how to disable it,
+`sudo systemctl disable --now soos-push-sender@<uid>.socket`. Removing a package (`rpm -e`,
+`pacman -R`, `apt remove`) or running `scripts/uninstall.sh` disables every instance. `soos-remote`
 uses the system socket first and falls back to the user unit's `$XDG_RUNTIME_DIR/soos-push/push.sock`
 only when the system socket does not exist; an explicit `push_socket_path` is the only socket
 tried (its listener must then run as your uid). `scripts/install_remote.sh` still installs the

@@ -174,3 +174,32 @@ Not run by this agent: the lead spawns an independent reviewer (`AI/candid_revie
   binary where the unit does not look (warned by install.sh, same rule as the daemon unit).
 - A `resolv.conf` under `/run` other than the two systemd-resolved files still needs a root
   drop-in (documented in `Docs/REMOTE_COMPANION.md` §2d).
+
+## 10. Candid Review Round 1 Follow-up
+
+The independent review (CHANGES_REQUESTED) came after the lead applied the owner-approved
+migrations (SET24, SET33, SET37, `companion_ran`). Addressed, tests first (commit `bca9e03`, red
+on the three new tests):
+
+- **`system_up_to_date`** (PSS16): compares the sender binary under `<prefix>/libexec/soos` with
+  the artifact and both template units under `<sysconfdir>/systemd/system` with `packaging/`,
+  when the build has the sender and the checkout has both units (the lock-screen pattern). Red:
+  `[PLAN] system: already done` with nothing of the sender installed.
+- **Companion rollback** (PSS17): the socket enabled by the root half is kept (idle) and the
+  failure output prints `sudo systemctl disable --now soos-push-sender@<uid>.socket`; documented
+  in `Docs/REMOTE_COMPANION.md` §2d and `Docs/PACKAGING_AND_PROVISIONING.md`.
+- **Package removal** (PSS18): RPM `%preun` (erase only), Arch `pre_remove()` and Debian `prerm`
+  (`remove`) disable and stop every `soos-push-sender@<digits>.socket`.
+- `# shellcheck disable=SC2016` with its reason above the Perl client of the Docker harness.
+
+**Not done — owner decision needed (read-path rule for `--prefix`)**: skipping the socket when
+`PREFIX` is not `/usr` would turn the migrated SET24 and SET37 red, because the setup harness
+always runs with a fake `--prefix <tmp>/root/usr` and both now expect the
+`uid=0 systemctl enable --now soos-push-sender@<uid>.socket` line. See the lead's report for the
+options.
+
+Verification of this round: `cargo test -p soos-invariants` 893 passed;
+`shellcheck --severity=error` (CI level, `koalaman/shellcheck:stable`) clean on the touched
+scripts, and the full-severity run is clean on `setup.sh`, `install_remote.sh`, the Docker
+harness, `packaging/debian/prerm` and `packaging/arch/soos.install` (the remaining warnings of
+`install.sh`/`uninstall.sh` are pre-existing lines).
