@@ -212,8 +212,10 @@ if [[ -L "${PUSH_SENDER_DROP_IN_DIR}" ]]; then
     warn "${PUSH_SENDER_DROP_IN_DIR} is a symbolic link: not followed, left in place."
 elif [[ -d "${PUSH_SENDER_DROP_IN_DIR}" ]]; then
     drop_in="${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
+    drop_in_first=""
     if [[ -f "${drop_in}" && ! -L "${drop_in}" ]] \
-            && grep -q '^# Written by scripts/install.sh for --prefix ' "${drop_in}"; then
+            && IFS= read -r drop_in_first < "${drop_in}" \
+            && [[ "${drop_in_first}" == "# Written by scripts/install.sh for --prefix "* ]]; then
         rm -f "${drop_in}"
     elif [[ -e "${drop_in}" || -L "${drop_in}" ]]; then
         warn "Keeping ${drop_in}: it was not written by scripts/install.sh"

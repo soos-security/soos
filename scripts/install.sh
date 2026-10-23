@@ -1024,19 +1024,20 @@ if [[ -n "${ARTIFACT_PATHS[${PUSH_SENDER_ARTIFACT}]:-}" ]]; then
             > "${PUSH_SENDER_DROP_IN_SRC}"
         tracked_install 0644 "${PUSH_SENDER_DROP_IN_SRC}" "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
         success "Installed ${PUSH_SENDER_DROP_IN_DIR}/prefix.conf (ExecStart=${PREFIX}/libexec/soos/soos-push-sender)"
-    elif [[ -e "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" ]] \
-            && ! grep -q '^# Written by scripts/install.sh for --prefix ' "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"; then
-        # A file of that name without install.sh's marker line is the administrator's own.
-        warn "Keeping ${PUSH_SENDER_DROP_IN_DIR}/prefix.conf: it was not written by scripts/install.sh"
-    elif [[ -e "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" ]]; then
-        # A stale drop-in of an earlier --prefix install (recognised by its marker line, like
-        # the package hooks): journaled removal (restored on rollback).
+    elif [[ -f "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" && ! -L "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" ]] \
+            && IFS= read -r drop_in_first < "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" \
+            && [[ "${drop_in_first}" == "# Written by scripts/install.sh for --prefix "* ]]; then
+        # A stale drop-in of an earlier --prefix install, recognised by the marker on its first
+        # line (like setup.sh; the package hooks): journaled removal (restored on rollback).
         PUSH_SENDER_DROP_IN_BACKUP="${BACKUP_DIR}/${#JOURNAL_BACKUP_ORIG[@]}"
         cp -a -- "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" "${PUSH_SENDER_DROP_IN_BACKUP}"
         JOURNAL_BACKUP_ORIG+=("${PUSH_SENDER_DROP_IN_DIR}/prefix.conf")
         JOURNAL_BACKUP_COPY+=("${PUSH_SENDER_DROP_IN_BACKUP}")
         rm -f -- "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
         success "Removed the stale push sender drop-in ${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
+    elif [[ -e "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" ]]; then
+        # Without install.sh's marker on its first line, the file is the administrator's own.
+        warn "Keeping ${PUSH_SENDER_DROP_IN_DIR}/prefix.conf: it was not written by scripts/install.sh"
     fi
 fi
 

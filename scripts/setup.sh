@@ -1516,21 +1516,46 @@ report_name() {
     printf '%s' "${name:0:64}"
 }
 
-# Reads a remote.toml that setup did not write (spec section 6.1, R2-1, R2-9, R1-9, R2-11):
-# top-level lines only (up to the first table header, any line starting with `[`), each line
-# matched on its own, bounded by MAX_REMOTE_CONFIG_BYTES; nothing is sourced or evaluated.
-# Fills FILE_LOGIN and FILE_RP_ID (exactly one valid login, a valid node name), FILE_BOOL
-# (an explicit true or false; a value the rule does not recognize is false, fail-safe),
-# USER_BOOL_PRESENT, USER_UNRECOGNIZED, USER_DROPPED_KEYS, and FILE_ANDROID_FPS when the file
-# ends with an [android] table of the strict grammar (USER_ANDROID_DROPPED otherwise).
+# Bracket depth a TOML value opens on one line: `[` minus `]` outside "..." and '...' strings
+# and before a comment (a multi-line array continues while it is positive).
+bracket_depth() {
+    local v="$1" open close
+    local re_str="(\"[^\"]*\"|'[^']*')"
+    while [[ "${v}" =~ ${re_str} ]]; do
+        v="${v/"${BASH_REMATCH[0]}"/}"
+    done
+    v="${v%%#*}"
+    open="${v//[^\[]/}"
+    close="${v//[^\]]/}"
+    printf '%s' "$(( ${#open} - ${#close} ))"
+}
+
+# Number of occurrences of the delimiter $2 in $1.
+count_of() {
+    local text="$1" delim="$2" rest
+    rest="${text//"${delim}"/}"
+    printf '%s' "$(( (${#text} - ${#rest}) / ${#delim} ))"
+}
+
+# Reads a remote.toml that setup did not write (spec section 6.1, R2-1, R2-9, R1-9, R2-11; candid
+# review B1): top-level lines only (up to the first table header, a line starting with `[` that
+# is not inside a multi-line string or array), each line matched on its own, bounded by
+# MAX_REMOTE_CONFIG_BYTES; nothing is sourced or evaluated. Keys may be bare, "double" or
+# 'single' quoted (TOML). Fills FILE_LOGIN and FILE_RP_ID (exactly one valid login, a valid node
+# name), FILE_BOOL (an explicit true or false; fail-safe: a value the rule does not recognize is
+# false, and so is a feature key named by any other top-level line that is not parsed, such as a
+# line inside a multi-line string or array), USER_BOOL_PRESENT, USER_UNRECOGNIZED (each key once),
+# USER_DROPPED_KEYS, and FILE_ANDROID_FPS when the file ends with an [android] table of the
+# strict grammar (USER_ANDROID_DROPPED otherwise). Keys below a real table header are ignored.
 parse_user_remote_config() {
-    local line norm key inner top=true android=0 strict=true name
-    local re_key='^[[:space:]]*([A-Za-z0-9_-]+)[[:space:]]*='
-    local re_login='^[[:space:]]*allowed_logins[[:space:]]*=[[:space:]]*\[[[:space:]]*"([^"]*)"[[:space:]]*\][[:space:]]*(#.*)?$'
-    local re_rp='^[[:space:]]*rp_id[[:space:]]*=[[:space:]]*"([^"]*)"[[:space:]]*(#.*)?$'
-    local re_bool='[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*(#.*)?$'
+    local line norm key value inner top=true android=0 strict=true name ml="" depth=0 delim
+    local re_key="^[[:space:]]*(\"([A-Za-z0-9_-]+)\"|'([A-Za-z0-9_-]+)'|([A-Za-z0-9_-]+))[[:space:]]*=(.*)$"
+    local re_login='^[[:space:]]*\[[[:space:]]*"([^"]*)"[[:space:]]*\][[:space:]]*(#.*)?$'
+    local re_rp='^[[:space:]]*"([^"]*)"[[:space:]]*(#.*)?$'
+    local re_bool='^[[:space:]]*(true|false)[[:space:]]*(#.*)?$'
     local re_android='^[[:space:]]*\[[[:space:]]*android[[:space:]]*\]'
     local -A dropped=()
+    local -A unrecognized=()
     FILE_LOGIN=""
     FILE_RP_ID=""
     FILE_BOOL=()
@@ -1539,7 +1564,30 @@ parse_user_remote_config() {
     USER_UNRECOGNIZED=()
     USER_DROPPED_KEYS=()
     USER_ANDROID_DROPPED=false
+    # Fail-safe: every feature key named by a top-level line that was not parsed as that key's
+    # boolean is off ($2: the key this line set, if any).
+    fail_safe_line() {
+        local text="$1" except="$2" k
+        for k in "${COMPANION_KEYS[@]}"; do
+            [[ "${k}" == "${except}" ]] && continue
+            if [[ "${text}" =~ (^|[^A-Za-z0-9_])${k}([^A-Za-z0-9_]|$) ]]; then
+                FILE_BOOL[${k}]=false
+                USER_BOOL_PRESENT[${k}]=1
+                unrecognized[${k}]=1
+            fi
+        done
+    }
     while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${top}" == true && -n "${ml}" ]]; then
+            fail_safe_line "${line}" ""
+            (( $(count_of "${line}" "${ml}") % 2 == 1 )) && ml=""
+            continue
+        fi
+        if [[ "${top}" == true && "${depth}" -gt 0 ]]; then
+            fail_safe_line "${line}" ""
+            depth=$(( depth + $(bracket_depth "${line}") ))
+            continue
+        fi
         # Table lines are compared without a trailing comment and surrounding blanks (the
         # documented [android] example carries one); no value contains `#`.
         norm="${line%%[[:space:]]#*}"
@@ -1569,39 +1617,60 @@ parse_user_remote_config() {
             esac
             continue
         fi
-        [[ "${line}" =~ ${re_key} ]] || continue
-        key="${BASH_REMATCH[1]}"
+        if [[ ! "${line}" =~ ${re_key} ]]; then
+            fail_safe_line "${line}" ""
+            continue
+        fi
+        key="${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
+        value="${BASH_REMATCH[5]}"
         case "${key}" in
             allowed_logins)
                 inner=""
-                [[ "${line}" =~ ${re_login} ]] && inner="${BASH_REMATCH[1]}"
+                [[ "${value}" =~ ${re_login} ]] && inner="${BASH_REMATCH[1]}"
                 if [[ -n "${inner}" ]] && valid_login "${inner}"; then
                     FILE_LOGIN="${inner}"
                 fi
+                fail_safe_line "${line}" ""
                 ;;
             rp_id)
                 inner=""
-                [[ "${line}" =~ ${re_rp} ]] && inner="${BASH_REMATCH[1]}"
+                [[ "${value}" =~ ${re_rp} ]] && inner="${BASH_REMATCH[1]}"
                 if [[ -n "${inner}" ]] && valid_rp_id "${inner}"; then
                     FILE_RP_ID="${inner}"
                 fi
+                fail_safe_line "${line}" ""
                 ;;
             allow_funnel|allow_unlock|password_alerts|push_notifications|offline_alerts|camera_view|camera_view_funnel)
                 USER_BOOL_PRESENT[${key}]=1
-                if [[ "${line}" =~ ^[[:space:]]*${key}${re_bool} ]]; then
+                if [[ "${value}" =~ ${re_bool} ]]; then
                     # An explicit false wins over any other line of the same key.
                     [[ "${FILE_BOOL[${key}]:-}" == false ]] || FILE_BOOL[${key}]="${BASH_REMATCH[1]}"
+                    fail_safe_line "${line}" "${key}"
                 else
                     FILE_BOOL[${key}]=false
-                    USER_UNRECOGNIZED+=("${key}")
+                    unrecognized[${key}]=1
+                    fail_safe_line "${line}" ""
                 fi
                 ;;
             *)
                 name="$(report_name "${key}")"
                 dropped[${name}]=1
+                fail_safe_line "${line}" ""
                 ;;
         esac
+        # A value that opens a multi-line string or array: its next lines are not headers.
+        for delim in '"""' "'''"; do
+            if (( $(count_of "${value}" "${delim}") % 2 == 1 )); then
+                ml="${delim}"
+                break
+            fi
+        done
+        [[ -n "${ml}" ]] || depth="$(bracket_depth "${value}")"
+        (( depth > 0 )) || depth=0
     done < <(head -c "${MAX_REMOTE_CONFIG_BYTES}" -- "${REMOTE_CONFIG}")
+    for key in "${COMPANION_KEYS[@]}"; do
+        [[ -n "${unrecognized[${key}]:-}" ]] && USER_UNRECOGNIZED+=("${key}")
+    done
     if [[ "${android}" == 3 && "${strict}" == true ]]; then
         FILE_ANDROID_FPS=("${PARSED_FPS[@]}")
         USER_ANDROID_DROPPED=false
