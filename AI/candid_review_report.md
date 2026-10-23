@@ -1,94 +1,103 @@
 # Candid Review Report
 
 - **Date**: 2026-10-23
-- **Target Branch**: `fix/clipboard-win-yanked` (commits `7fc6068`, `6bf7a59`)
-- **Base (merge-base)**: `fb2a0bf` (`origin/main`)
-- **Reviewed-Diff-Fingerprint**: `7c4e7709a93ea144493b5aa9bf315c623b41812c85dff9c37fee2b92205163b7`
-- **Audited Files**: `Cargo.lock`, `AI/walkthroughs/253_clipboard_win_yanked.md`
+- **Target Branch**: `chore/rac15-bench-exception`
+- **Base (merge-base)**: `fb2a0bf`
+- **Reviewed-Diff-Fingerprint**: `c76800de8fa7338cecb6bee7b8332ca40b8beaf4210f5effc1e6b999c92c809c`
+- **Audited Files**: `AI/VERIFICATION_MATRIX.md`, `AI/walkthroughs/252_rac15_browser_bench_exception.md`,
+  `Docs/README_ASSETS.md`, `scripts/remote_browser_tests.sh`,
+  `tests/invariants/src/readme_assets_contract.rs`
 
 ## 1. Executive Summary
 
-The diff changes one `Cargo.lock` entry and adds a walkthrough:
-
-- `Cargo.lock` `clipboard-win`: version `5.4.1` → `5.4.3`, checksum
-  `bde03770…` → `052af7878466feccda12ba7a6a67d019d712f296809559b47c12c8cc196d3a9a`. The dependency
-  list (`error-code`) is unchanged. No other lockfile entry, no `Cargo.toml` and no `deny.toml` change.
-- `AI/walkthroughs/253_clipboard_win_yanked.md`: new walkthrough (number 252 is held by the open
-  `chore/rac15-bench-exception` branch, so 253 is correct).
-
-The yank fixes a real upstream memory-safety bug. 5.4.3 is the minimal, bounds-checked fix. No blocking
-findings.
+The diff turns the dev-only Playwright bench (`scripts/remote_browser_tests.sh`) into a named, narrow
+RAC15 exception, as approved by the owner on 2026-10-23 (additive migration). RAC15 gains one constant
+and one exception branch that still flags `readme-capture` in the bench; no RAC15 assertion is changed or
+removed. The bench now builds `--example readme_web_fixture_server` by name instead of `--examples`. A new
+contract RAC26 pins the narrowness. The change was verified by mutation: RAC26 fails on the previous
+script, and RAC15 still catches the fixture name in any other script or workflow. No blocking findings;
+two MINOR and one SUGGESTION item below.
 
 ## 2. Test Changes
 
 Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: none (only `Cargo.lock` and the walkthrough appear in `diff --git` headers).
-- Removed or changed assertions: none.
+- Test files touched: `tests/invariants/src/readme_assets_contract.rs` only
+  (`git diff --numstat origin/main...HEAD -- tests`: 40 added, 0 deleted).
+- Removed or changed assertions: none (0 matches for `^-` lines with `assert` or `#[test]`).
 - New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
-- Inline test modules: none.
+- Inline test modules: none touched.
+- Changes, with justification:
+  - `BROWSER_BENCH_SCRIPT` constant and the RAC15 exception branch (owner-approved additive migration of
+    2026-10-23). The branch is evaluated before the generic check and `continue`s only for the exact path
+    `scripts/remote_browser_tests.sh`; for that file it still pushes an offender on `readme-capture`.
+    The `Dockerfile`/`save.sh`/`run_tests.sh` loop and the fixture-server/soos-remote assertions are
+    untouched.
+  - New test `test_rac_browser_bench_exception_is_narrow` (RAC26), purely additive.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Scenario: the lockfile checksum does not match the published crate. The crates.io API for
-  `clipboard-win/5.4.3` returns checksum `052af787…3a9a` (published 2026-10-23T05:43Z by `DoumanAsh`, the
-  long-standing sole publisher, not yanked). `sha256sum` of the downloaded `.crate` gives the same value.
-  PASS.
-- Scenario: the bump drags other packages along. `git diff fb2a0bf..HEAD -- Cargo.lock` shows only the
-  version and checksum lines of `clipboard-win`. PASS.
-- Scenario: the crate is reachable from a shipped Linux artifact. `cargo tree --locked -i clipboard-win
-  --target all` gives a single path `soos-gui` → `eframe` 0.35.0 → `egui-winit` 0.35.0 → `arboard` 3.6.1 →
-  `clipboard-win` 5.4.3, Windows-only through `arboard`. `cargo check --locked -p soos-gui` (Linux)
-  finishes cleanly. PASS.
-
-### Yank Reason (upstream)
-- Upstream issue DoumanAsh/clipboard-win#42 (2026-10-23): `raw::get_html` reads past the clipboard data
-  when the HTML fragment offsets point beyond it. That is an out-of-bounds read in `unsafe`
-  `ptr::copy_nonoverlapping`, so a crafted `HTML Format` clipboard payload can trigger it. The
-  maintainer yanked 5.2.0 to 5.4.1 and published 5.4.2 and 5.4.3. 5.1.0 and earlier stay unyanked. soos
-  never compiles the crate on its Linux targets, so it has no runtime exposure.
-
-### Supply Chain (5.4.1 → 5.4.3 source diff)
-- `src/raw.rs`: the unchecked `size > data_size` test and the `copy_nonoverlapping` + `set_len` copy are
-  replaced by `data.get(start_idx..start_idx+size)` with an `invalid_data()` error on `None`. This is a
-  strict safety improvement.
-- `src/lib.rs`: the open-retry loop sleep changes from `Sleep(0)` to `Sleep(5)` (matching Chromium), the
-  clippy attribute changes, and a doc string changes. `src/formats.rs` and `README.md` only change doc text.
-  `tests/test_clip.rs` adds a regression test for the invalid fragment offsets.
-- No `build.rs` (`build = false` in both versions), no new or changed dependencies, no network, process
-  or filesystem code added. `.cargo_vcs_info.json` points at upstream commit `ed27008a`. PASS.
-- Cooldown: 5.4.3 is less than one day old. This is acceptable because it is the maintainer's targeted
-  security fix, and the alternative (5.4.2 or an ignore entry) is no better. PASS.
+- Scenario: the exception widens to other files. The match is an exact equality on the relative path;
+  a scratch `scripts/save_helpers_tmp.sh` naming `readme_web_fixture_server` and an edited
+  `.github/workflows/browser.yml` naming it both still fail RAC15. PASS.
+- Scenario: the capture feature leaks into the bench. Appending a `# readme-capture` comment to the bench
+  fails both RAC15 and RAC26. Adding `--features x` to the build line fails RAC26. PASS.
+- Scenario: RAC26 is vacuous. Restoring the `origin/main` script (`--examples`) fails RAC26 while RAC15
+  passes, so RAC26 is the new, meaningful contract. PASS.
+- Scenario: the build line selection picks the wrong line. The only line containing `cargo build` is the
+  `report="$(cargo build --locked -p soos-test-fixtures --example readme_web_fixture_server \` line; the
+  `[INFO]` and `usage_error` messages do not contain that substring. PASS.
+- Scenario: `--all-features` on the build line. RAC26 does not reject it (mutation passed both tests).
+  Harmless today: `soos-test-fixtures` declares no `[features]` and depends only on `soos-frame`, and
+  with resolver 2 `--all-features` applies only to the selected package, so `readme-capture` (a
+  `soos-gui` feature) cannot be enabled. See MINOR finding 1.
+- Script behaviour: still `--locked`, still parses cargo's JSON report so `CARGO_TARGET_DIR` is honoured,
+  still requires exactly one example executable or exit 2. `./scripts/remote_browser_tests.sh --
+  --project=webkit` on this tree: the named build succeeded and 18 passed. PASS.
 
 ### PAM Concurrency & Deadlines
-- Not applicable: no change under `crates/pam` or any runtime code. PASS.
+- Not applicable: no change under `crates/` or any runtime code. PASS.
 
 ### Panic Safety & Fail-Closed
-- Not applicable: no production Rust code in the workspace changed. PASS.
+- Not applicable to production code. The new test uses `unwrap_or_else(|| panic!(..))`, which is
+  appropriate in a test. PASS.
 
 ### Test Integrity & Anti-Weakening
-- No test touched. `deny.toml` keeps `yanked = "deny"` and `ignore = []`, so the gate is not loosened.
-  `cargo deny check`: `advisories ok, bans ok, licenses ok, sources ok`. `./scripts/candid_review.sh`
-  Layer 1: PASSED. PASS.
+- Zero deleted lines under `tests/`. RAC15 keeps every previous check; the only behavioural change is
+  the owner-approved exception for one exact path, which still enforces the feature-name ban.
+- `cargo fmt --all -- --check`: clean. `cargo test --locked -p soos-invariants -- --test-threads=3`:
+  879 passed, 0 failed. PASS.
 
 ### Memory, Bounds & Secrets
-- The upstream change removes an out-of-bounds read. No secrets or biometric data are involved. PASS.
+- No secrets, frames or embeddings involved. The fixture server remains synthetic and loopback-only. PASS.
+
+### Supply Chain & Automation
+- No `Cargo.*`, `deny.toml`, `.githooks/` or workflow change. The Browser workflow already triggers on
+  `scripts/remote_browser_tests.sh` (`paths:` at lines 33 and 41), as the walkthrough states.
+- `bash -n` and ShellCheck (`koalaman/shellcheck:stable`) on the script: clean. PASS.
 
 ### English-Only Policy
-- Walkthrough and commit message are in English, and the commit follows Conventional Commits
-  (`fix(deps): …`) with the co-author trailer. PASS.
+- Code, comments, docs, walkthrough, matrix row and commit message are English. Commit subject is 68
+  characters and follows Conventional Commits (`test(invariants): ...`). Walkthrough number 252 follows
+  251 and is unique. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. (Resolved in `6bf7a59`) The walkthrough said "every `clipboard-win` release up to 5.4.1" was yanked and
-   gave no reason. It now states the yanked range 5.2.0 to 5.4.1 and the reason: upstream #42, an
-   out-of-bounds read in `raw::get_html` fixed by a bounds-checked slice in 5.4.3. Both claims were
-   re-checked against crates.io and the source diff and are accurate.
-2. (Non-blocking, cosmetic) The subject line of commit `7fc6068` still says "up to 5.4.1", and one
-   rewrapped walkthrough line exceeds the surrounding wrap width. The squash-merge message can carry the
-   corrected wording.
+- **[MINOR]** `tests/invariants/src/readme_assets_contract.rs` (RAC26 negative assertion) — the build-line
+  check rejects `--examples`, `--features` and `-F ` but not `--all-features`, while the walkthrough §4
+  says RAC26 "refuses any feature flag on the build line". No current impact (the package has no
+  features), but a follow-up could add `--all-features` to the rejected needles, or the walkthrough
+  wording could be narrowed.
+- **[MINOR]** `AI/walkthroughs/252_rac15_browser_bench_exception.md` §3 — "9 added lines" counts the
+  3-line constant plus the 6-line branch; the branch itself is 6 lines. Also the `**Branch**` line in the
+  header lacks a `- ` bullet and renders joined to the `**Issue**` line. Cosmetic.
+- **[SUGGESTION]** RAC26 checks only the first `cargo build` line. A second build line elsewhere in the
+  bench would escape the `--features` check (it would still be caught by RAC15 if it named the feature).
 
 ## 5. Final Verdict
+
+No CRITICAL or MAJOR finding. The RAC15 migration is exactly the approved additive exception, RAC26 is
+meaningful and fails on the previous script, and the script builds and runs.
 
 **VERDICT: APPROVED**
