@@ -587,6 +587,221 @@ fn test_pss18_packages_disable_instances_on_removal() {
 }
 
 // ---------------------------------------------------------------------------------------
+// PSS19 — prefix drop-in (lead decision of 2026-10-23, candid review round 1 fix 1)
+// ---------------------------------------------------------------------------------------
+
+const DROP_IN_DIR: &str = "etc/systemd/system/soos-push-sender@.service.d";
+const DROP_IN_MARKER: &str = "# Written by scripts/install.sh for --prefix ";
+
+fn run_uninstall_prefix(stage: &Path, prefix: &str) -> Output {
+    Command::new("bash")
+        .arg(workspace_root().join("scripts/uninstall.sh"))
+        .args([
+            OsStr::new("--destdir"),
+            stage.as_os_str(),
+            OsStr::new("--prefix"),
+            OsStr::new(prefix),
+            OsStr::new("--keep-data"),
+            OsStr::new("--skip-systemd"),
+        ])
+        .output()
+        .expect("run uninstall.sh")
+}
+
+/// PSS19: with another `--prefix`, install.sh stages the sender under `<prefix>/libexec/soos`
+/// and a 0644 drop-in `soos-push-sender@.service.d/prefix.conf` that resets `ExecStart=` to
+/// that binary (so the shipped unit, which names `/usr/libexec`, runs what was installed);
+/// with `/usr` no drop-in is written and a stale one is removed; uninstall.sh removes it and
+/// its directory.
+#[test]
+fn test_pss19_install_writes_the_prefix_drop_in() {
+    let dir = scratch("dropin");
+    let (stage, art) = (dir.join("stage"), dir.join("art"));
+    artifacts(&art, true);
+    let out = run_install(&stage, &art, &["--prefix", "/usr/local"]);
+    assert!(
+        out.status.success(),
+        "install.sh failed:\n{}",
+        combined(&out)
+    );
+    assert_eq!(
+        fs::read_to_string(stage.join("usr/local/libexec/soos/soos-push-sender")).unwrap(),
+        "fixture:soos-push-sender\n"
+    );
+    let drop_in = stage.join(DROP_IN_DIR).join("prefix.conf");
+    assert_eq!(mode_of(&drop_in), 0o644);
+    let text = fs::read_to_string(&drop_in).unwrap();
+    assert!(
+        text.starts_with(&format!("{DROP_IN_MARKER}/usr/local")),
+        "{text}"
+    );
+    assert_eq!(
+        unit_lines(&text),
+        vec![
+            "[Service]",
+            "ExecStart=",
+            "ExecStart=/usr/local/libexec/soos/soos-push-sender --system-instance %i",
+        ],
+        "the drop-in only replaces ExecStart"
+    );
+    assert!(
+        !fs::read_dir(stage.join(DROP_IN_DIR))
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with('.')),
+        "no temporary file is left in the drop-in directory"
+    );
+
+    // A re-run with /usr removes the stale drop-in.
+    let out = run_install(&stage, &art, &[]);
+    assert!(
+        out.status.success(),
+        "install.sh failed:\n{}",
+        combined(&out)
+    );
+    assert!(!drop_in.exists(), "a stale prefix drop-in is removed");
+
+    // /usr from the start: no drop-in.
+    let dir2 = scratch("dropin_usr");
+    let (stage2, art2) = (dir2.join("stage"), dir2.join("art"));
+    artifacts(&art2, true);
+    let out = run_install(&stage2, &art2, &[]);
+    assert!(
+        out.status.success(),
+        "install.sh failed:\n{}",
+        combined(&out)
+    );
+    assert!(!stage2.join(DROP_IN_DIR).exists());
+
+    // uninstall.sh removes the drop-in and its directory.
+    let dir3 = scratch("dropin_uninstall");
+    let (stage3, art3) = (dir3.join("stage"), dir3.join("art"));
+    artifacts(&art3, true);
+    let out = run_install(&stage3, &art3, &["--prefix", "/opt/soos"]);
+    assert!(
+        out.status.success(),
+        "install.sh failed:\n{}",
+        combined(&out)
+    );
+    assert!(stage3.join(DROP_IN_DIR).join("prefix.conf").is_file());
+    let out = run_uninstall_prefix(&stage3, "/opt/soos");
+    assert!(
+        out.status.success(),
+        "uninstall.sh failed:\n{}",
+        combined(&out)
+    );
+    assert!(
+        !stage3.join(DROP_IN_DIR).exists(),
+        "the drop-in directory is removed"
+    );
+    assert!(!stage3
+        .join("opt/soos/libexec/soos/soos-push-sender")
+        .exists());
+    for d in [dir, dir2, dir3] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+/// PSS19: a prefix that would break the unit syntax or that the sandbox hides is refused before
+/// any change, and the drop-in directory is never written through a symbolic link.
+#[test]
+fn test_pss19_install_refuses_unsafe_prefixes_and_links() {
+    for (n, prefix) in [
+        "/opt/so os",
+        "/opt/so%os",
+        "/opt/so\nos",
+        "/opt/so\"os",
+        "/opt/so\\os",
+        "opt/soos",
+        "/opt/../usr",
+        "/opt/./soos",
+        "/opt//soos",
+        "/opt/soos/",
+        "/home/alice/opt",
+        "/root/opt",
+        "/run/soos",
+        "/tmp/soos",
+        "/var/tmp/soos",
+        "/var/log/soos",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = scratch(&format!("dropin_bad_{n}"));
+        let (stage, art) = (dir.join("stage"), dir.join("art"));
+        artifacts(&art, true);
+        let out = run_install(&stage, &art, &["--prefix", prefix]);
+        assert!(!out.status.success(), "{prefix:?} must be refused");
+        assert!(
+            combined(&out).contains("push sender"),
+            "{prefix:?}: the refusal names the push sender:\n{}",
+            combined(&out)
+        );
+        assert!(
+            !stage.join(DROP_IN_DIR).exists(),
+            "{prefix:?}: nothing written"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // A symbolic link in place of the drop-in directory is refused and never followed.
+    let dir = scratch("dropin_link");
+    let (stage, art) = (dir.join("stage"), dir.join("art"));
+    artifacts(&art, true);
+    let elsewhere = dir.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(stage.join("etc/systemd/system")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, stage.join(DROP_IN_DIR)).unwrap();
+    let out = run_install(&stage, &art, &["--prefix", "/usr/local"]);
+    assert!(
+        !out.status.success(),
+        "a linked drop-in directory is refused"
+    );
+    assert_eq!(
+        fs::read_dir(&elsewhere).unwrap().count(),
+        0,
+        "link never followed"
+    );
+    let _ = fs::remove_dir_all(dir);
+
+    // Statically: the drop-in goes through the journaled, atomic tracked_install.
+    let install = strip_shell_comments(&read("scripts/install.sh"));
+    assert!(
+        install
+            .lines()
+            .any(|l| l.contains("tracked_install 0644") && l.contains("prefix.conf")),
+        "the drop-in is written by tracked_install"
+    );
+}
+
+/// PSS19: package removal also deletes a prefix drop-in that install.sh wrote (recognised by its
+/// marker line), so it cannot override the packaged unit later.
+#[test]
+fn test_pss19_packages_remove_the_prefix_drop_in() {
+    let spec = read("packaging/rpm/soos.spec");
+    let preun = section_from(&spec, "%preun", &["%post", "%files", "%changelog"]);
+    let arch = read("packaging/arch/soos.install");
+    let pre_remove = section_from(&arch, "pre_remove() {", &["}"]);
+    let prerm = read("packaging/debian/prerm");
+    let remove = section_from(&prerm, "remove|deconfigure)", &["    upgrade|"]);
+    for (name, body) in [
+        ("soos.spec %preun", preun),
+        ("soos.install pre_remove", pre_remove),
+        ("debian prerm remove", remove),
+    ] {
+        for needle in [
+            "/etc/systemd/system/soos-push-sender@.service.d/prefix.conf",
+            "Written by scripts/install.sh for --prefix",
+        ] {
+            assert!(
+                body.contains(needle),
+                "{name} must contain {needle}:\n{body}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // PSS13 — documentation, ADR, walkthrough
 // ---------------------------------------------------------------------------------------
 

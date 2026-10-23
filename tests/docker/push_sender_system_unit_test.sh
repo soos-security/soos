@@ -27,6 +27,10 @@
 #      the instance uid).
 #   5. The instance uid 0 is refused (exit 78, not restarted).
 #   6. `systemctl disable --now` removes the socket.
+#   7. With `scripts/install.sh --prefix /usr/local` (staged), its drop-in
+#      soos-push-sender@.service.d/prefix.conf makes a new instance run
+#      /usr/local/libexec/soos/soos-push-sender (the /usr/libexec binary
+#      removed), which passes its sandbox check and answers.
 #   `systemd-analyze security` of the instance is printed for the record.
 #
 # The kernel.apparmor_restrict_unprivileged_userns restriction of an Ubuntu
@@ -55,6 +59,7 @@ readonly BUILDER_IMAGE="soos-sua-builder"
 readonly RUNTIME_IMAGE="soos-sua-runtime"
 readonly ALICE_UID=1500
 readonly BOB_UID=1501
+readonly CAROL_UID=1502
 readonly SENDER_BIN="/usr/libexec/soos/soos-push-sender"
 readonly UNIT_DIR="/etc/systemd/system"
 
@@ -340,3 +345,42 @@ systemctl disable --now "${SOCKET_UNIT}"
 systemctl stop "${SERVICE_UNIT}"
 [[ ! -e "${SOCKET_PATH}" ]] || fail "${SOCKET_PATH} remains after disable --now"
 success "disable --now removes ${SOCKET_PATH}."
+
+# 7. Another --prefix: scripts/install.sh (staged) writes the drop-in that points ExecStart at
+#    <prefix>/libexec/soos/soos-push-sender; with only that binary present (the /usr/libexec
+#    one removed) a new instance starts, passes its sandbox check and answers.
+info "Staging scripts/install.sh --prefix /usr/local to obtain its push sender drop-in..."
+PREFIX_STAGE="$(mktemp -d)"
+PREFIX_ART="$(mktemp -d)"
+for name in soos-daemon soos-admin soos-enroll soos-gui libpam_soos.so; do
+    printf 'fixture:%s\n' "${name}" > "${PREFIX_ART}/${name}"
+    chmod 0755 "${PREFIX_ART}/${name}"
+done
+install -m 0755 /target/release/soos-push-sender "${PREFIX_ART}/soos-push-sender"
+bash /workspace/scripts/install.sh --destdir "${PREFIX_STAGE}" --prefix /usr/local \
+    --artifact-dir "${PREFIX_ART}" --pam-dir /usr/lib/security --skip-systemd --skip-models >/dev/null \
+    || fail "scripts/install.sh --prefix /usr/local failed"
+DROP_IN="soos-push-sender@.service.d/prefix.conf"
+[[ -f "${PREFIX_STAGE}${UNIT_DIR}/${DROP_IN}" ]] || fail "install.sh wrote no ${DROP_IN}"
+install -D -m 0755 "${PREFIX_STAGE}/usr/local/libexec/soos/soos-push-sender" /usr/local/libexec/soos/soos-push-sender
+install -D -m 0644 "${PREFIX_STAGE}${UNIT_DIR}/${DROP_IN}" "${UNIT_DIR}/${DROP_IN}"
+rm -f "${SENDER_BIN}"
+getent passwd carol >/dev/null || useradd -m -u "${CAROL_UID}" carol
+systemctl daemon-reload
+CAROL_SOCKET="soos-push-sender@${CAROL_UID}.socket"
+CAROL_SERVICE="soos-push-sender@${CAROL_UID}.service"
+rc=0
+out="$(systemd-analyze verify "${CAROL_SERVICE}" 2>&1)" || rc=$?
+[[ "${rc}" -eq 0 && -z "${out}" ]] || fail "systemd-analyze verify with the drop-in: ${out}"
+systemctl enable --now "${CAROL_SOCKET}"
+reply="$(send_frame "/run/soos-push/${CAROL_UID}/push.sock" carol)"
+info "carol: ${reply}"
+[[ "${reply}" == "REPLY peer=0 "* ]] || fail "the /usr/local sender did not answer: ${reply}"
+pid="$(systemctl show -p MainPID --value "${CAROL_SERVICE}")"
+[[ "$(readlink "/proc/${pid}/exe")" = "/usr/local/libexec/soos/soos-push-sender" ]] \
+    || fail "the instance runs $(readlink "/proc/${pid}/exe"), not the /usr/local binary"
+journalctl -u "${CAROL_SERVICE}" --no-pager -o cat | grep -q "push sender ready" \
+    || fail "the /usr/local sender never reported ready"
+systemctl disable --now "${CAROL_SOCKET}"
+systemctl stop "${CAROL_SERVICE}"
+success "--prefix /usr/local: the install.sh drop-in runs /usr/local/libexec/soos/soos-push-sender, which passes its sandbox check and answers."
