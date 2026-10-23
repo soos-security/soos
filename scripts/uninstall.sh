@@ -178,6 +178,37 @@ if [[ "${DRY_RUN}" = true ]]; then
     exit 0
 fi
 
+# 1a. Push sender system service (ADR 2026-10-23 "Push Sender as a Sandboxed System
+#     Service"): on a live install every enabled per-user instance is disabled and stopped,
+#     then the two template units are removed (the binary goes with the other binaries below).
+#     Only names of the form soos-push-sender@<digits>.socket are ever passed to systemctl.
+LIVE_SYSTEMD=false
+if [[ "${SKIP_SYSTEMD}" = false && -z "${DESTDIR}" && -d "/run/systemd/system" ]] && command -v systemctl >/dev/null 2>&1; then
+    LIVE_SYSTEMD=true
+fi
+if [[ "${LIVE_SYSTEMD}" = true ]]; then
+    for wants_link in "${TARGET_SYSTEMD_DIR}"/sockets.target.wants/soos-push-sender@*.socket; do
+        [[ -e "${wants_link}" || -L "${wants_link}" ]] || continue
+        instance="$(basename -- "${wants_link}")"
+        if [[ "${instance}" =~ ^soos-push-sender@[0-9]+\.socket$ ]]; then
+            info "Stopping and disabling ${instance}..."
+            systemctl disable --now "${instance}" 2>/dev/null || true
+            systemctl stop "${instance%.socket}.service" 2>/dev/null || true
+        fi
+    done
+    systemctl stop 'soos-push-sender@*.service' 'soos-push-sender@*.socket' 2>/dev/null || true
+fi
+for unit in soos-push-sender@.socket soos-push-sender@.service; do
+    if [[ -f "${TARGET_SYSTEMD_DIR}/${unit}" ]]; then
+        success "Removing ${TARGET_SYSTEMD_DIR}/${unit}"
+    fi
+done
+rm -f "${TARGET_SYSTEMD_DIR}/soos-push-sender@.socket"
+rm -f "${TARGET_SYSTEMD_DIR}/soos-push-sender@.service"
+if [[ "${LIVE_SYSTEMD}" = true ]]; then
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
 # 1. Teardown Systemd Service
 if [[ -f "${TARGET_SYSTEMD_DIR}/soos-daemon.service" || -z "${DESTDIR}" ]]; then
     if [[ "${SKIP_SYSTEMD}" = false && -z "${DESTDIR}" && -d "/run/systemd/system" ]] && command -v systemctl >/dev/null 2>&1; then
@@ -442,6 +473,7 @@ fi
 info "Removing binaries and shared libraries..."
 rm -f "${TARGET_LIBEXEC_DIR}/soos-daemon"
 rm -f "${TARGET_LIBEXEC_DIR}/provision-master-key"
+rm -f "${TARGET_LIBEXEC_DIR}/soos-push-sender"
 rmdir "${TARGET_LIBEXEC_DIR}" 2>/dev/null || true
 rm -f "${TARGET_BIN_DIR}/soos-admin"
 rm -f "${TARGET_BIN_DIR}/soos-enroll"

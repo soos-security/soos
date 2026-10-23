@@ -10,6 +10,11 @@
 # units and never touches the Tailscale configuration: those steps are printed for the
 # owner to run.
 #
+# The push sender normally runs as the system service soos-push-sender@<uid>.socket installed by
+# scripts/install.sh and enabled by scripts/setup.sh (ADR 2026-10-23 "Push Sender as a Sandboxed
+# System Service"). The user unit installed here is the root-free alternative for hosts that
+# allow unprivileged user namespaces; on Ubuntu 23.10 and later it exits 226/NAMESPACE.
+#
 #   scripts/install_remote.sh              install or update
 #   scripts/install_remote.sh --uninstall  stop the units, remove binaries and units, keep config
 # =============================================================================
@@ -112,7 +117,7 @@ allowed_logins = []
 # password_alerts = false
 
 # Optional: Web Push notifications of those alerts to the phone web app (section 2d; Android: section 2h).
-# Requires password_alerts = true and rp_id, and the soos-push-sender user unit.
+# Requires password_alerts = true and rp_id, and the soos-push-sender system service.
 # push_notifications = false
 # Contact of the VAPID key (default: https://<rp_id>); a mailto: address also works.
 # vapid_subject = "mailto:you@example.com"
@@ -164,9 +169,14 @@ TEMPLATE
     echo "     then optionally set allow_funnel = true, restart, and publish on port 443 with:"
     echo "     tailscale funnel --bg unix:${SOCKET_PATH}"
     echo "  6. Optional push notifications on the phone (Docs/REMOTE_COMPANION.md section 2d):"
-    echo "     set password_alerts = true and push_notifications = true, then run"
-    echo "     systemctl --user enable --now soos-push-sender and restart soos-remote,"
-    echo "     open the web app on the phone (the home-screen app on iPhone) and tap Enable notifications."
+    echo "     set password_alerts = true and push_notifications = true; an administrator enables the"
+    echo "     system service installed by scripts/install.sh (scripts/setup.sh does it):"
+    echo "       systemctl enable --now soos-push-sender@$(id -u).socket   (as root)"
+    echo "     Without root, on a host that allows unprivileged user namespaces (not Ubuntu 23.10 or"
+    echo "     later, where the user unit exits 226/NAMESPACE), run instead:"
+    echo "       systemctl --user enable --now soos-push-sender"
+    echo "     Then restart soos-remote, open the web app on the phone (the home-screen app on iPhone)"
+    echo "     and tap Enable notifications."
     echo "  7. Optional live camera view (Docs/REMOTE_COMPANION.md section 2f): set camera_view = true"
     echo "     in ${CONFIG_PATH} and restart soos-remote; an administrator must also add to"
     echo "     /etc/soos/daemon.toml and restart soos-daemon (this script never does it):"

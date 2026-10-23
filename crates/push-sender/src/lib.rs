@@ -28,6 +28,7 @@ use soos_push_protocol::{
     DeliveryRequest, Outcome, Urgency, MAX_PUSH_FRAME_BYTES, MAX_PUSH_RESPONSE_BODY_BYTES,
     MAX_PUSH_RESPONSE_HEADER_BYTES, MAX_RESOLVED_ADDRESSES, PUSH_CONNECT_TIMEOUT_MS,
     PUSH_FRAME_IO_TIMEOUT_MS, PUSH_HOSTS, PUSH_SEND_TIMEOUT_MS, PUSH_SOCKET_FILE_NAME,
+    PUSH_SYSTEM_INSTANCE_ARG,
 };
 use ureq::config::Config;
 use ureq::http::Uri;
@@ -753,47 +754,144 @@ pub enum InstanceError {
     Identity,
 }
 
-/// Parses the process arguments (without the program name).
+/// Longest decimal `u32`.
+const MAX_UID_DIGITS: usize = 10;
+/// Directories `ProtectHome=yes` makes inaccessible in the system unit: read-only binds of
+/// systemd's inaccessible tmpfs directory (`/run/user` lies under the hidden `/run`).
+const SYSTEM_HIDDEN_HOME_DIRS: [&str; 2] = ["/home", "/root"];
+
+/// Parses the process arguments (without the program name): nothing is [`RunMode::User`];
+/// exactly [`PUSH_SYSTEM_INSTANCE_ARG`] followed by a uid of 1 to 10 ASCII digits, without
+/// sign or leading zero, other than `0` and `u32::MAX`, is [`RunMode::System`].
 ///
 /// # Errors
-/// [`InstanceError::Usage`].
+/// [`InstanceError::Usage`] for anything else (non-UTF-8 included).
 pub fn parse_run_mode<I: IntoIterator<Item = std::ffi::OsString>>(
     args: I,
 ) -> Result<RunMode, InstanceError> {
-    let _ = args.into_iter().count();
-    Err(InstanceError::Usage)
+    let mut args = args.into_iter();
+    let Some(flag) = args.next() else {
+        return Ok(RunMode::User);
+    };
+    let Some(value) = args.next() else {
+        return Err(InstanceError::Usage);
+    };
+    if args.next().is_some() || flag.as_os_str() != PUSH_SYSTEM_INSTANCE_ARG {
+        return Err(InstanceError::Usage);
+    }
+    let text = value.to_str().ok_or(InstanceError::Usage)?;
+    let bytes = text.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > MAX_UID_DIGITS
+        || !bytes.iter().all(u8::is_ascii_digit)
+        || bytes.first() == Some(&b'0')
+    {
+        return Err(InstanceError::Usage);
+    }
+    let allowed_uid = text.parse::<u32>().map_err(|_| InstanceError::Usage)?;
+    if allowed_uid == u32::MAX {
+        return Err(InstanceError::Usage);
+    }
+    Ok(RunMode::System { allowed_uid })
 }
 
-/// Refuses root and an instance uid equal to the sender's own uid.
+/// Refuses root (real or effective uid 0) and an instance uid equal to the sender's own real
+/// or effective uid: the system instance runs as a dynamic uid, never as the desktop user.
 ///
 /// # Errors
 /// [`InstanceError::Identity`].
 pub fn check_instance_identity(uid: u32, euid: u32, allowed_uid: u32) -> Result<(), InstanceError> {
-    let _ = (uid, euid, allowed_uid);
+    if uid == 0 || euid == 0 || uid == allowed_uid || euid == allowed_uid {
+        return Err(InstanceError::Identity);
+    }
     Ok(())
 }
 
-/// Pure sandbox decision of the system unit.
+/// Pure sandbox decision of `packaging/soos-push-sender@.service` (spec §4.2). Rules, in the
+/// order of their errors: some mount at exactly `/run` is a read-only tmpfs; for each of
+/// `/home` and `/root`, some mount at exactly that path is a read-only tmpfs and no mount has
+/// such a tmpfs as its parent (nothing mounted back); the logs are not listable.
+/// Order-independent over lines; malformed lines are skipped.
 ///
 /// # Errors
 /// The first [`SandboxError`] rule that fails.
 pub fn evaluate_system_sandbox(mountinfo: &str, logs_listable: bool) -> Result<(), SandboxError> {
-    let _ = (mountinfo, logs_listable);
+    let entries: Vec<MountEntry> = mountinfo.lines().filter_map(parse_mount_line).collect();
+    let run = Path::new(SANDBOX_RUN_DIR);
+    if !entries.iter().any(|e| e.hides() && e.mount_point == run) {
+        return Err(SandboxError::RunVisible);
+    }
+    for dir in SYSTEM_HIDDEN_HOME_DIRS {
+        let path = Path::new(dir);
+        let hiding: Vec<&MountEntry> = entries
+            .iter()
+            .filter(|e| e.hides() && e.mount_point == path)
+            .collect();
+        if hiding.is_empty() {
+            return Err(SandboxError::HomeVisible);
+        }
+        let reexposed = hiding
+            .iter()
+            .any(|tmpfs| entries.iter().any(|child| child.parent == tmpfs.id));
+        if reexposed {
+            return Err(SandboxError::HomeVisible);
+        }
+    }
+    if logs_listable {
+        return Err(SandboxError::LogsReadable);
+    }
     Ok(())
 }
 
-/// I/O wrapper of [`evaluate_system_sandbox`].
+/// Bounded read of [`SANDBOX_MOUNTINFO_PATH`] (at most [`MAX_MOUNTINFO_BYTES`], UTF-8).
+fn read_mount_table() -> Result<String, SandboxError> {
+    let limit = u64::try_from(MAX_MOUNTINFO_BYTES)
+        .ok()
+        .and_then(|max| max.checked_add(1))
+        .ok_or(SandboxError::MountInfoUnreadable)?;
+    let file =
+        fs::File::open(SANDBOX_MOUNTINFO_PATH).map_err(|_| SandboxError::MountInfoUnreadable)?;
+    let mut raw = Vec::new();
+    file.take(limit)
+        .read_to_end(&mut raw)
+        .map_err(|_| SandboxError::MountInfoUnreadable)?;
+    if raw.len() > MAX_MOUNTINFO_BYTES {
+        return Err(SandboxError::MountInfoUnreadable);
+    }
+    String::from_utf8(raw).map_err(|_| SandboxError::MountInfoUnreadable)
+}
+
+/// I/O wrapper of [`evaluate_system_sandbox`]: the bounded mount table and whether
+/// [`SANDBOX_HIDDEN_LOG_DIR`] can be opened as a directory (its entries are never read). No
+/// environment variable and no binary path are used.
 ///
 /// # Errors
-/// [`SandboxError`].
+/// [`SandboxError::MountInfoUnreadable`], otherwise the result of [`evaluate_system_sandbox`].
 pub fn probe_system_sandbox() -> Result<(), SandboxError> {
-    Ok(())
+    let mountinfo = read_mount_table()?;
+    let logs_listable = fs::read_dir(SANDBOX_HIDDEN_LOG_DIR).is_ok();
+    evaluate_system_sandbox(&mountinfo, logs_listable)
 }
 
-/// The inherited listening socket.
+/// The listening socket handed over by systemd (`StandardInput=socket`): accepted only when
+/// `fd` is an `AF_UNIX` `SOCK_STREAM` socket in the listening state.
 ///
 /// # Errors
-/// [`SocketError::Io`].
+/// [`SocketError::Io`] for any other descriptor (it is closed).
 pub fn listener_from_fd(fd: std::os::fd::OwnedFd) -> Result<UnixListener, SocketError> {
+    use nix::sys::socket::{getsockname, sockopt, SockType, SockaddrStorage};
+    use std::os::fd::AsRawFd;
+
+    let kind = getsockopt(&fd, sockopt::SockType).map_err(|_| SocketError::Io)?;
+    if kind != SockType::Stream {
+        return Err(SocketError::Io);
+    }
+    if !getsockopt(&fd, sockopt::AcceptConn).map_err(|_| SocketError::Io)? {
+        return Err(SocketError::Io);
+    }
+    let local: SockaddrStorage = getsockname(fd.as_raw_fd()).map_err(|_| SocketError::Io)?;
+    if local.as_unix_addr().is_none() {
+        return Err(SocketError::Io);
+    }
     Ok(UnixListener::from(fd))
 }

@@ -125,6 +125,12 @@ REQUIRED_ARTIFACTS=(soos-daemon soos-admin soos-enroll soos-gui libpam_soos.so)
 # same workspace build, installed when present and skipped with a notice otherwise, so an
 # artifact set built before the adapters existed still installs.
 OPTIONAL_ARTIFACTS=(soos-lockstatus soos-lock-widget)
+# Push sender system service (ADR 2026-10-23 "Push Sender as a Sandboxed System Service"):
+# built by the same workspace build, installed to <prefix>/libexec/soos with its two template
+# units when present, skipped with a notice otherwise. Nothing is enabled here: one instance
+# per desktop user is enabled by scripts/setup.sh or the administrator.
+PUSH_SENDER_ARTIFACT="soos-push-sender"
+PUSH_SENDER_UNITS=(soos-push-sender@.socket soos-push-sender@.service)
 GNOME_EXTENSION_UUID="soos-lockscreen@soos"
 GNOME_EXTENSION_FILES=(metadata.json extension.js stylesheet.css)
 
@@ -655,6 +661,19 @@ if [[ -n "${RESOLVED_ARTIFACT_DIR:-}" ]]; then
     if [[ ${#SKIPPED_ADAPTERS[@]} -gt 0 ]]; then
         info "Optional lock-screen adapters not built, skipped: ${SKIPPED_ADAPTERS[*]} (cargo build --release --locked --workspace builds them)"
     fi
+    candidate="${RESOLVED_ARTIFACT_DIR}/${PUSH_SENDER_ARTIFACT}"
+    if [[ -f "${candidate}" && -s "${candidate}" ]]; then
+        ARTIFACT_PATHS[${PUSH_SENDER_ARTIFACT}]="${candidate}"
+        for unit in "${PUSH_SENDER_UNITS[@]}"; do
+            [[ -f "${WORKSPACE_ROOT}/packaging/${unit}" ]] \
+                || preflight_fail "Push sender unit missing from the checkout: packaging/${unit}"
+        done
+        if [[ "${PREFIX}" != "/usr" ]]; then
+            warn "--prefix ${PREFIX}: the push sender units run /usr/libexec/soos/soos-push-sender, not ${PREFIX}/libexec/soos/soos-push-sender."
+        fi
+    else
+        info "Optional push sender not built, skipped: ${PUSH_SENDER_ARTIFACT} (cargo build --release --locked --workspace builds it)"
+    fi
 fi
 if [[ "${PREFIX}" != "/usr" && "${PREFIX}" != "/usr/local" ]]; then
     warn "--prefix ${PREFIX}: the GNOME lock-screen extension only runs soos-lockstatus from /usr/bin or"
@@ -954,6 +973,17 @@ if [[ -f "${SERVICE_SRC}" ]]; then
     tracked_install 0644 "${SERVICE_SRC}" "${TARGET_SYSTEMD_DIR}/soos-daemon.service"
     UNIT_INSTALLED=true
     success "Installed ${TARGET_SYSTEMD_DIR}/soos-daemon.service"
+fi
+
+# 5b. Push sender system service (ADR 2026-10-23): the binary and its two template units,
+#     never enabled here (setup.sh or the administrator enables soos-push-sender@<uid>.socket).
+if [[ -n "${ARTIFACT_PATHS[${PUSH_SENDER_ARTIFACT}]:-}" ]]; then
+    tracked_install 0755 "${ARTIFACT_PATHS[${PUSH_SENDER_ARTIFACT}]}" "${TARGET_LIBEXEC_DIR}/soos-push-sender"
+    success "Installed ${TARGET_LIBEXEC_DIR}/soos-push-sender"
+    for unit in "${PUSH_SENDER_UNITS[@]}"; do
+        tracked_install 0644 "${WORKSPACE_ROOT}/packaging/${unit}" "${TARGET_SYSTEMD_DIR}/${unit}"
+        success "Installed ${TARGET_SYSTEMD_DIR}/${unit}"
+    done
 fi
 
 # 6a. Record the pre-install PAM state (GitHub #166): scripts/uninstall.sh

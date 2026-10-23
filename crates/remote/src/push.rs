@@ -30,8 +30,9 @@ use std::time::Duration;
 use base64ct::{Base64UrlUnpadded, Encoding};
 use serde::{Deserialize, Deserializer, Serialize};
 use soos_push_protocol::{
-    decode_reply, encode_request, frame_len, DeliveryReply, DeliveryRequest, EndpointError,
-    Outcome, PushEndpoint, PushHost, MAX_PUSH_REPLY_BYTES, PUSH_FRAME_IO_TIMEOUT_MS,
+    decode_reply, encode_request, frame_len, system_push_socket_path, DeliveryReply,
+    DeliveryRequest, EndpointError, Outcome, PushEndpoint, PushHost, MAX_PUSH_REPLY_BYTES,
+    PUSH_FRAME_IO_TIMEOUT_MS,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -1075,20 +1076,42 @@ pub struct PushSocketCandidate {
     pub peer_uid: u32,
 }
 
-/// Stub.
+/// The sockets `soos-remote` tries, in order (ADR 2026-10-23 "Push Sender as a Sandboxed
+/// System Service"). `configured` is `config.push.socket_path`; `derived_default` is
+/// `$XDG_RUNTIME_DIR/soos-push/push.sock` when it can be computed. When they are equal (no
+/// explicit `push_socket_path`): the system socket `/run/soos-push/<owner>/push.sock`, whose
+/// listener is PID 1 (peer uid 0, socket activation), then the legacy user unit's socket
+/// (peer uid = owner). An explicit path is the only candidate (peer uid = owner).
 #[must_use]
 pub fn push_socket_candidates(
     configured: &Path,
     derived_default: Option<&Path>,
     owner_uid: u32,
 ) -> Vec<PushSocketCandidate> {
-    let _ = (configured, derived_default, owner_uid);
-    Vec::new()
+    let legacy = PushSocketCandidate {
+        path: configured.to_path_buf(),
+        peer_uid: owner_uid,
+    };
+    if derived_default == Some(configured) {
+        vec![
+            PushSocketCandidate {
+                path: system_push_socket_path(owner_uid),
+                peer_uid: SYSTEM_SENDER_PEER_UID,
+            },
+            legacy,
+        ]
+    } else {
+        vec![legacy]
+    }
 }
+
+/// `SO_PEERCRED` uid of a socket-activated system sender: systemd (PID 1, root) called
+/// `listen()` on it.
+const SYSTEM_SENDER_PEER_UID: u32 = 0;
 
 /// Production transport: one connection to the `soos-push-sender` socket per request.
 pub struct UnixPushTransport {
-    socket_path: PathBuf,
+    candidates: Vec<PushSocketCandidate>,
     owner_uid: u32,
 }
 
@@ -1103,32 +1126,44 @@ fn ms(value: u64) -> Duration {
 }
 
 impl UnixPushTransport {
-    /// The sender socket at `socket_path`, which must be a socket owned by `owner_uid`.
+    /// The sender socket at `socket_path`, which must be a socket owned by `owner_uid` whose
+    /// listener runs as `owner_uid` (one candidate).
     #[must_use]
     pub fn new(socket_path: PathBuf, owner_uid: u32) -> Self {
+        Self::with_candidates(
+            vec![PushSocketCandidate {
+                path: socket_path,
+                peer_uid: owner_uid,
+            }],
+            owner_uid,
+        )
+    }
+
+    /// The sender sockets of [`push_socket_candidates`]: per exchange the first one that
+    /// exists is used, and only it. Every candidate must be a socket owned by `owner_uid`
+    /// whose listener has the candidate's `peer_uid`.
+    #[must_use]
+    pub fn with_candidates(candidates: Vec<PushSocketCandidate>, owner_uid: u32) -> Self {
         Self {
-            socket_path,
+            candidates,
             owner_uid,
         }
     }
 
-    /// Stub.
-    #[must_use]
-    pub fn with_candidates(candidates: Vec<PushSocketCandidate>, owner_uid: u32) -> Self {
-        let socket_path = candidates
-            .into_iter()
-            .next()
-            .map(|c| c.path)
-            .unwrap_or_default();
-        Self {
-            socket_path,
-            owner_uid,
+    /// The first candidate whose path exists (a refused one is never skipped: no downgrade).
+    fn select(&self) -> Result<(&PushSocketCandidate, fs::Metadata), TransportError> {
+        for candidate in &self.candidates {
+            match fs::symlink_metadata(&candidate.path) {
+                Ok(meta) => return Ok((candidate, meta)),
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(_) => return Err(TransportError::Unavailable),
+            }
         }
+        Err(TransportError::Unavailable)
     }
 
     async fn exchange(&self, request: DeliveryRequest) -> Result<DeliveryReply, TransportError> {
-        let meta =
-            fs::symlink_metadata(&self.socket_path).map_err(|_| TransportError::Unavailable)?;
+        let (candidate, meta) = self.select()?;
         if !meta.file_type().is_socket() || meta.uid() != self.owner_uid {
             return Err(TransportError::Unavailable);
         }
@@ -1136,7 +1171,7 @@ impl UnixPushTransport {
         drop(request);
         let mut stream = timeout(
             ms(PUSH_CONNECT_UNIX_TIMEOUT_MS),
-            UnixStream::connect(&self.socket_path),
+            UnixStream::connect(&candidate.path),
         )
         .await
         .map_err(|_| TransportError::Unavailable)?
@@ -1144,7 +1179,7 @@ impl UnixPushTransport {
         let peer = stream
             .peer_cred()
             .map_err(|_| TransportError::Unavailable)?;
-        if peer.uid() != self.owner_uid {
+        if peer.uid() != candidate.peer_uid {
             return Err(TransportError::Unavailable);
         }
         timeout(ms(PUSH_FRAME_IO_TIMEOUT_MS), stream.write_all(&frame))

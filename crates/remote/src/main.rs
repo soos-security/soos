@@ -49,6 +49,7 @@ use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use soos_push_protocol::{PUSH_SOCKET_DIR_NAME, PUSH_SOCKET_FILE_NAME};
 use soos_remote::alerts::AlertSettings;
 use soos_remote::auth::system_random;
 use soos_remote::battery::SysfsBattery;
@@ -65,7 +66,8 @@ use soos_remote::journal::{JournalctlSource, OwnerLogin};
 use soos_remote::logind::ZbusSessionSource;
 use soos_remote::offline::{OfflineClock, OfflineSettings, SystemOfflineClock, ZbusNetworkSource};
 use soos_remote::push::{
-    subscription_line, PushSettings, PushStore, PushStoreError, UnixPushTransport,
+    push_socket_candidates, subscription_line, PushSettings, PushStore, PushStoreError,
+    UnixPushTransport,
 };
 use soos_remote::server::{serve, ServerState};
 use soos_remote::socket::{bind_listener, prepare_socket_dir, SocketError};
@@ -214,7 +216,14 @@ fn main() -> ExitCode {
         Some(Command::EnrollCode) => enroll_code(&config, uid),
         Some(Command::Passkeys { action }) => passkeys(action, credentials_path, uid),
         Some(Command::Push { action }) => push_command(action, &credentials_path, uid),
-        None => run_service(config, android, credentials_path, uid),
+        None => {
+            // The legacy default sender socket (no explicit `push_socket_path`): the system
+            // socket is tried first (ADR 2026-10-23).
+            let derived_push_socket = runtime_dir
+                .as_deref()
+                .map(|dir| dir.join(PUSH_SOCKET_DIR_NAME).join(PUSH_SOCKET_FILE_NAME));
+            run_service(config, android, credentials_path, uid, derived_push_socket)
+        }
     }
 }
 
@@ -462,11 +471,14 @@ fn push_command(action: PushAction, credentials_path: &std::path::Path, uid: u32
 }
 
 /// The Web Push settings and transport (`None` when push is off or `rp_id`/the socket path
-/// is missing, which the configuration already refuses).
+/// is missing, which the configuration already refuses). Without an explicit
+/// `push_socket_path` the transport tries the system sender socket first, then the legacy
+/// per-user one (`push_socket_candidates`).
 fn push_wiring(
     config: &RemoteConfig,
     credentials_path: &std::path::Path,
     uid: u32,
+    derived_push_socket: Option<&std::path::Path>,
 ) -> Option<(PushSettings, Arc<UnixPushTransport>)> {
     if !config.push.enabled {
         return None;
@@ -492,7 +504,10 @@ fn push_wiring(
             previews: config.push.previews,
             rp_id,
         },
-        Arc::new(UnixPushTransport::new(socket_path, uid)),
+        Arc::new(UnixPushTransport::with_candidates(
+            push_socket_candidates(&socket_path, derived_push_socket, uid),
+            uid,
+        )),
     ))
 }
 
@@ -502,6 +517,7 @@ fn run_service(
     android: Option<AndroidAppConfig>,
     credentials_path: PathBuf,
     uid: u32,
+    derived_push_socket: Option<PathBuf>,
 ) -> ExitCode {
     if config.allow_unlock && config.auth.rp_id.is_none() {
         warn!("allow_unlock is set but rp_id is not: every remote unlock is refused");
@@ -516,7 +532,13 @@ fn run_service(
             return ExitCode::from(EXIT_RUNTIME);
         }
     };
-    let code = runtime.block_on(run(config, android, credentials_path, uid));
+    let code = runtime.block_on(run(
+        config,
+        android,
+        credentials_path,
+        uid,
+        derived_push_socket,
+    ));
     // Blocking-pool tasks still running (a battery read stuck in a hung driver, a push store
     // write, which is temp file + fsync + rename) are abandoned after this bound (B-13).
     runtime.shutdown_timeout(Duration::from_millis(RUNTIME_SHUTDOWN_TIMEOUT_MS));
@@ -529,6 +551,7 @@ async fn run(
     android: Option<AndroidAppConfig>,
     credentials_path: PathBuf,
     uid: u32,
+    derived_push_socket: Option<PathBuf>,
 ) -> ExitCode {
     let Some(parent) = config.socket_path.parent() else {
         error!("socket path has no parent directory");
@@ -563,7 +586,12 @@ async fn run(
         .alerts
         .enabled
         .then(|| alert_settings(&config, &credentials_path, uid));
-    let push = push_wiring(&config, &credentials_path, uid);
+    let push = push_wiring(
+        &config,
+        &credentials_path,
+        uid,
+        derived_push_socket.as_deref(),
+    );
     let camera = config.camera.enabled.then(|| {
         let factory: PreviewSourceFactory = Arc::new(move || -> Box<dyn PreviewSource> {
             Box::new(DaemonPreviewClient::new(

@@ -47,6 +47,9 @@ rm -rf %{buildroot}
 install -d -m 0755 %{buildroot}/usr/libexec/soos
 install -m 0755 target/release/soos-daemon %{buildroot}/usr/libexec/soos/soos-daemon
 install -m 0755 scripts/provision_master_key.sh %{buildroot}/usr/libexec/soos/provision-master-key
+# Push sender system service (ADR 2026-10-23): never enabled by the package; one instance per
+# desktop user (systemctl enable --now soos-push-sender@<uid>.socket).
+install -m 0755 target/release/soos-push-sender %{buildroot}/usr/libexec/soos/soos-push-sender
 
 install -d -m 0755 %{buildroot}%{_bindir}
 install -m 0755 target/release/soos-admin %{buildroot}%{_bindir}/soos-admin
@@ -71,6 +74,8 @@ install -m 0644 target/release/libpam_soos.so %{buildroot}%{_libdir}/security/pa
 # Install systemd service unit
 install -d -m 0755 %{buildroot}%{_unitdir}
 install -m 0644 packaging/soos-daemon.service %{buildroot}%{_unitdir}/soos-daemon.service
+install -m 0644 packaging/soos-push-sender@.socket %{buildroot}%{_unitdir}/soos-push-sender@.socket
+install -m 0644 packaging/soos-push-sender@.service %{buildroot}%{_unitdir}/soos-push-sender@.service
 
 # Install Fedora custom authselect profile
 install -d -m 0755 %{buildroot}%{_sysconfdir}/authselect/custom/soos
@@ -195,6 +200,7 @@ fi
 %files
 /usr/libexec/soos/soos-daemon
 /usr/libexec/soos/provision-master-key
+/usr/libexec/soos/soos-push-sender
 %{_bindir}/soos-admin
 %{_bindir}/soos-enroll
 %{_bindir}/soos-gui
@@ -206,6 +212,8 @@ fi
 %{_datadir}/soos/lockscreen/hyprlock-soos.conf
 %{_libdir}/security/pam_soos.so
 %{_unitdir}/soos-daemon.service
+%{_unitdir}/soos-push-sender@.socket
+%{_unitdir}/soos-push-sender@.service
 %{_sysconfdir}/authselect/custom/soos
 %dir %attr(0755, root, root) %{_sysconfdir}/soos
 %ghost %{_sysconfdir}/soos/authselect.previous
