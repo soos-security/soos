@@ -170,8 +170,8 @@ Not run by this agent: the lead spawns an independent reviewer (`AI/candid_revie
 - The four migrations of §4 (three SET invariants and one line of the setup-root-preview Docker
   harness) need the owner's approval; until the lead applies them the branch is red on exactly
   those tests (CI jobs `test` and `setup-root-preview`).
-- `scripts/setup.sh` enables the socket idempotently; a `--prefix` other than `/usr` installs the
-  binary where the unit does not look (warned by install.sh, same rule as the daemon unit).
+- `scripts/setup.sh` enables the socket idempotently; with a `--prefix` other than `/usr`,
+  install.sh's drop-in points the unit at the installed binary (§10).
 - A `resolv.conf` under `/run` other than the two systemd-resolved files still needs a root
   drop-in (documented in `Docs/REMOTE_COMPANION.md` §2d).
 
@@ -192,11 +192,35 @@ on the three new tests):
   (`remove`) disable and stop every `soos-push-sender@<digits>.socket`.
 - `# shellcheck disable=SC2016` with its reason above the Perl client of the Docker harness.
 
-**Not done — owner decision needed (read-path rule for `--prefix`)**: skipping the socket when
-`PREFIX` is not `/usr` would turn the migrated SET24 and SET37 red, because the setup harness
-always runs with a fake `--prefix <tmp>/root/usr` and both now expect the
-`uid=0 systemctl enable --now soos-push-sender@<uid>.socket` line. See the lead's report for the
-options.
+**Read-path rule for `--prefix`** (lead decision, option b): skipping the socket when `PREFIX` is
+not `/usr` would have turned the migrated SET24 and SET37 red (the setup harness always runs with
+a fake `--prefix <tmp>/root/usr`). Instead `scripts/install.sh` makes the unit run what it
+installed (PSS19, tests first in `f765c3c`, red: no `prefix.conf`, unsafe prefixes accepted, the
+Docker `/usr/local` case failed with "install.sh wrote no soos-push-sender@.service.d/prefix.conf"):
+
+- with a `--prefix` other than `/usr` it writes
+  `<sysconfdir>/systemd/system/soos-push-sender@.service.d/prefix.conf` (0644, root-owned on a
+  live install, through the journaled and atomic `tracked_install`, refused through a symbolic
+  link): a marker line, `[Service]`, `ExecStart=` and
+  `ExecStart=<prefix>/libexec/soos/soos-push-sender --system-instance %i`; with `/usr` a stale
+  drop-in is removed (journaled, restored by a rollback);
+- the prefix must be absolute and normalised (no empty, `.` or `..` component, no trailing
+  slash), made only of letters, digits and `. _ + -` (nothing that a unit file would split or
+  expand: no space, `%`, quote, backslash or newline), and outside the paths the sandbox hides
+  (`/home`, `/root`, `/run`, `/tmp`, `/var/tmp`, `/var/log`, the coredump directory and the kernel
+  file systems); otherwise the preflight refuses the install;
+- the unit hardcodes no other binary path: the system sandbox check reads only the mount table and
+  `/var/log`, and `ProtectSystem=strict` keeps `/usr/local` and `/opt` readable, so nothing else
+  needs a drop-in (the Docker case proves `/usr/local` end to end);
+- `scripts/uninstall.sh --prefix <prefix>` removes the drop-in and its directory (never following
+  a link); the RPM `%preun`, Arch `pre_remove()` and Debian `prerm` delete it only when it carries
+  the install.sh marker.
+
+Evidence: `soos-invariants` 896 passed (PSS19: three tests); Docker
+`push_sender_system_unit_test.sh` passed including case 7 (carol's instance runs
+`/usr/local/libexec/soos/soos-push-sender` through the staged drop-in with the `/usr/libexec` binary
+removed, sandbox check passed, HTTP 403 from Apple); `setup_root_preview_test.sh` all cases passed;
+shellcheck `--severity=error` clean on the touched scripts.
 
 Verification of this round: `cargo test -p soos-invariants` 893 passed;
 `shellcheck --severity=error` (CI level, `koalaman/shellcheck:stable`) clean on the touched

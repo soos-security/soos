@@ -391,7 +391,8 @@ these limits), exactly like the false alerts of section 2c.
 
 3. Make the push sender listen for your account. `scripts/setup.sh` does it for you; by hand,
    after `scripts/install.sh` (it installs `/usr/libexec/soos/soos-push-sender` and the system
-   units `soos-push-sender@.socket` and `soos-push-sender@.service`), as root:
+   units `soos-push-sender@.socket` and `soos-push-sender@.service`; with another `--prefix` also
+   the drop-in `soos-push-sender@.service.d/prefix.conf` that runs `<prefix>/libexec/soos/soos-push-sender`), as root:
    `systemctl enable --now soos-push-sender@$(id -u <you>).socket`, then, as you,
    `systemctl --user restart soos-remote`.
 4. On the iPhone, open the app **from the home-screen icon** (section 4); on Android, open the
