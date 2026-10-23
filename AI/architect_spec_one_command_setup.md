@@ -93,10 +93,9 @@ before the first escalation, so the long run that follows is unattended:
 2. Identity confirmation when it was auto-detected (§7.1): "Use this PC's Tailscale name `<host>`
    and the Tailscale account that owns it for the phone companion? [Y/n]" (the login is never
    printed, ADR 2026-10-15 item (4)).
-3. First Funnel exposure only (Funnel not already active for this socket): the typed phrase
-   `yes, expose to the internet` (#362 acceptance line kept for interactive runs; see §9 S-12
-   for the `--yes` reconciliation). Anything else → Funnel off for this run (serve only), the
-   rest continues.
+3. First Funnel exposure only (Funnel not already active for this socket): a **y/N** question
+   explaining the Internet exposure (§19 OD-Q2; `--yes` skips it). `N` or empty → Funnel off for
+   this run (serve only), the rest continues.
 4. Recovery consent (only when Funnel will be exposed and recovery is allowed by §7.5 guards):
    "If the public address does not answer, may setup restart the Tailscale connection
    (`tailscale down`/`up`, a few seconds offline for every tailnet connection of this PC)? [Y/n]".
@@ -228,9 +227,9 @@ printing the command and then **fails preflight (exit 2)** when a package of the
 is missing with `--android` (a build that would fail mid-run is refused up front); for the
 `companion` group, missing tools turn exposure into "printed only" (§7.2) instead of failing.
 
-**Tailscale itself is not a package dependency** (`#362` out-of-scope list: no third-party
-repository is ever added; Ubuntu and Fedora ship it only from Tailscale's repository). Missing or
-logged-out Tailscale → exposure "printed only" with the official install link (§7.2, Q1).
+**Tailscale is installed and logged in by setup** (§19 OD-Q1, superseding the #362 out-of-scope
+line): Arch from the distribution (`tailscale` package), Debian/Ubuntu and Fedora from
+Tailscale's official repository, defined by setup itself with a fingerprint-pinned signing key.
 
 ### 5.2 Tool coverage table (the guard against "discovered mid-run")
 
@@ -364,7 +363,7 @@ with Tailscale running, `./scripts/setup.sh --yes` now sets up the companion wit
 | companion does not run | none (nothing printed about Tailscale beyond today's lines) |
 | `--no-tailscale` | `printed:--no-tailscale` |
 | `tailscale` absent / `jq`, `dig` or `curl` absent with `--skip-packages` | `printed:<tool> missing` + install link for Tailscale |
-| `state != Running` | `printed:Tailscale is not connected (run: sudo tailscale up)` |
+| `state != Running` | install / start / log in during E2 (§19 OD-Q1); `printed:` only when that is impossible or times out |
 | `XDG_RUNTIME_DIR` ≠ `/run/user/<uid>` or `--runstatedir` ≠ `/run` | `printed:socket outside /run/user/<uid>` (same read-path rule as PFP/SRP: tailscaled connects to the real path) |
 | `handler == foreign` | `printed:HTTPS port 443 of this node already serves something else; setup never replaces it` |
 | `allow_funnel` resolves `false` (or the interactive phrase was declined) | `serve` (and, if `handler == ours` with Funnel on, the Funnel is turned off for our handler only, §7.3) |
@@ -660,7 +659,7 @@ the cache or the key (kept like the toolchain); only `remote.toml` is restored (
 | S-1 | `setup.sh` itself still runs no Tailscale command other than the bounded `tailscale version`, holds no `curl`/`wget` and downloads nothing (SET3, SET41, SCN2/3/6 stay byte-identical and green). Every Tailscale call, DNS query and probe lives in `setup_exposure.sh`; every SDK download in `setup_android.sh` / `android_build.sh` — each with its own allowlist contract. |
 | S-2 | Exposure target is only `unix:/run/user/<uid>/soos-remote/remote.sock` at `/` on HTTPS 443; never a TCP port, never `--http`, never `reset`; a foreign 443 handler is never replaced. |
 | S-3 | No persistent privilege grant: no `tailscale set --operator`, no sudoers drop-in, no `sudo -v` keep-alive, no polkit rule. Tailscale changes run as root inside the existing system-phase escalation. |
-| S-4 | Setup turns Funnel on only when the `allow_funnel` it resolved for this run is `true` (flags, kept explicit `false` of a managed **or user** file, prerequisites); `--funnel off` turns our Funnel off; the interactive first exposure needs the typed phrase. Exposure happens in the root half **before** the companion phase: if the companion phase then fails (exit 5), the Funnel stays on but only reaches the companion socket — absent socket ⇒ public 502, and a restored older `remote.toml` with `allow_funnel = false` ⇒ `soos-remote` refuses Funnel requests itself; the summary prints `sudo tailscale funnel --https=443 off` (through `setup_exposure.sh hint`) and the next run reconciles (R1-7). |
+| S-4 | Setup turns Funnel on only when the `allow_funnel` it resolved for this run is `true` (flags, kept explicit `false` of a managed **or user** file, prerequisites); `--funnel off` turns our Funnel off; the interactive first exposure needs a `y` to an explanatory y/N question (§19 OD-Q2). Exposure happens in the root half **before** the companion phase: if the companion phase then fails (exit 5), the Funnel stays on but only reaches the companion socket — absent socket ⇒ public 502, and a restored older `remote.toml` with `allow_funnel = false` ⇒ `soos-remote` refuses Funnel requests itself; the summary prints `sudo tailscale funnel --https=443 off` (through `setup_exposure.sh hint`) and the next run reconciles (R1-7). |
 | S-5 | `tailscale down`/`up`: at most once per run, never over a tailnet SSH session, only with plan-time consent, never `up` with flags, failure loudly reported as "connection is DOWN" with the exact command. |
 | S-6 | The Tailscale login is never printed, logged, passed to root or written outside `remote.toml`; the status JSON is never stored; JSON reads are bounded; `jq` filters are constants. |
 | S-7 | Probes: HTTPS only, full certificate validation, no redirects, bounded time and size, no cookies/credentials/proxy, fixed User-Agent; no third-party service (only the system resolver for `NS ts.net` and Tailscale's authoritative servers). |
@@ -668,7 +667,7 @@ the cache or the key (kept like the toolchain); only `remote.toml` is restored (
 | S-9 | Key: outside the checkout, 0600 in a 0700 directory, PKCS12 EC P-256, never overwritten; password read with `read -s`, passed only by prefix-assigned environment to `keytool`/`apksigner`, never in argv, logs, files, the summary or an error message; no `set -x`. |
 | S-10 | Fingerprint derived from the signed APK and cross-checked with the keystore certificate bytes; text output of `keytool -list` never parsed. |
 | S-11 | `remote.toml` backup: no link followed, `O_EXCL`, 0600, byte-verified, never deleted; values of the user's file never printed. |
-| S-12 | **Typed confirmation vs one command**: #362's line "`--yes` alone never enables Funnel/remote unlock/camera over Funnel" was superseded by the owner's default-on decision of 2026-10-12 (ADR 2026-10-13 item (7), ADR 2026-10-15 item (3)). This spec keeps the typed phrase for the **first** interactive exposure (the one moment the PC becomes reachable from the Internet) and lets `--yes` expose, with the plan line and the summary stating it in plain words. Owner to confirm (Q2). |
+| S-12 | **Typed confirmation vs one command**: #362's line "`--yes` alone never enables Funnel/remote unlock/camera over Funnel" was superseded by the owner's default-on decision of 2026-10-12 (ADR 2026-10-13 item (7), ADR 2026-10-15 item (3)). **Decided (§19 OD-Q2)**: the first interactive exposure asks a y/N question that explains the Internet exposure; `--yes` skips it; the plan line and the summary state the exposure in plain words. |
 | S-13 | Every external command has a `REQUIRED_TOOLS` entry; every package name lives only in `check_build_deps.sh`. |
 | S-14 | Nothing of PAM, the daemon config rules, the kill switch, the enrollment rules, journal group or linger changes (print-only decisions of 2026-10-21 kept). |
 
@@ -701,10 +700,9 @@ Undo: …
 Variants: no phone connected → step "Install the app: copy <apk> to the phone…"; Funnel
 unverified → "Check from the phone with Wi-Fi and the Tailscale VPN off: open https://…; if it
 does not load, see Docs/REMOTE_COMPANION.md §2m" (exit 6); exposure printed only → today's
-`tailscale funnel --bg unix:…` lines with the reason. The enroll code is never generated by setup
-(it would be logged into a scrollback the user may share; the 300 s TTL also outlasts nothing
-useful at the end of a long run) — Q3 asks whether the owner wants setup to run it at the very
-end of an interactive local-seat run.
+`tailscale funnel --bg unix:…` lines with the reason. **Decided (§19 OD-Q3)**: at the end of an interactive local-seat run setup runs `soos-remote
+enroll-code` itself and shows the code with the exact phone steps; otherwise the command is
+printed as today.
 
 ## 11. Documentation, ADR, Matrix, Walkthroughs
 
@@ -882,7 +880,7 @@ removes every manual Tailscale step; C the Android ones.
   `SAFE_TOOLS`), `sdkmanager`, `keytool`, `apksigner`, `zipalign`, `adb`, `java`; every stub logs
   `uid=<n> <name> <args>` (existing prologue).
 - `SSH_CONNECTION`, `XDG_*` env per test; a pty helper (`script -qec` or a tiny Rust pty in the
-  test) to feed the key password and the typed phrase.
+  test) to feed the key password and the y/N answers.
 - The root half in tests is the existing `env -i` sudo stub (real root is covered by the Docker
   job only for the package matrix; exposure never runs for real in CI).
 - No production test hook: SDK pins are overridden by writing the **harness copy** of
@@ -901,7 +899,7 @@ removes every manual Tailscale step; C the Android ones.
 - `unzip` is used by `android_build.sh` today but declared in no package list (drift fixed by the
   `android` group).
 
-## 16. Open Questions for the Owner (real decisions only)
+## 16. Open Questions for the Owner — all answered on 2026-10-23, see §19
 
 - **Q1 Tailscale install/login**: when Tailscale is missing or logged out, setup prints the
   official steps and continues without exposure (#362 out of scope; Ubuntu/Fedora need
@@ -1063,3 +1061,138 @@ removes every manual Tailscale step; C the Android ones.
 - **Open question added**: **Q5** — pin `platform-tools` and `platforms;android-36` too
   (download exact revisions from Google's repository manifest by URL + SHA-256, re-pinned on each
   update), or accept them as a residual (spec default)?
+
+## 19. Owner decisions of 2026-10-23 (binding; authoritative over §1–§18)
+
+These are the owner's answers to Q1–Q5, relayed by the coordinator and also posted on GitHub #362.
+
+### OD-Q1 — Setup installs Tailscale and runs the first login
+
+- **Install with each family's official method, never `curl | sh`** (consistent with ONB-16):
+  - arch: `tailscale` from the official `extra` repository (`pacman -S --needed`), listed in a new
+    `check_build_deps.sh` group `tailscale` (`ARCH_TAILSCALE=(tailscale)`).
+  - debian/ubuntu: Tailscale's official apt repository, following the manual-install steps on
+    tailscale.com. Setup **writes the source line itself**:
+    `deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/<ID> <VERSION_CODENAME> main`.
+    `ID` must be `ubuntu` or `debian` and `VERSION_CODENAME` must match `^[a-z]+$`, both taken
+    from the parsed os-release; an unsupported pair → `printed:`. Only the signing key is
+    downloaded: `https://pkgs.tailscale.com/stable/<ID>/<VERSION_CODENAME>.noarmor.gpg`.
+  - fedora: setup writes `/etc/yum.repos.d/tailscale.repo` itself with fixed content
+    (`baseurl=https://pkgs.tailscale.com/stable/fedora/$basearch`, `gpgcheck=1`,
+    `repo_gpgcheck=1`, `gpgkey=https://pkgs.tailscale.com/stable/fedora/repo.gpg`). The key is
+    downloaded and checked first, then imported with `rpm --import`.
+  - Key check: the downloaded key's OpenPGP fingerprint must equal `TAILSCALE_REPO_KEY_FPR`. It is
+    read with `gpg --show-keys --with-colons` (bounded, in a 0700 temporary `GNUPGHOME`).
+    `TAILSCALE_REPO_KEY_FPR` is one constant in `setup_exposure.sh`; the implementer fills it from
+    Tailscale's published key and cross-checks it against two independent sources in the PR
+    description. A mismatch writes nothing and falls back to `printed:` with the official link.
+    `gpg` joins the `tailscale` group for debian (`gnupg`) and fedora (`gnupg2`).
+  - The key is **downloaded as the user** before E2, with `curl` under the §8.1 HTTPS rules and
+    `--max-filesize 65536`, into a 0700 temporary directory. The root half copies it, re-checks
+    the fingerprint itself, and installs it 0644 root:root. No `curl` runs as root (R1-6 kept).
+  - Then `systemctl enable --now tailscaled.service`, bounded by `UNIT_START_TIMEOUT_S`.
+- **Login**:
+  - It runs when `BackendState` is `NeedsLogin`, `NoState` or `Stopped`, or right after the
+    install. The root half runs `tailscale up` with **no argument**, bounded by
+    `TS_LOGIN_WAIT_S` = 600, stdin `/dev/null`.
+  - Setup extracts the first output line matching
+    `^[[:space:]]*https://login\.tailscale\.com/a/[A-Za-z0-9]+[[:space:]]*$` and prints "Open
+    this link in a browser and sign in to Tailscale: <url>". The URL is a one-time login link for
+    this node; it is shown on the terminal only and never written to a file.
+  - Setup polls `BackendState` every 2 s until `Running` or the bound. On timeout it falls back to
+    `printed:`; the rest of the run is unchanged.
+  - `Stopped` (already logged in) is brought up the same way.
+- **Placement and triggers (every existing harness keeps its meaning)**:
+  - The user half decides `--tailscale-setup install|start|login` from `detect` and passes it to
+    E2. The step runs in E2 **before** the exposure step, so no escalation is added and SET24
+    "one escalation" holds.
+  - `tailscale` binary absent → `install`.
+  - `tailscale status` stderr contains `failed to connect to local tailscaled` → `start`.
+  - A parsed `BackendState` in the login set above → `login`.
+  - A `status` failure with any other output (the default harness stub) → `printed:` as before.
+- **Identity after login**: if Tailscale was missing or logged out at plan time, the identity
+  cannot be detected then. The user half runs `detect` again after E2, before the companion
+  phase, and asks the interactive identity question (§2, question 2) at that point.
+- `--no-tailscale` also disables install and login. `--dry-run` only plans them.
+- **Tests (PR B)**:
+  - STX-S4 (static):
+    - the source line and the `.repo` content are constants;
+    - `signed-by` is present and `gpgcheck=1` is set;
+    - no `curl … | sh` and no `install.sh` URL;
+    - the fingerprint is compared before any write, and `curl` never runs as root.
+  - STX-B14 (per family, with stubs): the correct key → repository written, package installed,
+    `tailscaled` enabled. A wrong fingerprint → nothing written, `printed:`.
+  - STX-B15 (login): the stub prints a login URL; setup shows it and polls.
+    - `Running` → the exposure continues.
+    - Never `Running` → bounded, `printed:`, exit code unchanged.
+  - STX-B16: the default stub (status fails without the tailscaled text) triggers nothing: no
+    install, no `up`.
+- **ADR**: this amends two #362 rules, for Tailscale only (owner decision): the out-of-scope item
+  "Installing or logging in to Tailscale itself" and "never adds third-party repositories". The
+  fingerprint pin is the supply-chain control.
+
+### OD-Q2 — y/N instead of a typed phrase
+
+§2 item 3, S-4 and S-12 are updated in place. Question text: "Funnel makes the phone companion
+reachable from the Internet at https://<host>/ (sign-in needs your passkey). Turn it on? [y/N]".
+`--yes` skips the question and exposes.
+
+Test STX-B17 (pty): `N` → serve only, no `funnel --bg`; `y` → `funnel --bg`.
+
+**No existing test, doc or code encodes the typed phrase**. I checked with
+`grep -rni "expose to the internet\|typed confirmation\|confirmation phrase"` over `tests/`,
+`scripts/`, `Docs/`, `README.md` and `crates/gui/src`: nothing matches. The phrase exists only in
+the #362 issue text, so OD-Q2 creates no migration.
+
+### OD-Q3 — Setup shows the enroll code
+
+Setup runs the code step at the very end, after the summary's "done" lines, only when all of these
+hold:
+
+- the run is interactive (TTY on stdin and stdout, no `--yes`);
+- the seat is local (the existing verdict);
+- the companion phase succeeded;
+- our serve handler is active (passkey registration runs over the tailnet).
+
+It first prints the phone steps:
+
+1. On the phone, turn the Tailscale VPN ON.
+2. Open https://<host>/ .
+3. Type the code shown below (valid 5 minutes) and create the passkey.
+4. Then you may turn the VPN off.
+
+It then runs `"${BIN_DIR}/soos-remote" enroll-code` as the user, with stdout and stderr
+**directly on the terminal**: never through a pipe, a variable, `tee` or a log. In every other
+case the command is printed as today.
+
+Tests, STX-B18 (pty):
+
+- The fake `soos-remote` prints a sentinel code. It reaches the pty and never appears in the stub
+  log arguments, in any file or in a captured variable.
+- Non-interactive runs never call `enroll-code`; u6 keeps its printed text.
+
+### OD-Q4 — Migrations
+
+M1, M2, M4, M5, M6 and M7 are **approved**. M3, M12–M14 and M8–M11 are acknowledged.
+
+These decisions create two new migrations. Both are category A and need owner approval:
+
+| # | PR | File : test | Current assertion | Proposed change | Cat. |
+|---|---|---|---|---|---|
+| M15 | B | `setup_user_phase_contract.rs` : `assert_no_forbidden_calls` (as migrated by the approved M7) | `curl` only as the uid-1000 probe form | Also allow a uid-1000 `curl` with the §8.1 HTTPS flags whose URL is exactly one of the pinned Tailscale key URLs (`https://pkgs.tailscale.com/stable/<id>/<codename>.noarmor.gpg`, `https://pkgs.tailscale.com/stable/fedora/repo.gpg`). Every other `curl` still fails the test. | A |
+| M16 | B | `setup_user_phase_contract.rs` : `test_set_u1_static_rules_of_the_user_phase` (SET20) | `enroll-code` may appear in `setup.sh` code only inside a quoted message | Remove `enroll-code` from that printed-only list. Instead require exactly one executed `enroll-code` call, inside the function guarded by the interactive, local-seat, companion-ok and serve-active checks, with no redirection, pipe or substitution on that line. | A |
+
+No other existing assertion changes:
+
+- SET20's `tailscale up` ban on `setup.sh` still holds, because the login `up` runs in
+  `setup_exposure.sh`.
+- M7's allowlist already contains a bare `up`.
+- No existing test bans `systemctl enable --now tailscaled.service`, `gpg`, `rpm --import`,
+  `apt-get update`, or writes under `/etc/apt` or `/etc/yum.repos.d` (checked).
+- The harnesses' default `tailscale` stub never triggers OD-Q1 (STX-B16).
+
+### OD-Q5 — Residual accepted
+
+`platform-tools` and `platforms;android-36` stay unpinned: `sdkmanager` installs the latest
+revision, checked by Google's repository checksums over HTTPS. The ADR and
+`Docs/SECURITY_AND_QUALITY_GUIDELINES.md` record this as an owner-accepted residual.
