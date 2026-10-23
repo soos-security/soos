@@ -229,6 +229,9 @@ esac
 
 /// System units keep the PR 1 behaviour; `--user` units have their own state files
 /// (`user_<unit>_enabled`, `user_<unit>_active`). `STUB_USER_START_RC` fails every user start.
+/// `STUB_USER_DIE_UNIT` names a user unit that stops right after this run starts or restarts it
+/// (`is-active` then answers 3); `STUB_SYSTEM_OFF_UNIT` names a system unit the owner disabled
+/// and stopped (`is-active` 3, `is-enabled` 1), for the push sender socket (ADR 2026-10-23).
 const STUB_SYSTEMCTL: &str = r#"
 if [[ "${1:-}" == "--user" ]]; then
     shift
@@ -248,9 +251,20 @@ if [[ "${1:-}" == "--user" ]]; then
         if [[ "${u}" == "${STUB_USER_FAIL_UNIT:-}" ]]; then
             case "${verb}" in enable|start|restart) exit 1 ;; esac
         fi
+        if [[ "${u}" == "${STUB_USER_DIE_UNIT:-}" ]]; then
+            case "${verb}" in
+                start|restart) touch "${STUB_STATE}/user_${u}_died" ;;
+                enable) (( now )) && touch "${STUB_STATE}/user_${u}_died" ;;
+            esac
+        fi
         case "${verb}" in
             is-enabled) [[ -e "${STUB_STATE}/user_${u}_enabled" ]] || rc=1 ;;
-            is-active) [[ -e "${STUB_STATE}/user_${u}_active" ]] || rc=3 ;;
+            is-active)
+                if [[ -e "${STUB_STATE}/user_${u}_died" ]]; then
+                    rc=3
+                else
+                    [[ -e "${STUB_STATE}/user_${u}_active" ]] || rc=3
+                fi ;;
             enable)
                 touch "${STUB_STATE}/user_${u}_enabled"
                 if (( now )); then
@@ -268,6 +282,12 @@ if [[ "${1:-}" == "--user" ]]; then
         esac
     done
     exit "${rc}"
+fi
+if [[ -n "${STUB_SYSTEM_OFF_UNIT:-}" && " $* " == *" ${STUB_SYSTEM_OFF_UNIT} "* ]]; then
+    case "${1:-}" in
+        is-active) exit 3 ;;
+        is-enabled) exit 1 ;;
+    esac
 fi
 case "${1:-}" in
     is-enabled) [[ -e "${STUB_STATE}/unit_enabled" ]] ;;
@@ -1017,16 +1037,23 @@ fn test_set_u6_full_run_sets_up_the_default_on_companion() {
         &lines,
         &["uid=1000 systemctl --user enable --now soos-remote.service"],
     );
-    find_line(
+    let sender = find_line(
         &lines,
-        &["uid=1000 systemctl --user enable --now soos-push-sender.service"],
+        &[&format!(
+            "uid=0 systemctl enable --now soos-push-sender@{}.socket",
+            real_uid()
+        )],
     );
     let system = find_line(&lines, &["uid=0 install.sh"]);
     assert!(system < install && install < validate && validate < enable);
+    assert!(
+        system < sender && sender < install,
+        "the root half enables the sender socket between install.sh and install_remote.sh"
+    );
     assert!(!has_line(&lines, &["uid=0 install_remote.sh"]));
     assert!(!has_line(&lines, &["uid=0 soos-remote"]));
     assert!(h.user_unit("soos-remote.service", "active"));
-    assert!(h.user_unit("soos-push-sender.service", "active"));
+    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
 
     let t = text(&out);
     assert!(
@@ -1421,10 +1448,8 @@ fn test_set_u22_rollback_stops_a_unit_started_by_the_run() {
     let mut h = Harness::new("ustart");
     let first = h.run_companion(&[]);
     assert_eq!(code(&first), 0, "{}", text(&first));
-    for unit in ["soos-remote.service", "soos-push-sender.service"] {
-        fs::remove_file(h.state.join(format!("user_{unit}_active"))).unwrap();
-    }
-    h.set_env("STUB_USER_FAIL_UNIT", "soos-push-sender.service");
+    fs::remove_file(h.state.join("user_soos-remote.service_active")).unwrap();
+    h.set_env("STUB_USER_DIE_UNIT", "soos-remote.service");
     let out = h.run(&["--yes"]);
     assert_eq!(code(&out), 5, "{}", text(&out));
     let lines = h.log_lines();
@@ -1438,15 +1463,13 @@ fn test_set_u22_rollback_stops_a_unit_started_by_the_run() {
     );
     assert!(!h.user_unit("soos-remote.service", "active"));
     assert!(h.user_unit("soos-remote.service", "enabled"));
-    assert!(h.user_unit("soos-push-sender.service", "enabled"));
 
     // Active before the run and restarted by it: the rollback restarts it on the restored file.
     let mut h = Harness::new("urestart");
     let first = h.run_companion(&[]);
     assert_eq!(code(&first), 0, "{}", text(&first));
     let good = fs::read_to_string(h.remote_toml()).unwrap();
-    fs::remove_file(h.state.join("user_soos-push-sender.service_active")).unwrap();
-    h.set_env("STUB_USER_FAIL_UNIT", "soos-push-sender.service");
+    h.set_env("STUB_USER_DIE_UNIT", "soos-remote.service");
     let out = h.run(&["--yes", "--remote-unlock", "off"]);
     assert_eq!(code(&out), 5, "{}", text(&out));
     assert_eq!(fs::read_to_string(h.remote_toml()).unwrap(), good);
@@ -1575,32 +1598,32 @@ fn test_set_u19_disabled_unit_stays_disabled() {
 /// sender like a first write.
 #[test]
 fn test_set_u21_push_switched_on_later_enables_the_sender() {
-    let h = Harness::new("pushon");
+    let mut h = Harness::new("pushon");
+    let socket = format!("soos-push-sender@{}.socket", real_uid());
+    let enable_line = format!("uid=0 systemctl enable --now {socket}");
     let first = h.run_companion(&["--push", "off"]);
     assert_eq!(code(&first), 0, "{}", text(&first));
-    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
+    assert!(!has_line(&h.log_lines(), &[&enable_line]));
     let out = h.run(&["--yes", "--push", "on"]);
     assert_eq!(code(&out), 0, "{}", text(&out));
-    assert!(h.user_unit("soos-push-sender.service", "enabled"));
-    assert!(h.user_unit("soos-push-sender.service", "active"));
+    find_line(&h.log_lines(), &[&enable_line]);
+    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
     assert!(
-        !text(&out).contains("soos-push-sender.service is not enabled"),
+        !text(&out).contains(&format!("{socket} is not enabled")),
         "{}",
         text(&out)
     );
     // Push already on and the sender disabled later: it stays disabled.
-    for what in ["enabled", "active"] {
-        fs::remove_file(
-            h.state
-                .join(format!("user_soos-push-sender.service_{what}")),
-        )
-        .unwrap();
-    }
+    h.set_env("STUB_SYSTEM_OFF_UNIT", &socket);
     let out = h.run(&["--yes"]);
     assert_eq!(code(&out), 0, "{}", text(&out));
-    assert!(!h.user_unit("soos-push-sender.service", "enabled"));
     assert!(
-        text(&out).contains("soos-push-sender.service is not enabled"),
+        !has_line(&h.log_lines(), &[&enable_line]),
+        "{:?}",
+        h.log_lines()
+    );
+    assert!(
+        text(&out).contains(&format!("{socket} is not enabled")),
         "{}",
         text(&out)
     );
