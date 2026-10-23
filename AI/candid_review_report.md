@@ -3,7 +3,7 @@
 - **Date**: 2026-10-23
 - **Target Branch**: `feat/setup-preflight-deps`
 - **Base (merge-base)**: `d5e3c09`
-- **Reviewed-Diff-Fingerprint**: `ef7e7b4b2bf1319fbeda0bc46400b018ba7f238533b6a3974199a5409bee8202`
+- **Reviewed-Diff-Fingerprint**: `443966868121a10ec6348439ee36d3240679fac85ae4d6bb7d7477c5e3fbe38e`
 - **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
   `AI/architect_spec_one_command_setup.md`, `AI/auditor_constraints_setup_preflight_deps.md`,
   `AI/plan_evaluator_report.md`, `AI/walkthroughs/256_setup_preflight_deps.md`,
@@ -33,6 +33,15 @@ tracked so a `[` line inside them is not a header) and pinned by SDP27. The two 
 items are also fixed: the drop-in marker is checked on the first line only, on a regular
 non-link file, in `install.sh` and `uninstall.sh` (SDP29), and the `optional` scope is enforced
 by SDP28.
+
+Rebind after `e14b604` (round 3). The developer closed the two MINOR fail-open residuals of
+round 2 (escaped keys, and an escaped quote before `"""`; see §4). The reviewer proved each
+SDP27 case red:
+
+- `escapedkey` against the round-2 `setup.sh` of `5f7f315`;
+- `escapedquotes` against the current `setup.sh` with only the `count_of` hunk removed.
+
+Both are green on this tree. No test line was removed in this round.
 
 Gates re-run on this tree: `cargo fmt --check`; workspace clippy (all targets, all features,
 `-D warnings`); `cargo test -p soos-invariants -p soos-remote --test-threads=3` (invariants 923
@@ -101,9 +110,14 @@ unchanged.
 - **Fail-safe parser.** I ran the extracted parser on adversarial inputs:
   - **Kept off, as required:** double- and single-quoted keys, tabs, CRLF, `false` then `true` duplicates (`false` wins), dotted keys, inline tables, a UTF-8 BOM, Unicode quotes, unterminated multi-line strings, `[` lines inside multi-line strings and arrays, `'''` literals, and comments naming a key. Every written `false` stayed `false`. Ambiguity only ever turns keys off.
 - **Keys below a real table header are ignored** (spec R2-1, SDP14). This opens no path for a valid config: `FileConfig` and `FileAndroid` use `deny_unknown_fields`, and `[android]` is the only table, so soos-remote refuses any feature key under a header.
-- **Two residual inputs still enable a written `false`.** Both are deliberately obfuscated TOML (MINOR, see §4):
-  - a quoted key spelled with a TOML escape (`"allow_funnel" = false`);
-  - a `\"""` escape inside a multi-line basic string, which ends string tracking early, so a following `[x]` line inside the string is taken as a header.
+- **Round-3 adversarial run, all fail-safe:**
+  - Quoted feature keys spelled with a short or long TOML unicode escape turn every feature key off.
+  - An escaped quote followed by `""` keeps a multi-line basic string open.
+  - An escaped backslash followed by `"""` closes the string, and the `[x]` line that follows is a real header, as in TOML.
+  - A backslash inside a value (a `mailto:` subject, a Windows-style path, `"a=b"` with a backslash) changes nothing, because only text before the first `=` triggers the rule.
+  - A comment line with a backslash is skipped before the rule applies.
+  - Every round-2 input still keeps the written `false`.
+- **No known residual input enables a feature the user wrote `false` for.**
 - **Backup:**
   - **Creation:** `set -C` (O_EXCL) under `umask 077`; a name that exists or is a link (dangling included) is skipped; suffixes go up to `-9`, then the run fails with nothing replaced; the read is bounded by `head -c`; `cmp` runs before the replacement.
   - **Never deleted:** setup does not remove the backup.
@@ -136,19 +150,15 @@ diff).
 
 ## 4. Detailed Findings & Action Items
 
-1. **MINOR, `scripts/setup.sh` `parse_user_remote_config`: escaped quoted keys.**
-   `"allow_funnel" = false` (valid TOML, same key) matches neither `re_key` nor the
-   fail-safe word scan, so Funnel resolves on. This takes deliberate obfuscation of the user's
-   own file and crosses no security boundary (whoever can write that file can write
-   `allow_funnel = true`). Optional hardening: treat any top-level line with a `\` before its
-   first `=` as unrecognized and force all seven feature keys off.
-2. **MINOR, same function: `\"""` inside a multi-line basic string.** `count_of` ends the
-   string early, so a `[x]` line still inside it is read as a header and a later top-level
-   `allow_funnel = false` is ignored. Like item 1, this is contrived. Optional hardening: drop
-   `\\.` pairs before counting delimiters.
-3. **MINOR, `scripts/install.sh`: undeclared variable.** `drop_in_first` is a new global and is
-   not reset before the `read`. This is harmless: `read` assigns it on every path the condition
-   reaches.
+1. **CLOSED (round 3), escaped quoted keys.** A quoted key that spells a feature key with a
+   TOML escape sequence (valid TOML, the same key for soos-remote) now turns all seven feature
+   keys off and names them. The rule is a backslash before the first `=` of a top-level line.
+   Pinned by SDP27 `escapedkey`.
+2. **CLOSED (round 3), an escaped quote before `"""` inside a multi-line basic string.**
+   `count_of` drops the escaped backslash and escaped quote pairs before counting the delimiter,
+   so the string stays open and its `[x]` line is not read as a header. Pinned by SDP27
+   `escapedquotes`.
+3. **CLOSED (round 3), `scripts/install.sh` `drop_in_first`:** now initialised at top level.
 4. **INFO, SDP3 lexer:** it does not resolve `find -exec <cmd>` or `xargs <cmd>` targets. Neither
    is used in `setup.sh` today.
 
