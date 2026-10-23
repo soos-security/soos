@@ -2160,6 +2160,22 @@ fn test_sdp27_quoted_keys_and_unparsed_lines_fail_safe() {
             [false, true, true, true, true, true, false],
             Some("allow_funnel"),
         ),
+        // Lead review round 2: a key spelled with a TOML escape is the same key for soos-remote;
+        // setup cannot tell which, so every feature key is turned off.
+        (
+            "escapedkey",
+            "\"allow\\u005ffunnel\" = false\n",
+            [false; 7],
+            Some("allow_funnel, allow_unlock, password_alerts, push_notifications, offline_alerts, camera_view, camera_view_funnel"),
+        ),
+        // Lead review round 2: `\"""` inside a multi-line basic string does not end it, so its
+        // `[x]` line is no header and the later top-level key is still read.
+        (
+            "escapedquotes",
+            "note = \"\"\"\ntext \\\"\"\"\n[x]\n\"\"\"\nallow_funnel = false\n",
+            [false, true, true, true, true, true, false],
+            None,
+        ),
     ] {
         let h = Harness::new(&format!("b1{tag}"));
         h.user_file(&format!(
