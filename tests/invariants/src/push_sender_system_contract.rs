@@ -525,6 +525,67 @@ fn strip_shell_comments(script: &str) -> String {
         .join("\n")
 }
 
+/// The text of `body` from `start` up to (not including) the first later line that starts with
+/// one of `ends` (or the end).
+fn section_from<'a>(body: &'a str, start: &str, ends: &[&str]) -> &'a str {
+    let at = pos(body, start, start);
+    let rest = &body[at + start.len()..];
+    let end = rest
+        .lines()
+        .scan(0usize, |offset, line| {
+            let here = *offset;
+            *offset += line.len() + 1;
+            Some((here, line))
+        })
+        .skip(1)
+        .find(|(_, line)| ends.iter().any(|e| line.starts_with(e)))
+        .map_or(rest.len(), |(here, _)| here);
+    &rest[..end]
+}
+
+/// PSS18 (candid review of 2026-10-23): removing a package disables and stops every enabled
+/// instance before the template units go: RPM `%preun` on erase (`$1` is 0), the Arch
+/// `pre_remove()` of `soos.install` (referenced by `install=`), the Debian `prerm` on `remove`;
+/// only names of the form `soos-push-sender@<digits>.socket` reach `systemctl`.
+#[test]
+fn test_pss18_packages_disable_instances_on_removal() {
+    let spec = read("packaging/rpm/soos.spec");
+    let preun = section_from(&spec, "%preun", &["%post", "%files", "%changelog"]);
+    let arch = read("packaging/arch/soos.install");
+    let pre_remove = section_from(&arch, "pre_remove() {", &["}"]);
+    assert!(
+        read("packaging/arch/PKGBUILD")
+            .lines()
+            .any(|l| l.trim() == "install=soos.install"),
+        "PKGBUILD references soos.install"
+    );
+    let prerm = read("packaging/debian/prerm");
+    let remove = section_from(&prerm, "remove|deconfigure)", &["    upgrade|"]);
+    for (name, body) in [
+        ("soos.spec %preun", preun),
+        ("soos.install pre_remove", pre_remove),
+        ("debian prerm remove", remove),
+    ] {
+        for needle in [
+            "/etc/systemd/system/sockets.target.wants/soos-push-sender@",
+            "soos-push-sender@[0-9]",
+            "systemctl disable --now",
+            "systemctl stop",
+        ] {
+            assert!(
+                body.contains(needle),
+                "{name} must contain {needle}:\n{body}"
+            );
+        }
+    }
+    let erase = pos(preun, "\"$1\" -eq 0", "soos.spec %preun");
+    let disable = pos(preun, "soos-push-sender@", "soos.spec %preun");
+    assert!(
+        erase < disable,
+        "the RPM instances are disabled on erase only, never on upgrade:\n{preun}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------
 // PSS13 — documentation, ADR, walkthrough
 // ---------------------------------------------------------------------------------------

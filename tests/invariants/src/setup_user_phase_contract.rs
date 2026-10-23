@@ -2460,3 +2460,126 @@ fn test_pss12_dry_run_plans_the_system_sender_without_change() {
     );
     assert_eq!(before, h.snapshot(), "dry-run must write nothing");
 }
+
+/// PSS16 (candid review of 2026-10-23): the "system: already done" check covers the push
+/// sender when this checkout and build have it: the installed binary must equal the artifact
+/// and both template units must equal `packaging/`, so a sender-only change or an install
+/// made before the units existed runs install.sh again. The fake checkout of the harness gets
+/// the two units here (additive setup; the stub install.sh never installs them).
+#[test]
+fn test_pss16_system_up_to_date_includes_the_push_sender() {
+    let h = Harness::new("pss_uptodate");
+    for unit in ["soos-push-sender@.socket", "soos-push-sender@.service"] {
+        fs::copy(
+            workspace_root().join("packaging").join(unit),
+            h.repo.join("packaging").join(unit),
+        )
+        .unwrap();
+    }
+    let first = h.run_companion(&[]);
+    assert_eq!(code(&first), 0, "{}", text(&first));
+    let artifact = h.repo.join("target/release/soos-push-sender");
+    assert!(
+        artifact.is_file(),
+        "the stub build wrote the sender artifact"
+    );
+
+    // Nothing of the sender installed (an install from before the units existed).
+    let dry = h.run(&["--dry-run"]);
+    assert!(
+        text(&dry).contains("[PLAN] system: will run"),
+        "a missing sender makes the system phase run:\n{}",
+        text(&dry)
+    );
+
+    // Everything installed and equal: already done.
+    let binary = h.root.join("usr/libexec/soos/soos-push-sender");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    fs::copy(&artifact, &binary).unwrap();
+    let unit_dir = h.root.join("etc/systemd/system");
+    for unit in ["soos-push-sender@.socket", "soos-push-sender@.service"] {
+        fs::copy(h.repo.join("packaging").join(unit), unit_dir.join(unit)).unwrap();
+    }
+    let dry = h.run(&["--dry-run"]);
+    assert!(
+        text(&dry).contains("[PLAN] system: already done"),
+        "{}",
+        text(&dry)
+    );
+
+    // A sender-only change: will run.
+    fs::write(&binary, "older sender\n").unwrap();
+    let dry = h.run(&["--dry-run"]);
+    assert!(
+        text(&dry).contains("[PLAN] system: will run"),
+        "a changed sender binary makes the system phase run:\n{}",
+        text(&dry)
+    );
+    fs::copy(&artifact, &binary).unwrap();
+
+    // A missing or different template unit: will run.
+    for unit in ["soos-push-sender@.socket", "soos-push-sender@.service"] {
+        let installed = unit_dir.join(unit);
+        fs::remove_file(&installed).unwrap();
+        let dry = h.run(&["--dry-run"]);
+        assert!(
+            text(&dry).contains("[PLAN] system: will run"),
+            "missing {unit}:\n{}",
+            text(&dry)
+        );
+        fs::write(&installed, "[Unit]\n").unwrap();
+        let dry = h.run(&["--dry-run"]);
+        assert!(
+            text(&dry).contains("[PLAN] system: will run"),
+            "different {unit}:\n{}",
+            text(&dry)
+        );
+        fs::copy(h.repo.join("packaging").join(unit), &installed).unwrap();
+    }
+    let dry = h.run(&["--dry-run"]);
+    assert!(
+        text(&dry).contains("[PLAN] system: already done"),
+        "{}",
+        text(&dry)
+    );
+}
+
+/// PSS17 (candid review of 2026-10-23): a companion rollback keeps the push sender socket the
+/// root half enabled (idle without soos-remote) and says how to disable it.
+#[test]
+fn test_pss17_companion_failure_names_the_kept_socket() {
+    let mut h = Harness::new("pss_kept_socket");
+    let uid = real_uid();
+    h.set_env("STUB_USER_FAIL_UNIT", "soos-remote.service");
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 5, "{}", text(&out));
+    let t = text(&out);
+    assert!(
+        t.contains(&format!(
+            "soos-push-sender@{uid}.socket enabled by the system phase is kept"
+        )) && t.contains(&format!(
+            "sudo systemctl disable --now soos-push-sender@{uid}.socket"
+        )),
+        "{t}"
+    );
+    assert!(
+        !has_line(
+            &h.log_lines(),
+            &[
+                "systemctl disable",
+                &format!("soos-push-sender@{uid}.socket")
+            ]
+        ),
+        "the companion never touches the system socket"
+    );
+    // Push off: nothing about the socket.
+    let mut h = Harness::new("pss_kept_socket_off");
+    h.set_env("STUB_USER_FAIL_UNIT", "soos-remote.service");
+    let out = h.run_companion(&["--push", "off"]);
+    assert_eq!(code(&out), 5, "{}", text(&out));
+    assert!(
+        !text(&out).contains("enabled by the system phase is kept"),
+        "{}",
+        text(&out)
+    );
+}
