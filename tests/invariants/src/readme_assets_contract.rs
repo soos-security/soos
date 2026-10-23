@@ -74,6 +74,9 @@ const SVG_FORBIDDEN: [&str; 7] = [
 /// The capture scripts (spec §2).
 const CAPTURE_SCRIPT: &str = "scripts/capture_readme_assets.sh";
 const WEB_CAPTURE_SCRIPT: &str = "scripts/capture_readme_web.sh";
+/// The dev-only Playwright bench (GitHub #464): it may name and build the loopback fixture server,
+/// never the `readme-capture` feature (owner-approved additive RAC15 exception of 2026-10-23).
+const BROWSER_BENCH_SCRIPT: &str = "scripts/remote_browser_tests.sh";
 const FIXTURE_SERVER: &str = "tests/fixtures/examples/readme_web_fixture_server.rs";
 const GUI_MANIFEST: &str = "crates/gui/Cargo.toml";
 
@@ -1092,6 +1095,12 @@ fn test_rac_capture_tooling_is_dev_only() {
             if rel == CAPTURE_SCRIPT || rel == WEB_CAPTURE_SCRIPT {
                 continue;
             }
+            if rel == BROWSER_BENCH_SCRIPT {
+                if text.contains("readme-capture") {
+                    offenders.push(rel);
+                }
+                continue;
+            }
             if text.contains("readme-capture") || text.contains("readme_web_fixture_server") {
                 offenders.push(rel);
             }
@@ -1212,5 +1221,45 @@ fn test_rac_capture_scripts_are_hardware_free() {
     assert!(
         web.contains("http://127.0.0.1:"),
         "{WEB_CAPTURE_SCRIPT} only opens the loopback fixture server"
+    );
+}
+
+/// RAC26: the RAC15 exception of the Playwright bench (GitHub #464, owner-approved additive
+/// migration of 2026-10-23) is narrow. `scripts/remote_browser_tests.sh` builds the loopback
+/// fixture server by its name, with `--locked` and only from `soos-test-fixtures`, on its only
+/// `cargo build` line, with no feature flag, and never names the `readme-capture` feature.
+#[test]
+fn test_rac_browser_bench_exception_is_narrow() {
+    let bench = read(BROWSER_BENCH_SCRIPT);
+    let builds: Vec<&str> = bench
+        .lines()
+        .filter(|l| l.contains("cargo build"))
+        .collect();
+    assert_eq!(
+        builds.len(),
+        1,
+        "{BROWSER_BENCH_SCRIPT} has exactly one cargo build line: {builds:?}"
+    );
+    let build = builds[0];
+    for needle in [
+        "--locked",
+        "-p soos-test-fixtures",
+        "--example readme_web_fixture_server",
+    ] {
+        assert!(
+            build.contains(needle),
+            "{BROWSER_BENCH_SCRIPT}: the fixture build line carries `{needle}`: {build}"
+        );
+    }
+    assert!(
+        !build.contains("--examples")
+            && !build.contains("--features")
+            && !build.contains("--all-features")
+            && !build.contains("-F "),
+        "{BROWSER_BENCH_SCRIPT}: the fixture build names one example and enables no feature: {build}"
+    );
+    assert!(
+        !bench.contains("readme-capture"),
+        "{BROWSER_BENCH_SCRIPT} never names the `readme-capture` feature"
     );
 }
