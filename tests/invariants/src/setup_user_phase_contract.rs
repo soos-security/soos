@@ -2345,15 +2345,12 @@ fn test_pss12_setup_enables_the_system_sender_not_the_user_unit() {
     let lines = h.log_lines();
     let install = find_line(&lines, &["uid=0 install.sh"]);
     let enable = find_line(&lines, &["uid=0 systemctl enable --now", &socket]);
-    let remote_install = find_line(&lines, &[&format!("uid={uid} install_remote.sh")]);
+    let remote_install = find_line(&lines, &["uid=1000 install_remote.sh"]);
     assert!(
         install < enable && enable < remote_install,
         "the root half enables the socket after install.sh and before the companion"
     );
-    find_line(
-        &lines,
-        &[&format!("uid={uid} systemctl is-active"), &socket],
-    );
+    find_line(&lines, &["uid=1000 systemctl is-active", &socket]);
     assert!(
         !has_line(&lines, &["systemctl --user enable", "soos-push-sender"]),
         "the user unit is never enabled: {lines:?}"
@@ -2391,7 +2388,6 @@ fn test_pss12_push_off_enables_no_system_sender() {
 #[test]
 fn test_pss12_setup_disables_a_legacy_user_unit() {
     let h = Harness::new("pss_legacy");
-    let uid = real_uid();
     for what in ["enabled", "active"] {
         fs::write(
             h.state
@@ -2405,9 +2401,7 @@ fn test_pss12_setup_disables_a_legacy_user_unit() {
     let lines = h.log_lines();
     find_line(
         &lines,
-        &[&format!(
-            "uid={uid} systemctl --user disable --now soos-push-sender.service"
-        )],
+        &["uid=1000 systemctl --user disable --now soos-push-sender.service"],
     );
     assert!(!h.user_unit("soos-push-sender.service", "enabled"));
     assert!(!h.user_unit("soos-push-sender.service", "active"));
