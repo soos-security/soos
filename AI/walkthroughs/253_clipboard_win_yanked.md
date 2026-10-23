@@ -9,8 +9,10 @@
 
 ## 1. Context & Objectives
 
-On 2026-10-23 every `clipboard-win` release up to 5.4.1 was yanked from crates.io and 5.4.2 and
-5.4.3 were published. `Cargo.lock` pinned 5.4.1, so `cargo deny check` reported
+On 2026-10-23 the maintainer yanked `clipboard-win` 5.2.0 through 5.4.1 from crates.io and
+published 5.4.2 and 5.4.3 (upstream issue DoumanAsh/clipboard-win#42: `raw::get_html` could read
+past the end of the clipboard buffer when the HTML fragment offsets of a crafted "HTML Format"
+payload point beyond the data; 5.4.3 replaces the raw copy with a bounds-checked slice). `Cargo.lock` pinned 5.4.1, so `cargo deny check` reported
 `error[yanked]: detected yanked crate` and failed CI on every pull request (first seen on PR #470).
 Goal: a non-yanked version with a lockfile-only change.
 
