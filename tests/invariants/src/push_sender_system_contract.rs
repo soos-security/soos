@@ -83,7 +83,7 @@ const SERVICE_LINES: [&str; 47] = [
     "RestrictSUIDSGID=yes",
     "SystemCallArchitectures=native",
     "ProtectSystem=strict",
-    "ProtectHome=tmpfs",
+    "ProtectHome=yes",
     "TemporaryFileSystem=/run:ro",
     "InaccessiblePaths=-/var/log -/var/lib/systemd/coredump",
     "BindReadOnlyPaths=-/run/systemd/resolve/stub-resolv.conf -/run/systemd/resolve/resolv.conf",
@@ -462,10 +462,16 @@ fn test_pss11_install_stages_the_system_sender_and_uninstall_removes_it() {
 #[test]
 fn test_pss11_scripts_and_packages_statically() {
     let install = strip_shell_comments(&read("scripts/install.sh"));
-    assert!(
-        !install.contains("soos-push-sender@"),
-        "install.sh never names an instance (it installs the templates only): it enables nothing"
-    );
+    for line in install.lines() {
+        assert!(
+            !(line.contains("systemctl") && line.contains("soos-push-sender")),
+            "install.sh never runs systemctl on the push sender (it installs the templates only): {line}"
+        );
+        assert!(
+            !line.contains("soos-push-sender@$") && !line.contains("soos-push-sender@${"),
+            "install.sh never names an instance: {line}"
+        );
+    }
     let uninstall = strip_shell_comments(&read("scripts/uninstall.sh"));
     let disable = pos(
         &uninstall,

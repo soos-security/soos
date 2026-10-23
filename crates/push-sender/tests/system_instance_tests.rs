@@ -51,9 +51,11 @@ const HOST_LINES: &str = "\
 29 24 259:2 /var/log /var/log rw,relatime shared:31 - ext4 /dev/nvme0n1p2 rw
 ";
 
-/// The mount table of `packaging/soos-push-sender@.service` (ubuntu:24.04, systemd 255): the
-/// host lines, then the sandbox (`/run` ro tmpfs with the two resolver files bound back,
-/// `ProtectHome=tmpfs` over `/home`, `/root` and `/run/user`, inaccessible logs).
+/// The mount table of `packaging/soos-push-sender@.service` (layout captured under systemd 255
+/// on ubuntu:24.04 by `tests/docker/push_sender_system_unit_test.sh`): the host lines, then
+/// the sandbox (`/run` ro tmpfs with a resolver file bound back and systemd's
+/// `/run/systemd/incoming` propagation mount, `ProtectHome=yes` and `InaccessiblePaths=` as
+/// read-only binds of systemd's inaccessible tmpfs directory).
 fn unit_table() -> String {
     let mut table = HOST_LINES.to_string();
     table.push_str(
@@ -61,15 +63,15 @@ fn unit_table() -> String {
 500 24 259:2 / / ro,relatime master:1 - ext4 /dev/nvme0n1p2 rw
 501 500 0:70 / /dev ro,nosuid,noexec,relatime - tmpfs tmpfs ro,mode=755
 502 500 0:22 / /proc rw,nosuid,nodev,noexec,relatime master:13 - proc proc rw,hidepid=invisible,subset=pid
-503 500 0:71 / /run ro,nosuid,nodev,relatime - tmpfs tmpfs ro,mode=755
+503 500 0:71 / /run ro,nosuid,nodev - tmpfs tmpfs rw,size=1601924k,mode=755
 504 503 0:24 /systemd/resolve/stub-resolv.conf /run/systemd/resolve/stub-resolv.conf ro,nosuid,nodev,relatime master:12 - tmpfs tmpfs rw,mode=755
-505 503 0:72 / /run/user ro,nosuid,nodev,relatime - tmpfs tmpfs ro,mode=755
-506 500 0:73 / /home ro,nosuid,nodev,relatime - tmpfs tmpfs ro,mode=755
-507 500 0:74 / /root ro,nosuid,nodev,relatime - tmpfs tmpfs ro,mode=755
+505 503 0:77 /systemd/propagate/soos-push-sender@1000.service /run/systemd/incoming ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,mode=755
+506 500 0:77 /systemd/inaccessible/dir /home ro,nosuid,nodev,noexec,relatime shared:720 - tmpfs tmpfs rw,mode=755
+507 500 0:77 /systemd/inaccessible/dir /root ro,nosuid,nodev,noexec,relatime shared:722 - tmpfs tmpfs rw,mode=755
 508 500 0:75 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw
 509 500 0:76 / /var/tmp rw,nosuid,nodev - tmpfs tmpfs rw
-510 500 0:77 / /var/log ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs ro,mode=000
-511 500 0:77 / /var/lib/systemd/coredump ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs ro,mode=000
+510 500 0:77 /systemd/inaccessible/dir /var/log ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,mode=755
+511 500 0:77 /systemd/inaccessible/dir /var/lib/systemd/coredump ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,mode=755
 ",
     );
     table
@@ -241,8 +243,8 @@ fn test_pss6_system_sandbox_requires_ro_tmpfs_run() {
     );
     // A read-only mount at /run that is not a tmpfs is not the sandbox.
     let not_tmpfs = unit_table().replace(
-        "/run ro,nosuid,nodev,relatime - tmpfs tmpfs ro,mode=755",
-        "/run ro,nosuid,nodev,relatime - ext4 /dev/sda1 ro",
+        "/run ro,nosuid,nodev - tmpfs tmpfs rw,size=1601924k,mode=755",
+        "/run ro,nosuid,nodev - ext4 /dev/sda1 ro",
     );
     assert_eq!(
         evaluate_system_sandbox(&not_tmpfs, false),
@@ -269,8 +271,8 @@ fn test_pss6_system_sandbox_requires_hidden_home_and_root() {
             "{hidden} missing"
         );
         let rw = unit_table().replace(
-            &format!("{hidden} ro,nosuid,nodev,relatime - tmpfs"),
-            &format!("{hidden} rw,nosuid,nodev,relatime - tmpfs"),
+            &format!("{hidden} ro,nosuid,nodev,noexec,relatime"),
+            &format!("{hidden} rw,nosuid,nodev,noexec,relatime"),
         );
         assert_eq!(
             evaluate_system_sandbox(&rw, false),
