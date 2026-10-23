@@ -6,9 +6,10 @@
 - **Branch**: `chore/android-owner-checks`
 - **Decision**: none new; the owner decisions taken during the test (one-command setup, push sender
   as a system service) are recorded on GitHub #362 and handled by their own pull requests.
-- **Matrix criteria**: ANA14, ANA15, AAF4, ATR9 verified by the owner; ANA18, ANA19, ANA22,
-  ANA23, ANA24, AAF1, AHB4, AHB5, AHB6, ATR1 verified by CI; RAN12, RDB10, ANA26 partially
-  verified (still pending); ANA16, ANA21, AHB8 not tested yet.
+- **Matrix criteria**: ANA15 verified by the owner; ANA18, ANA19, ANA22, ANA23, ANA24, AAF1,
+  AHB4, AHB5, AHB6, ATR1 verified by CI; RAN12, RDB10, ANA26, AAF4 partially verified and ATR9,
+  ANA14 reported OK without item-by-item detail (all still pending); ANA16, ANA21, AHB8 not tested
+  yet.
 
 ## 1. Context
 
@@ -22,9 +23,9 @@ mostly over Funnel with the Tailscale app turned off (the owner does not want to
 |---|---|
 | RAN12 | Parts 1–2 OK: Chrome *Install app*, passkey enrolment with `soos-remote enroll-code`, sign-in over Funnel. Push parts not tested (push off, see §3). |
 | RDB10 | Android OK: unlock and camera start went straight to the biometric prompt over Funnel. iPhone part not tested. |
-| ATR9, ANA14 | OK: the tour opened once and stayed closed; the second sign-in went straight to the fingerprint prompt. |
-| ANA15 | OK: icon, themed icon and blue header in light and dark mode. |
-| AAF4 | OK: "Acknowledged." disappears on refresh. |
+| ATR9, ANA14 | The owner reported "everything works" after the guided step covering the tour and the fingerprint sign-in, without an item-by-item report; kept pending until each clause is confirmed. |
+| ANA15 | OK: icon, themed icon and blue header in light and dark mode (as reported by the owner). |
+| AAF4 | First clause OK: "Acknowledged." disappears on refresh. The expired-session clause is still to check. |
 | ANA26 | Battery card OK (follows the charger). Offline history card shows "off" because `offline_alerts = false`. |
 | ANA16 | Not applicable to this owner setup (no Tailscale app on the phone); still pending. |
 | ANA21, AHB8 | Not tested yet (AHB8 needs a 30 min outage). |
@@ -44,7 +45,7 @@ The CI-only rows (JVM unit tests of the Android app) cite the green `Android (de
 - **Android build**: no SDK / `ANDROID_HOME`; French `keytool` prints `SHA 256:`.
 - **Pre-existing `remote.toml`**: setup refused it; the owner now wants a backup and continue.
 
-All are added to `Docs/REMOTE_COMPANION.md` §7; the one-command setup (GitHub #362, decisions
+All are added to the troubleshooting table of `Docs/REMOTE_COMPANION.md` §7; the one-command setup (GitHub #362, decisions
 of 2026-10-23) will remove the manual steps.
 
 ## 4. Verification
