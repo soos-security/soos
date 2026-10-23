@@ -1235,3 +1235,11 @@ authoritative over §1–§19 where they differ.
   `system_up_to_date` for a `--prefix` other than `/usr` needs a setup-only change of the existing
   PSS16 test (it models a full install under a fake prefix without the drop-in that `install.sh`
   writes there): migration **M17**, category S, reported to the lead.
+- **F11** (found in the developer phase) SCN3 forbids the word `tailscale` in any variable of
+  `setup.sh`, so `REQUIRED_TOOLS` cannot hold a `tailscale` key: SDP-S3 exempts exactly the
+  bounded read-only `tailscale version` (guarded by `command -v`). `setup_exposure.sh` (PR B) is
+  outside SCN3 and keeps its own table entry.
+- **F12** (found in the developer phase) The `[android]` example of `Docs/REMOTE_COMPANION.md`
+  carries trailing comments: the user-file carry-over compares the table lines without a
+  trailing comment and surrounding blanks (no value contains `#`); the managed grammar stays
+  exact.
