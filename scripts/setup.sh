@@ -12,7 +12,10 @@
 #               not), camera nodes, build user and target user
 #   plan        every phase with "will run", "already done" or "skipped"
 #   packages    missing packages of check_build_deps.sh --print-packages
-#               build|models|gui, through the native package manager (root)
+#               build|models|gui (and companion when the companion runs), through the
+#               native package manager (root); every command setup runs is declared in
+#               REQUIRED_TOOLS and checked before it is needed (preflight, then again
+#               after the package step and after the toolchain step)
 #   toolchain   scripts/install_rustup.sh when cargo is missing (build user)
 #   build       cargo build --release --locked --workspace (build user, never root)
 #   system      scripts/install.sh --start (root; its own journal and rollback)
@@ -26,7 +29,8 @@
 #   preview     camera view, daemon side: <sysconfdir>/soos/daemon.toml [preview]
 #               created only when the file is absent (root)
 #   companion   phone companion as the session owner (never root): remote.toml
-#               written with the owner's default-on features, scripts/install_remote.sh,
+#               written with the owner's default-on features (a remote.toml setup did
+#               not write is first saved as remote.toml.bak-<UTC>), scripts/install_remote.sh,
 #               user units, verification; Tailscale steps are printed, never run
 #   lock screen the adapters install.sh installed (GitHub #432, PR 6 of #352):
 #               swaylock-plugin, hyprlock and gnome-shell detected read-only;
@@ -115,6 +119,37 @@ declare -rA FEATURE_LABEL=([allow_funnel]="Funnel" [allow_unlock]="remote unlock
 # soos-remote refuses a key whose prerequisite is off (exit 78).
 declare -rA FEATURE_PREREQS=([push_notifications]="password_alerts"
     [offline_alerts]="push_notifications" [camera_view_funnel]="camera_view allow_funnel")
+# A remote.toml that setup did not write is saved as <config dir>/remote.toml.bak-<UTC>
+# (suffixes -1..-9 when the name exists) before setup writes its own (owner decision of
+# 2026-10-23; spec AI/architect_spec_one_command_setup.md section 6).
+readonly REMOTE_BACKUP_PREFIX="remote.toml.bak-"
+readonly MAX_BACKUP_SUFFIX=9
+# The [android] table setup keeps last in remote.toml: the application id of android/app
+# (applicationId) and soos-remote's MAX_ANDROID_CERT_FINGERPRINTS.
+readonly ANDROID_PACKAGE="org.soos.remote"
+readonly MAX_ANDROID_CERT_FINGERPRINTS=2
+# Key names (never values) reported from a user file are capped.
+readonly MAX_REPORTED_KEYS=32
+# Every external command setup.sh runs, with the scope in which preflight checks it (spec
+# section 5.2): base (every run, before any change), family:<f> (the detected package family),
+# escalate (sudo or doas, checked with the escalation), root-start (started as root), toolchain
+# (after scripts/install_rustup.sh), companion and android (package groups, after the package
+# step; a missing companion tool only keeps the Tailscale steps printed), optional (never
+# checked: every call site is guarded by command -v). Invariant SDP3 fails on any external
+# command without an entry; package names stay in scripts/check_build_deps.sh.
+declare -rA REQUIRED_TOOLS=(
+    [bash]=base [env]=base [id]=base [getent]=base [cat]=base [cut]=base [head]=base
+    [wc]=base [stat]=base [find]=base [cmp]=base [cksum]=base [mktemp]=base [chmod]=base
+    [mv]=base [rm]=base [mkdir]=base [install]=base [ln]=base [rmdir]=base [readlink]=base
+    [basename]=base [dirname]=base [date]=base [grep]=base [sleep]=base [sort]=base
+    [systemctl]=base
+    [pacman]=family:arch [apt-get]=family:debian [dpkg-query]=family:debian
+    [dnf]=family:fedora [rpm]=family:fedora
+    [sudo]=escalate [doas]=escalate [runuser]=root-start [cargo]=toolchain
+    [jq]=companion [dig]=companion [curl]=companion [java]=android [unzip]=android
+    [timeout]=optional [loginctl]=optional [gnome-extensions]=optional
+    [gpasswd]=optional [deluser]=optional
+)
 
 if [[ -t 1 ]]; then
     readonly GREEN='\033[0;32m'
@@ -220,7 +255,11 @@ camera view can be turned off later in soos-gui (Features), which also turns off
 the features that need them. The failed-password alerts have no switch there: turn
 them off with --password-alerts off, or set password_alerts, push_notifications and
 offline_alerts to false in remote.toml. A feature already turned off in a
-setup-managed remote.toml stays off unless its option says on:
+setup-managed remote.toml stays off unless its option says on. A remote.toml that
+setup did not write is saved as remote.toml.bak-<UTC> (mode 0600, never through a
+link) and replaced by setup's own when the login and node name are known (options,
+else the file itself; its explicit false values and a valid trailing [android] table
+are kept); without them it is left as it is:
   --no-remote              Do not set up the phone companion
   --tailscale-login <LOGIN>
                            Your Tailscale login (allowed_logins); asked
@@ -618,6 +657,53 @@ preflight_fail() {
     PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
 }
 
+# The REQUIRED_TOOLS keys of one scope, sorted (stable messages).
+tools_of_scope() {
+    local scope="$1" tool
+    for tool in "${!REQUIRED_TOOLS[@]}"; do
+        [[ "${REQUIRED_TOOLS[${tool}]}" == "${scope}" ]] && printf '%s\n' "${tool}"
+    done | sort
+}
+
+# Preflight of a scope checked before any change (base, family:<f>): read-only, command -v only.
+check_scope_tools() {
+    local scope="$1" tool
+    local -a tools=()
+    mapfile -t tools < <(tools_of_scope "${scope}")
+    for tool in "${tools[@]}"; do
+        if ! command -v "${tool}" >/dev/null 2>&1; then
+            preflight_fail "Required command not found: ${tool} (needed by setup, scope ${scope}); install it and re-run setup."
+        fi
+    done
+}
+
+# The packages of each requested group (filled by detect_packages).
+declare -A GROUP_PACKAGES=()
+REQUESTED_GROUPS=()
+
+# After the package step, before the build: every tool of a requested package group must now
+# resolve (spec section 5.2). A missing tool of the companion group only keeps the Tailscale
+# steps printed (R1-3); any other group fails the run before anything is built (exit 1; the
+# packages installed by this run are kept).
+check_group_tools() {
+    local group tool failed=false
+    local -a tools=()
+    for group in "${REQUESTED_GROUPS[@]}"; do
+        mapfile -t tools < <(tools_of_scope "${group}")
+        for tool in "${tools[@]}"; do
+            command -v "${tool}" >/dev/null 2>&1 && continue
+            if [[ "${group}" == companion ]]; then
+                printf '[SKIP] preflight: %s (package group companion) not found after the package step; the Tailscale steps stay printed only\n' "${tool}"
+            else
+                printf '[FAIL] preflight: %s (package group %s) not found after installing %s\n' \
+                    "${tool}" "${group}" "${GROUP_PACKAGES[${group}]:-the group}"
+                failed=true
+            fi
+        done
+    done
+    [[ "${failed}" == false ]]
+}
+
 # Strips quotes and every non-printable character; bounds the length.
 clean_value() {
     local v="$1"
@@ -713,6 +799,9 @@ package_installed() {
 }
 
 MISSING_PACKAGES=()
+declare -A PACKAGE_SEEN=()
+# Queries the packages of the given groups (deduplicated across calls); the query tool of the
+# family is a family:<f> entry of REQUIRED_TOOLS, checked by check_scope_tools.
 detect_packages() {
     local group list pkg query_tool
     case "${FAMILY}" in
@@ -721,21 +810,19 @@ detect_packages() {
         arch) query_tool="pacman" ;;
         *) return 0 ;;
     esac
-    if ! command -v "${query_tool}" >/dev/null 2>&1; then
-        preflight_fail "Package query tool not found for the ${FAMILY} family: ${query_tool}"
-        return 0
-    fi
-    local -A seen=()
+    command -v "${query_tool}" >/dev/null 2>&1 || return 0
     local -a pkgs=()
-    for group in build models gui; do
+    for group in "$@"; do
         if ! list="$(bash "${SCRIPT_DIR}/check_build_deps.sh" --distro "${FAMILY}" --print-packages "${group}")"; then
             preflight_fail "scripts/check_build_deps.sh could not list the ${group} packages for ${FAMILY}"
             return 0
         fi
+        REQUESTED_GROUPS+=("${group}")
+        GROUP_PACKAGES[${group}]="${list}"
         read -r -a pkgs <<< "${list}"
         for pkg in "${pkgs[@]}"; do
-            [[ -n "${seen[${pkg}]:-}" ]] && continue
-            seen[${pkg}]=1
+            [[ -n "${PACKAGE_SEEN[${pkg}]:-}" ]] && continue
+            PACKAGE_SEEN[${pkg}]=1
             package_installed "${pkg}" || MISSING_PACKAGES+=("${pkg}")
         done
     done
@@ -986,6 +1073,26 @@ pam_template_present() {
     esac
 }
 
+# The push sender drop-in matches what scripts/install.sh leaves for this --prefix (review of
+# PR #473): another prefix needs <sysconfdir>/systemd/system/soos-push-sender@.service.d/
+# prefix.conf, a regular file (never a link) with install.sh's marker line for this prefix
+# and the ExecStart of <prefix>/libexec/soos/soos-push-sender; /usr needs no file of install.sh
+# (a marked one is stale and removed by install.sh). Read-only.
+push_sender_drop_in_current() {
+    local file="${SYSCONFDIR}/systemd/system/soos-push-sender@.service.d/prefix.conf" first=""
+    local marker="# Written by scripts/install.sh for --prefix "
+    if [[ "${PREFIX}" == /usr ]]; then
+        [[ -f "${file}" && ! -L "${file}" ]] || return 0
+        IFS= read -r first < "${file}" || first=""
+        [[ "${first}" != "${marker}"* ]]
+        return
+    fi
+    [[ -f "${file}" && ! -L "${file}" ]] || return 1
+    IFS= read -r first < "${file}" || return 1
+    [[ "${first}" == "${marker}${PREFIX} "* ]] || return 1
+    grep -Fxq -- "ExecStart=${PREFIX}/libexec/soos/soos-push-sender --system-instance %i" "${file}"
+}
+
 # True when every file install.sh installs equals its source, the key and the group
 # exist, the deployed models verify, and the unit is enabled and active.
 system_up_to_date() {
@@ -1012,6 +1119,7 @@ system_up_to_date() {
         for name in soos-push-sender@.socket soos-push-sender@.service; do
             cmp -s -- "${WORKSPACE_ROOT}/packaging/${name}" "${SYSCONFDIR}/systemd/system/${name}" || return 1
         done
+        push_sender_drop_in_current || return 1
     fi
     if gnome_extension_in_checkout; then
         for name in "${GNOME_EXTENSION_FILES[@]}"; do
@@ -1325,6 +1433,18 @@ CONFIG_ACTION=""
 CONFIG_FINGERPRINT=""
 FILE_LOGIN=""
 FILE_RP_ID=""
+# The [android] fingerprints of a managed file, or of a user file whose trailing table passes
+# the strict grammar (spec section 6.3); rendered last by render_remote_config.
+FILE_ANDROID_FPS=()
+# A remote.toml setup did not write (spec section 6): its size bound, the names of the boolean
+# keys it sets, of those whose value is not recognized (kept off), of the keys and tables setup
+# does not carry over, and whether an [android] table was dropped. Names only, never values.
+CONFIG_OVERSIZE=false
+declare -A USER_BOOL_PRESENT=()
+USER_UNRECOGNIZED=()
+USER_DROPPED_KEYS=()
+USER_ANDROID_DROPPED=false
+USER_BACKUP=""
 COMPANION_LOGIN=""
 COMPANION_RP_ID=""
 UNITS_CURRENT=false
@@ -1355,6 +1475,230 @@ render_remote_config() {
     printf 'rp_id = "%s"\n' "${COMPANION_RP_ID}"
     for key in "${COMPANION_KEYS[@]}"; do
         printf '%s = %s\n' "${key}" "${FEATURE_VALUE[${key}]}"
+    done
+    # TOML: a key after a table header belongs to the table, so [android] is always last.
+    if [[ ${#FILE_ANDROID_FPS[@]} -gt 0 ]]; then
+        local fp list=""
+        for fp in "${FILE_ANDROID_FPS[@]}"; do
+            list+="${list:+, }\"${fp}\""
+        done
+        printf '\n[android]\npackage = "%s"\nsha256_cert_fingerprints = [%s]\n' "${ANDROID_PACKAGE}" "${list}"
+    fi
+}
+
+# Parses the value of `sha256_cert_fingerprints = [...]` (exact rendered spelling): 1 to
+# MAX_ANDROID_CERT_FINGERPRINTS distinct upper-case colon digests, ", " separated, into
+# PARSED_FPS. Fails on anything else.
+PARSED_FPS=()
+parse_android_fps() {
+    local line="$1" rest fp seen
+    local re_line='^sha256_cert_fingerprints = \[(.*)\]$'
+    local re_item='^"([0-9A-F]{2}(:[0-9A-F]{2}){31})"(, (.+))?$'
+    PARSED_FPS=()
+    [[ "${line}" =~ ${re_line} ]] || return 1
+    rest="${BASH_REMATCH[1]}"
+    while [[ -n "${rest}" ]]; do
+        [[ "${rest}" =~ ${re_item} ]] || return 1
+        fp="${BASH_REMATCH[1]}"
+        rest="${BASH_REMATCH[4]}"
+        for seen in "${PARSED_FPS[@]}"; do
+            [[ "${seen}" != "${fp}" ]] || return 1
+        done
+        PARSED_FPS+=("${fp}")
+        (( ${#PARSED_FPS[@]} <= MAX_ANDROID_CERT_FINGERPRINTS )) || return 1
+    done
+    [[ ${#PARSED_FPS[@]} -ge 1 ]]
+}
+
+# A key or table name of a user file reduced to [A-Za-z0-9_.-] (reported, never a value).
+report_name() {
+    local name="${1//[^A-Za-z0-9_.-]/}"
+    printf '%s' "${name:0:64}"
+}
+
+# Bracket depth a TOML value opens on one line: `[` minus `]` outside "..." and '...' strings
+# and before a comment (a multi-line array continues while it is positive).
+bracket_depth() {
+    local v="$1" open close
+    local re_str="(\"[^\"]*\"|'[^']*')"
+    while [[ "${v}" =~ ${re_str} ]]; do
+        v="${v/"${BASH_REMATCH[0]}"/}"
+    done
+    v="${v%%#*}"
+    open="${v//[^\[]/}"
+    close="${v//[^\]]/}"
+    printf '%s' "$(( ${#open} - ${#close} ))"
+}
+
+# Number of occurrences of the delimiter $2 in $1. In a basic string (`"""`) the escaped pairs
+# `\\` and `\"` are dropped first, so `\"""` never ends it (literal `'''` strings have no escapes).
+count_of() {
+    local text="$1" delim="$2" rest
+    if [[ "${delim}" == '"""' ]]; then
+        text="${text//\\\\/}"
+        text="${text//\\\"/}"
+    fi
+    rest="${text//"${delim}"/}"
+    printf '%s' "$(( (${#text} - ${#rest}) / ${#delim} ))"
+}
+
+# Reads a remote.toml that setup did not write (spec section 6.1, R2-1, R2-9, R1-9, R2-11; candid
+# review B1): top-level lines only (up to the first table header, a line starting with `[` that
+# is not inside a multi-line string or array), each line matched on its own, bounded by
+# MAX_REMOTE_CONFIG_BYTES; nothing is sourced or evaluated. Keys may be bare, "double" or
+# 'single' quoted (TOML). Fills FILE_LOGIN and FILE_RP_ID (exactly one valid login, a valid node
+# name), FILE_BOOL (an explicit true or false; fail-safe: a value the rule does not recognize is
+# false, and so is a feature key named by any other top-level line that is not parsed, such as a
+# line inside a multi-line string or array), USER_BOOL_PRESENT, USER_UNRECOGNIZED (each key once),
+# USER_DROPPED_KEYS, and FILE_ANDROID_FPS when the file ends with an [android] table of the
+# strict grammar (USER_ANDROID_DROPPED otherwise). Keys below a real table header are ignored.
+parse_user_remote_config() {
+    local line norm key value inner top=true android=0 strict=true name ml="" depth=0 delim
+    local re_key="^[[:space:]]*(\"([A-Za-z0-9_-]+)\"|'([A-Za-z0-9_-]+)'|([A-Za-z0-9_-]+))[[:space:]]*=(.*)$"
+    local re_login='^[[:space:]]*\[[[:space:]]*"([^"]*)"[[:space:]]*\][[:space:]]*(#.*)?$'
+    local re_rp='^[[:space:]]*"([^"]*)"[[:space:]]*(#.*)?$'
+    local re_bool='^[[:space:]]*(true|false)[[:space:]]*(#.*)?$'
+    local re_android='^[[:space:]]*\[[[:space:]]*android[[:space:]]*\]'
+    local -A dropped=()
+    local -A unrecognized=()
+    FILE_LOGIN=""
+    FILE_RP_ID=""
+    FILE_BOOL=()
+    FILE_ANDROID_FPS=()
+    USER_BOOL_PRESENT=()
+    USER_UNRECOGNIZED=()
+    USER_DROPPED_KEYS=()
+    USER_ANDROID_DROPPED=false
+    # Fail-safe: every feature key named by a top-level line that was not parsed as that key's
+    # boolean is off ($2: the key this line set, if any).
+    fail_safe_line() {
+        local text="$1" except="$2" k
+        for k in "${COMPANION_KEYS[@]}"; do
+            [[ "${k}" == "${except}" ]] && continue
+            if [[ "${text}" =~ (^|[^A-Za-z0-9_])${k}([^A-Za-z0-9_]|$) ]]; then
+                FILE_BOOL[${k}]=false
+                USER_BOOL_PRESENT[${k}]=1
+                unrecognized[${k}]=1
+            fi
+        done
+    }
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${top}" == true && -n "${ml}" ]]; then
+            fail_safe_line "${line}" ""
+            (( $(count_of "${line}" "${ml}") % 2 == 1 )) && ml=""
+            continue
+        fi
+        if [[ "${top}" == true && "${depth}" -gt 0 ]]; then
+            fail_safe_line "${line}" ""
+            depth=$(( depth + $(bracket_depth "${line}") ))
+            continue
+        fi
+        # Table lines are compared without a trailing comment and surrounding blanks (the
+        # documented [android] example carries one); no value contains `#`.
+        norm="${line%%[[:space:]]#*}"
+        norm="${norm#"${norm%%[![:space:]]*}"}"
+        norm="${norm%"${norm##*[![:space:]]}"}"
+        if [[ "${line}" =~ ^[[:space:]]*\[ ]]; then
+            if [[ "${top}" == true && "${norm}" == "[android]" ]]; then
+                android=1
+            else
+                strict=false
+            fi
+            top=false
+            [[ "${line}" =~ ${re_android} ]] && USER_ANDROID_DROPPED=true
+            name="$(report_name "${norm}")"
+            if [[ "${name}" != android ]]; then
+                name="[${name}]"
+                dropped[${name}]=1
+            fi
+            continue
+        fi
+        [[ "${line}" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+        if [[ "${top}" != true ]]; then
+            case "${android}" in
+                1) [[ "${norm}" == "package = \"${ANDROID_PACKAGE}\"" ]] && android=2 || strict=false ;;
+                2) parse_android_fps "${norm}" && android=3 || strict=false ;;
+                *) strict=false ;;
+            esac
+            continue
+        fi
+        # A key spelled with a TOML escape (a backslash before the first `=`) may be any of the
+        # feature keys for soos-remote: every feature key is turned off (lead review round 2).
+        if [[ "${line}" == *=* && "${line%%=*}" == *\\* ]]; then
+            for key in "${COMPANION_KEYS[@]}"; do
+                FILE_BOOL[${key}]=false
+                USER_BOOL_PRESENT[${key}]=1
+                unrecognized[${key}]=1
+            done
+            continue
+        fi
+        if [[ ! "${line}" =~ ${re_key} ]]; then
+            fail_safe_line "${line}" ""
+            continue
+        fi
+        key="${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
+        value="${BASH_REMATCH[5]}"
+        case "${key}" in
+            allowed_logins)
+                inner=""
+                [[ "${value}" =~ ${re_login} ]] && inner="${BASH_REMATCH[1]}"
+                if [[ -n "${inner}" ]] && valid_login "${inner}"; then
+                    FILE_LOGIN="${inner}"
+                fi
+                fail_safe_line "${line}" ""
+                ;;
+            rp_id)
+                inner=""
+                [[ "${value}" =~ ${re_rp} ]] && inner="${BASH_REMATCH[1]}"
+                if [[ -n "${inner}" ]] && valid_rp_id "${inner}"; then
+                    FILE_RP_ID="${inner}"
+                fi
+                fail_safe_line "${line}" ""
+                ;;
+            allow_funnel|allow_unlock|password_alerts|push_notifications|offline_alerts|camera_view|camera_view_funnel)
+                USER_BOOL_PRESENT[${key}]=1
+                if [[ "${value}" =~ ${re_bool} ]]; then
+                    # An explicit false wins over any other line of the same key.
+                    [[ "${FILE_BOOL[${key}]:-}" == false ]] || FILE_BOOL[${key}]="${BASH_REMATCH[1]}"
+                    fail_safe_line "${line}" "${key}"
+                else
+                    FILE_BOOL[${key}]=false
+                    unrecognized[${key}]=1
+                    fail_safe_line "${line}" ""
+                fi
+                ;;
+            *)
+                name="$(report_name "${key}")"
+                dropped[${name}]=1
+                fail_safe_line "${line}" ""
+                ;;
+        esac
+        # A value that opens a multi-line string or array: its next lines are not headers.
+        for delim in '"""' "'''"; do
+            if (( $(count_of "${value}" "${delim}") % 2 == 1 )); then
+                ml="${delim}"
+                break
+            fi
+        done
+        [[ -n "${ml}" ]] || depth="$(bracket_depth "${value}")"
+        (( depth > 0 )) || depth=0
+    done < <(head -c "${MAX_REMOTE_CONFIG_BYTES}" -- "${REMOTE_CONFIG}")
+    for key in "${COMPANION_KEYS[@]}"; do
+        [[ -n "${unrecognized[${key}]:-}" ]] && USER_UNRECOGNIZED+=("${key}")
+    done
+    if [[ "${android}" == 3 && "${strict}" == true ]]; then
+        FILE_ANDROID_FPS=("${PARSED_FPS[@]}")
+        USER_ANDROID_DROPPED=false
+    elif [[ "${USER_ANDROID_DROPPED}" == true ]]; then
+        name="[android]"
+        dropped[${name}]=1
+    fi
+    local -a names=()
+    mapfile -t names < <(printf '%s\n' "${!dropped[@]}" | sort)
+    for name in "${names[@]}"; do
+        [[ -n "${name}" ]] || continue
+        [[ ${#USER_DROPPED_KEYS[@]} -lt ${MAX_REPORTED_KEYS} ]] || break
+        USER_DROPPED_KEYS+=("${name}")
     done
 }
 
@@ -1421,16 +1765,19 @@ daemon_preview_hint() {
 # Classifies remote.toml: absent, template (the untouched install_remote.sh template),
 # managed (setup's marker and strict grammar; FILE_LOGIN, FILE_RP_ID, FILE_BOOL) or user.
 classify_remote_config() {
-    local line key value inner size n=0 managed=true template=true empty_logins=0
+    local line key value inner size n=0 managed=true template=true empty_logins=0 android=0
     local -A seen=()
     CONFIG_STATE="absent"
+    CONFIG_OVERSIZE=false
     FILE_LOGIN=""
     FILE_RP_ID=""
     FILE_BOOL=()
+    FILE_ANDROID_FPS=()
     [[ -e "${REMOTE_CONFIG}" ]] || return 0
     size="$(head -c $((MAX_REMOTE_CONFIG_BYTES + 1)) -- "${REMOTE_CONFIG}" | wc -c)"
     if (( size > MAX_REMOTE_CONFIG_BYTES )); then
         CONFIG_STATE="user"
+        CONFIG_OVERSIZE=true
         return 0
     fi
     while IFS= read -r line || [[ -n "${line}" ]]; do
@@ -1445,6 +1792,27 @@ classify_remote_config() {
             template=false
         fi
         [[ "${managed}" == true ]] || continue
+        # An optional final [android] table, exactly as render_remote_config writes it (spec
+        # section 6.3); anything after it, or any other table, makes the file a user file.
+        if [[ "${android}" -eq 0 && "${line}" == "[android]" ]]; then
+            android=1
+            continue
+        fi
+        if [[ "${android}" -gt 0 ]]; then
+            case "${android}" in
+                1) [[ "${line}" == "package = \"${ANDROID_PACKAGE}\"" ]] && android=2 || managed=false ;;
+                2)
+                    if parse_android_fps "${line}"; then
+                        FILE_ANDROID_FPS=("${PARSED_FPS[@]}")
+                        android=3
+                    else
+                        managed=false
+                    fi
+                    ;;
+                *) managed=false ;;
+            esac
+            continue
+        fi
         if [[ ! "${line}" =~ ^([a-z_]+)\ =\ (.+)$ ]]; then
             managed=false
             continue
@@ -1486,6 +1854,7 @@ classify_remote_config() {
             *) managed=false ;;
         esac
     done < <(head -c "${MAX_REMOTE_CONFIG_BYTES}" -- "${REMOTE_CONFIG}")
+    [[ "${android}" -eq 0 || "${android}" -eq 3 ]] || managed=false
     if [[ "${managed}" == true && -n "${FILE_LOGIN}" && -n "${FILE_RP_ID}" ]]; then
         CONFIG_STATE="managed"
         return 0
@@ -1493,6 +1862,7 @@ classify_remote_config() {
     FILE_LOGIN=""
     FILE_RP_ID=""
     FILE_BOOL=()
+    FILE_ANDROID_FPS=()
     if [[ "${template}" == true && ${empty_logins} -eq 1 ]]; then
         CONFIG_STATE="template"
     else
@@ -1592,6 +1962,35 @@ features_summary() {
     printf '%s' "${out}"
 }
 
+# The notes of a backed-up user file, names only (spec R2-10, section 6.1 item 7, R2-11):
+# the keys it did not set that setup's default profile turns on, the keys kept off because
+# their value is not recognized, the keys and tables not carried over, a dropped [android].
+user_config_notes() {
+    [[ "${CONFIG_ACTION}" == backup ]] || return 0
+    local key on=""
+    for key in "${COMPANION_KEYS[@]}"; do
+        if [[ -z "${USER_BOOL_PRESENT[${key}]:-}" && "${FEATURE_VALUE[${key}]}" == true \
+                && -z "${FEATURE_FLAG[${key}]:-}" ]]; then
+            on+="${on:+, }${key}"
+        fi
+    done
+    [[ -n "${on}" ]] && printf "; turned on by setup's default profile: %s (switch them off in soos-gui)" "${on}"
+    if [[ ${#USER_UNRECOGNIZED[@]} -gt 0 ]]; then
+        local list
+        list="$(printf '%s, ' "${USER_UNRECOGNIZED[@]}")"
+        printf '; kept off (value not recognized): %s' "${list%, }"
+    fi
+    if [[ ${#USER_DROPPED_KEYS[@]} -gt 0 ]]; then
+        local dropped
+        dropped="$(printf '%s, ' "${USER_DROPPED_KEYS[@]}")"
+        printf '; not carried over (names only, see the backup): %s' "${dropped%, }"
+    fi
+    if [[ "${USER_ANDROID_DROPPED}" == true ]]; then
+        printf '; your [android] table was not carried over (see the backup): the Android app cannot sign in until it is added again (Docs/REMOTE_COMPANION.md section 2j)'
+    fi
+    return 0
+}
+
 companion_skip() {
     COMPANION_SKIP_SHORT="$1"
     COMPANION_SKIP="$2"
@@ -1669,15 +2068,29 @@ resolve_companion() {
     classify_remote_config
     CONFIG_FINGERPRINT="$(config_fingerprint)"
     if [[ "${CONFIG_STATE}" == user ]]; then
-        if [[ "${COMPANION_OPTS}" == true ]]; then
-            preflight_fail "${REMOTE_CONFIG} was not written by setup, which never edits it: move it aside (mv ${REMOTE_CONFIG} ${REMOTE_CONFIG}.mine) to let setup write it, or edit it yourself."
+        # A file setup did not write (owner decision of 2026-10-23): with a Tailscale login and
+        # node name (flags first, then the file itself) it is saved as remote.toml.bak-<UTC> and
+        # setup writes its own, keeping every explicit false; without them it is kept as is.
+        [[ "${CONFIG_OVERSIZE}" == true ]] || parse_user_remote_config
+        COMPANION_LOGIN="${TS_LOGIN:-${FILE_LOGIN}}"
+        COMPANION_RP_ID="${RP_ID:-${FILE_RP_ID}}"
+        if [[ -z "${COMPANION_LOGIN}" || -z "${COMPANION_RP_ID}" ]]; then
+            if [[ "${COMPANION_OPTS}" == true ]]; then
+                preflight_fail "${REMOTE_CONFIG} was not written by setup and names no usable Tailscale login and node name: pass --tailscale-login and --rp-id (setup then saves it as ${REMOTE_BACKUP_PREFIX}<UTC> and writes its own)."
+                return 0
+            fi
+            COMPANION_RUN=true
+            CONFIG_ACTION="kept"
+            CAMERA_DAEMON="off"
+            FILE_BOOL=()
+            FILE_ANDROID_FPS=()
+            resolve_features false || true
             return 0
         fi
-        COMPANION_RUN=true
-        CONFIG_ACTION="kept"
-        CAMERA_DAEMON="off"
-        resolve_features false || true
-        return 0
+        if [[ "${CONFIG_OVERSIZE}" == true ]]; then
+            preflight_fail "${REMOTE_CONFIG} is larger than ${MAX_REMOTE_CONFIG_BYTES} bytes, so setup cannot save it before writing its own: move it aside (mv ${REMOTE_CONFIG} ${REMOTE_CONFIG}.mine) and re-run setup."
+            return 0
+        fi
     fi
     COMPANION_LOGIN="${TS_LOGIN:-${FILE_LOGIN}}"
     COMPANION_RP_ID="${RP_ID:-${FILE_RP_ID}}"
@@ -1705,13 +2118,19 @@ resolve_companion() {
         companion_skip "needs the Tailscale login and node name" "re-run with --tailscale-login <you@example.com> --rp-id <pc>.<tailnet>.ts.net (Docs/REMOTE_COMPANION.md section 4)"
         return 0
     fi
-    if ! resolve_features "$([[ "${CONFIG_STATE}" == managed ]] && printf true || printf false)"; then
+    if ! resolve_features "$([[ "${CONFIG_STATE}" == managed || "${CONFIG_STATE}" == user ]] && printf true || printf false)"; then
         preflight_fail "${RESOLVE_CONFLICT} (${REMOTE_CONFIG} keeps it off)"
+        return 0
+    fi
+    # soos-remote refuses [android] without allow_funnel = true (exit 78): refused up front.
+    if [[ ${#FILE_ANDROID_FPS[@]} -gt 0 && "${FEATURE_VALUE[allow_funnel]}" != true ]]; then
+        preflight_fail "the Android app needs Funnel: remove the [android] table or keep Funnel on (${REMOTE_CONFIG})"
         return 0
     fi
     case "${CONFIG_STATE}" in
         absent) CONFIG_ACTION="create" ;;
         template) CONFIG_ACTION="replace" ;;
+        user) CONFIG_ACTION="backup" ;;
         managed)
             if cmp -s -- "${REMOTE_CONFIG}" <(render_remote_config); then
                 CONFIG_ACTION="already done"
@@ -1764,16 +2183,20 @@ print_companion_plan() {
             plan "companion units" "left as they are" "configuration not managed by setup (running units are restarted after a binary update)"
             ;;
         *)
-            local what=""
+            local what="" status="will run" login="login given"
             case "${CONFIG_ACTION}" in
                 create) what="create ${REMOTE_CONFIG} (mode 0600)" ;;
                 replace) what="replace the untouched install_remote.sh template ${REMOTE_CONFIG} (backup ${REMOTE_BACKUP})" ;;
                 rewrite) what="rewrite ${REMOTE_CONFIG} (backup ${REMOTE_BACKUP})" ;;
+                backup)
+                    status="back up ${REMOTE_CONFIG} to ${REMOTE_BACKUP_PREFIX}<UTC> and write it"
+                    what="the file was not written by setup"
+                    [[ -z "${TS_LOGIN}" ]] && login="login from your file"
+                    ;;
                 *) what="${REMOTE_CONFIG}" ;;
             esac
-            local status="will run"
             [[ "${CONFIG_ACTION}" == "already done" ]] && status="already done"
-            plan "companion config" "${status}" "${what}; login given, node ${COMPANION_RP_ID}: $(features_summary)"
+            plan "companion config" "${status}" "${what}; ${login}, node ${COMPANION_RP_ID}: $(features_summary)$(user_config_notes)"
             print_daemon_preview_plan
             if [[ "${REMOTE_UNIT_KEPT_OFF}" == true ]]; then
                 plan "companion units" "kept off" "soos-remote.service is not enabled; setup only enables it for a configuration it writes for the first time (systemctl --user enable --now soos-remote.service)"
@@ -2441,10 +2864,14 @@ fi
 # User half: detect, plan, confirm, packages, toolchain, build, escalate
 # =============================================================================
 detect_family
+# Every command of the base scope, and the package manager of the family, is checked before
+# anything changes (spec section 5.2; read-only, command -v only).
+check_scope_tools base
 if [[ -z "${FAMILY}" ]]; then
     preflight_fail "Unsupported distribution '${OS_PRETTY:-unknown}' (ID=${OS_ID:-none}): supported families are debian, fedora and arch; pass --distro <family> to choose one."
 else
     set_package_manager
+    check_scope_tools "family:${FAMILY}"
 fi
 INIT="none"
 if [[ -d "${RUNSTATEDIR}/systemd/system" ]]; then
@@ -2464,7 +2891,7 @@ CAMERA_NODES="$(camera_node_count)"
 DISPLAY_MANAGER="$(display_manager)"
 TAILSCALE_VERSION="$(tailscale_version)"
 if [[ -n "${FAMILY}" ]]; then
-    detect_packages
+    detect_packages build models gui
 fi
 TARGET_DIR="$(resolve_target_dir)"
 ARTIFACT_DIR="${TARGET_DIR}/release"
@@ -2508,9 +2935,13 @@ if [[ "${IS_ROOT}" == true && "${PREFLIGHT_ERRORS}" -eq 0 ]]; then
     root_preflight
 fi
 
-# Phone companion: decided now (read-only; may ask the login and node name).
+# Phone companion: decided now (read-only; may ask the login and node name). Its package group
+# is queried only when it runs.
 if [[ "${PREFLIGHT_ERRORS}" -eq 0 ]]; then
     resolve_companion
+    if [[ "${COMPANION_RUN}" == true && -n "${FAMILY}" ]]; then
+        detect_packages companion
+    fi
 fi
 
 if [[ "${PREFLIGHT_ERRORS}" -gt 0 ]]; then
@@ -2524,12 +2955,14 @@ PKG_COMMAND="${PKG_INSTALL_CMD[*]} ${MISSING_PACKAGES[*]}"
 if [[ "${IS_ROOT}" != true ]]; then
     PKG_COMMAND="${ESCALATE[0]:-sudo} ${PKG_COMMAND}"
 fi
+GROUPS_TEXT="$(printf '%s, ' "${REQUESTED_GROUPS[@]}")"
+GROUPS_TEXT="${GROUPS_TEXT%, }"
 if [[ ${#MISSING_PACKAGES[@]} -eq 0 ]]; then
-    plan packages "already done" "every package of check_build_deps.sh (build, models, gui) is installed"
+    plan packages "already done" "every package of check_build_deps.sh (${GROUPS_TEXT}) is installed"
 elif [[ "${SKIP_PACKAGES}" == true ]]; then
     plan packages "skipped (--skip-packages)" "missing: ${MISSING_PACKAGES[*]}; install them with: ${PKG_COMMAND}"
 else
-    plan packages "will run" "${PKG_COMMAND}"
+    plan packages "will run" "${PKG_COMMAND} (package groups: ${GROUPS_TEXT})"
 fi
 CARGO_FOUND="$(cargo_path)" || CARGO_FOUND=""
 if [[ -n "${CARGO_FOUND}" ]]; then
@@ -2707,6 +3140,18 @@ rollback_companion() {
                 fi
                 restored=true
                 ;;
+            config_user_replaced)
+                # The user's own file comes back from its timestamped backup, which is kept.
+                tmp="$(umask 077 && mktemp "${CONFIG_DIR}/.remote.toml.XXXXXX")"
+                if [[ -n "${tmp}" && -f "${USER_BACKUP}" && ! -L "${USER_BACKUP}" ]] \
+                        && cat -- "${USER_BACKUP}" > "${tmp}" && chmod 0600 -- "${tmp}"; then
+                    mv -f -- "${tmp}" "${REMOTE_CONFIG}"
+                else
+                    rm -f -- "${tmp}"
+                    error "Could not restore ${REMOTE_CONFIG}; your previous file is ${USER_BACKUP}"
+                fi
+                restored=true
+                ;;
         esac
     done
     # Units that ran before this run run again, on the restored configuration.
@@ -2731,6 +3176,43 @@ on_companion_signal() {
     exit "${rc}"
 }
 
+# Saves a remote.toml that setup did not write as <config dir>/remote.toml.bak-<UTC> (owner
+# decision of 2026-10-23, spec section 6.1): bounded read, created exclusively (noclobber is
+# O_EXCL) under umask 077 and never through a link (a name that exists or is a link, dangling
+# included, is taken: suffixes -1..-MAX_BACKUP_SUFFIX), mode 0600, compared byte for byte with
+# the original before anything replaces it. Setup never removes it. Sets USER_BACKUP.
+backup_user_config() {
+    local stamp candidate size n=0
+    USER_BACKUP=""
+    if [[ -L "${CONFIG_DIR}" || -L "${REMOTE_CONFIG}" || ! -f "${REMOTE_CONFIG}" ]]; then
+        error "${REMOTE_CONFIG} is no longer a regular file; refusing to save it through a link"
+        return 1
+    fi
+    size="$(head -c $((MAX_REMOTE_CONFIG_BYTES + 1)) -- "${REMOTE_CONFIG}" | wc -c)" || return 1
+    (( size <= MAX_REMOTE_CONFIG_BYTES )) || return 1
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)" || return 1
+    [[ "${stamp}" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || return 1
+    candidate="${CONFIG_DIR}/${REMOTE_BACKUP_PREFIX}${stamp}"
+    while [[ -e "${candidate}" || -L "${candidate}" ]]; do
+        n=$((n + 1))
+        if (( n > MAX_BACKUP_SUFFIX )); then
+            error "Every name ${REMOTE_BACKUP_PREFIX}${stamp} and -1 to -${MAX_BACKUP_SUFFIX} is taken in ${CONFIG_DIR}; nothing was replaced"
+            return 1
+        fi
+        candidate="${CONFIG_DIR}/${REMOTE_BACKUP_PREFIX}${stamp}-${n}"
+    done
+    if ! (umask 077 && set -C && head -c "${MAX_REMOTE_CONFIG_BYTES}" -- "${REMOTE_CONFIG}" > "${candidate}"); then
+        error "Could not create ${candidate}; nothing was replaced"
+        return 1
+    fi
+    if [[ -L "${candidate}" ]] || ! chmod 0600 -- "${candidate}" \
+            || ! cmp -s -- "${REMOTE_CONFIG}" "${candidate}"; then
+        error "${candidate} does not equal ${REMOTE_CONFIG}; nothing was replaced (the copy is kept)"
+        return 1
+    fi
+    USER_BACKUP="${candidate}"
+}
+
 # Writes the managed remote.toml: 0600 in a 0700 directory, temporary file and rename,
 # the previous file kept as a 0600 backup.
 write_remote_config() {
@@ -2743,7 +3225,10 @@ write_remote_config() {
         error "A symbolic link appeared under ${CONFIG_DIR}; refusing to write through it"
         return 1
     fi
-    if [[ -e "${REMOTE_CONFIG}" ]]; then
+    if [[ "${CONFIG_ACTION}" == backup ]]; then
+        # The user's file was saved by backup_user_config: a rollback restores it from there.
+        COMPANION_JOURNAL+=(config_user_replaced)
+    elif [[ -e "${REMOTE_CONFIG}" ]]; then
         tmp="$(umask 077 && mktemp "${CONFIG_DIR}/.remote.toml.bak.XXXXXX")" || return 1
         if ! { cat -- "${REMOTE_CONFIG}" > "${tmp}" && chmod 0600 -- "${tmp}" && mv -f -- "${tmp}" "${REMOTE_BACKUP}"; }; then
             rm -f -- "${tmp}"
@@ -2832,6 +3317,12 @@ run_companion_phase() {
         create|replace|rewrite)
             write_remote_config || { companion_failed "writing ${REMOTE_CONFIG}"; return; }
             printf '[DONE] companion config: %s written (mode 0600)\n' "${REMOTE_CONFIG}"
+            ;;
+        backup)
+            backup_user_config || { companion_failed "saving ${REMOTE_CONFIG} before writing it"; return; }
+            write_remote_config || { companion_failed "writing ${REMOTE_CONFIG}"; return; }
+            printf '[DONE] companion config: your previous remote.toml was saved as %s; setup now manages remote.toml%s\n' \
+                "${USER_BACKUP}" "$(user_config_notes)"
             ;;
         "already done") printf '[DONE] companion config: already done (%s)\n' "${REMOTE_CONFIG}" ;;
         kept) printf '[DONE] companion config: kept (%s was not written by setup)\n' "${REMOTE_CONFIG}" ;;
@@ -3016,12 +3507,23 @@ if [[ ${#MISSING_PACKAGES[@]} -gt 0 && "${SKIP_PACKAGES}" != true ]]; then
     fi
     printf '[DONE] packages: installed %s (kept on any later failure)\n' "${MISSING_PACKAGES[*]}"
 fi
+# Every tool of the requested package groups resolves now, or the run stops before the build
+# (spec section 5.2: nothing is discovered missing in the middle of the run).
+if ! check_group_tools; then
+    error "A required tool is still missing after the package step; nothing was built or installed (the packages of this run are kept)."
+    exit "${EXIT_FAILURE}"
+fi
 
 # --- toolchain (build user; never removed by a rollback) ---
 if [[ -z "${CARGO_FOUND}" ]]; then
     info "Installing the pinned Rust toolchain with scripts/install_rustup.sh (verified rustup-init)"
     if ! as_build_user bash "${SCRIPT_DIR}/install_rustup.sh"; then
         printf '[FAIL] toolchain\n'
+        exit "${EXIT_FAILURE}"
+    fi
+    if ! cargo_path >/dev/null; then
+        printf '[FAIL] preflight: cargo (toolchain) not found after scripts/install_rustup.sh\n'
+        error "The toolchain step finished without a cargo for ${BUILD_USER}; nothing was built or installed."
         exit "${EXIT_FAILURE}"
     fi
     printf '[DONE] toolchain\n'

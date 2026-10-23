@@ -582,6 +582,10 @@ impl Harness {
             ("pam-auth-update", STUB_LOG_ONLY),
             ("authselect", STUB_LOG_ONLY),
             ("curl", STUB_LOG_ONLY),
+            // Harness wiring M3 (spec §12.2): the companion package group's tools are present
+            // and inert (setup.sh never runs them in PR A).
+            ("jq", STUB_LOG_ONLY),
+            ("dig", STUB_LOG_ONLY),
         ] {
             write_exec(&stubs.join(name), &stub(body));
         }
@@ -609,7 +613,8 @@ impl Harness {
         fs::create_dir_all(root.join("etc/systemd/system")).expect("unit dir");
         fs::create_dir_all(dir.join("roothome")).expect("root home");
         fs::write(root.join("etc/os-release"), ARCH_OS_RELEASE).expect("os-release");
-        for group in ["build", "models", "gui"] {
+        // Harness wiring M3: the companion group is installed like the other groups.
+        for group in ["build", "models", "gui", "companion"] {
             for p in print_packages(group) {
                 fs::write(state.join(format!("pkg_{p}")), "").expect("pkg");
             }
@@ -1299,24 +1304,95 @@ fn test_set_u12_template_replaced_user_file_untouched() {
     assert_eq!(fs::read_to_string(&backup).unwrap(), template);
     assert_eq!(mode_of(&backup), 0o600);
 
+    // M1 (owner-approved 2026-10-23, spec §12.2): with the identity options a user file is
+    // saved as exactly one remote.toml.bak-<UTC> (0600, byte-equal) and replaced by the managed
+    // file; its explicit `allow_funnel = false` is kept and forces camera_view_funnel off.
+    let backups_of = |dir: &Path| -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("remote.toml.bak-"))
+            })
+            .collect()
+    };
     let h = Harness::new("userfile");
     let dir = h.home.join(".config/soos");
     fs::create_dir_all(&dir).unwrap();
     let mine = "allowed_logins = [\"me@example.com\"]\nrp_id = \"pc.tail1234.ts.net\"\nallow_funnel = false\n";
     fs::write(h.remote_toml(), mine).unwrap();
     fs::set_permissions(h.remote_toml(), fs::Permissions::from_mode(0o600)).unwrap();
-    let before = h.snapshot();
     let out = h.run_companion(&[]);
     assert_eq!(
         code(&out),
-        2,
+        0,
         "options with a user-managed file: {}",
         text(&out)
     );
-    assert_eq!(before, h.snapshot());
+    let backups = backups_of(&dir);
+    assert_eq!(backups.len(), 1, "exactly one backup: {backups:?}");
+    let name = backups[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let stamp = name.trim_start_matches("remote.toml.bak-");
+    assert!(
+        stamp.len() == 16
+            && stamp.as_bytes()[8] == b'T'
+            && stamp.ends_with('Z')
+            && stamp[..8].bytes().all(|b| b.is_ascii_digit())
+            && stamp[9..15].bytes().all(|b| b.is_ascii_digit()),
+        "remote.toml.bak-<YYYYmmddTHHMMSSZ>: {name}"
+    );
+    assert_eq!(fs::read_to_string(&backups[0]).unwrap(), mine);
+    assert_eq!(mode_of(&backups[0]), 0o600);
+    assert_eq!(
+        fs::read_to_string(h.remote_toml()).unwrap(),
+        managed_remote([false, true, true, true, true, true, false])
+    );
+    assert!(!has_line(&h.log_lines(), &["funnel --bg"]));
+
+    // M2: without options the identity comes from the file itself: backed up and managed with
+    // the same vector, units enabled, no Tailscale change command.
+    let h = Harness::new("userfile2");
+    let dir = h.home.join(".config/soos");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(h.remote_toml(), mine).unwrap();
+    fs::set_permissions(h.remote_toml(), fs::Permissions::from_mode(0o600)).unwrap();
+    let out = h.run(&["--yes"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(h.remote_toml()).unwrap(),
+        managed_remote([false, true, true, true, true, true, false])
+            .replace(LOGIN, "me@example.com")
+    );
+    assert_eq!(backups_of(&dir).len(), 1);
+    let t = text(&out);
+    assert!(t.contains("[PLAN] companion config: back up"), "{t}");
+    let lines = h.log_lines();
+    assert!(has_line(&lines, &["systemctl --user enable"]));
+    assert!(
+        lines.iter().all(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            w.get(1) != Some(&"tailscale") || w.get(2) == Some(&"version")
+        }),
+        "no Tailscale change command: {lines:?}"
+    );
+
+    // The former M2 assertions, on a user file without a usable identity: kept untouched.
+    let h = Harness::new("userfile3");
+    let dir = h.home.join(".config/soos");
+    fs::create_dir_all(&dir).unwrap();
+    let mine = "allowed_logins = [\"a@example.com\", \"b@example.com\"]\nallow_funnel = false\n";
+    fs::write(h.remote_toml(), mine).unwrap();
+    fs::set_permissions(h.remote_toml(), fs::Permissions::from_mode(0o600)).unwrap();
     let out = h.run(&["--yes"]);
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(fs::read_to_string(h.remote_toml()).unwrap(), mine);
+    assert!(backups_of(&dir).is_empty());
     let t = text(&out);
     assert!(t.contains("[PLAN] companion config: kept"), "{t}");
     let lines = h.log_lines();
@@ -2494,6 +2570,15 @@ fn test_pss16_system_up_to_date_includes_the_push_sender() {
     for unit in ["soos-push-sender@.socket", "soos-push-sender@.service"] {
         fs::copy(h.repo.join("packaging").join(unit), unit_dir.join(unit)).unwrap();
     }
+    // M17 (setup only): the fake prefix is not /usr, so install.sh also leaves its drop-in.
+    let prefix = h.root.join("usr").display().to_string();
+    let drop_in = unit_dir.join("soos-push-sender@.service.d");
+    fs::create_dir_all(&drop_in).unwrap();
+    fs::write(
+        drop_in.join("prefix.conf"),
+        format!("# Written by scripts/install.sh for --prefix {prefix} (ADR 2026-10-23 \"Push Sender as a Sandboxed System Service\").\n[Service]\nExecStart=\nExecStart={prefix}/libexec/soos/soos-push-sender --system-instance %i\n"),
+    )
+    .unwrap();
     let dry = h.run(&["--dry-run"]);
     assert!(
         text(&dry).contains("[PLAN] system: already done"),

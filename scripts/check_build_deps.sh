@@ -22,7 +22,14 @@
 #
 # Usage:
 #   check_build_deps.sh [--distro <id>]                    # preflight (default)
-#   check_build_deps.sh [--distro <id>] --print-packages <build|gui|models>
+#   check_build_deps.sh [--distro <id>] --print-packages <build|gui|models|companion|android>
+#
+# The companion group holds the tools of the Tailscale exposure of scripts/setup.sh (JSON, DNS
+# and HTTPS probe); the android group the tools of its --android opt-in (JDK, unzip for the
+# Gradle and command-line tools archives, udev rules so adb sees a phone without root). Every
+# name is checked in the pinned distribution images by tests/docker/setup_packages_test.sh.
+# Fedora's android group has no JDK: no JDK package resolves on both Fedora 40 and current
+# Fedora (ADR 2026-10-23 "One Command Without Manual Steps", part 1).
 #
 # Exit codes: 0 all dependencies present / list printed, 1 dependency missing,
 #             2 usage error or unsupported distribution.
@@ -42,12 +49,20 @@ ARCH_BUILD=(base-devel clang openssl pkgconf pam)
 ARCH_GUI=(libxkbcommon wayland libglvnd libx11 libxcursor libxi libxrandr)
 ARCH_MODELS=(curl ca-certificates coreutils)
 
+DEBIAN_COMPANION=(jq bind9-dnsutils curl ca-certificates)
+FEDORA_COMPANION=(jq bind-utils curl ca-certificates)
+ARCH_COMPANION=(jq bind curl ca-certificates)
+
+DEBIAN_ANDROID=(openjdk-17-jdk-headless unzip android-sdk-platform-tools-common)
+FEDORA_ANDROID=(unzip android-tools)
+ARCH_ANDROID=(jdk17-openjdk unzip android-udev)
+
 DISTRO=""
 PRINT_GROUP=""
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--distro <debian|ubuntu|fedora|rhel|arch>] [--print-packages <build|gui|models>]
+Usage: $(basename "$0") [--distro <debian|ubuntu|fedora|rhel|arch>] [--print-packages <build|gui|models|companion|android>]
 
 Without --print-packages, checks that this host can build soos from source and
 prints the package manager command for anything missing.
@@ -58,6 +73,8 @@ Options:
                                build  - build-time packages (Rust toolchain via rustup)
                                gui    - soos-gui runtime libraries (dlopen'ed)
                                models - tools used by scripts/download_models.sh
+                               companion - Tailscale exposure tools of scripts/setup.sh
+                               android - tools of the scripts/setup.sh --android opt-in
   -h, --help                 Display this help message
 EOF
 }
@@ -124,6 +141,12 @@ packages_for() {
         arch:build)    echo "${ARCH_BUILD[*]}" ;;
         arch:gui)      echo "${ARCH_GUI[*]}" ;;
         arch:models)   echo "${ARCH_MODELS[*]}" ;;
+        debian:companion) echo "${DEBIAN_COMPANION[*]}" ;;
+        fedora:companion) echo "${FEDORA_COMPANION[*]}" ;;
+        arch:companion)   echo "${ARCH_COMPANION[*]}" ;;
+        debian:android)   echo "${DEBIAN_ANDROID[*]}" ;;
+        fedora:android)   echo "${FEDORA_ANDROID[*]}" ;;
+        arch:android)     echo "${ARCH_ANDROID[*]}" ;;
         *) return 1 ;;
     esac
 }
@@ -144,7 +167,7 @@ if [[ -n "${PRINT_GROUP}" ]]; then
         exit 2
     fi
     if ! packages_for "${FAMILY}" "${PRINT_GROUP}"; then
-        echo "check_build_deps: unknown package group '${PRINT_GROUP}' (build, gui, models)" >&2
+        echo "check_build_deps: unknown package group '${PRINT_GROUP}' (build, gui, models, companion, android)" >&2
         exit 2
     fi
     exit 0

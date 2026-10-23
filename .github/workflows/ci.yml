@@ -407,6 +407,28 @@ jobs:
         run: ./tests/docker/setup_root_preview_test.sh
 
   # ---------------------------------------------------------------------------
+  # Job 6i: the package matrix of scripts/setup.sh (GitHub #362, owner decisions
+  # of 2026-10-23, matrix SDP22): every package name of every group of
+  # scripts/check_build_deps.sh resolves in the digest-pinned ubuntu:24.04,
+  # fedora:40, fedora:44 and archlinux images, and after installing the companion
+  # and android groups every REQUIRED_TOOLS command of that group resolves
+  # (tests/docker/setup_packages_test.sh; read-only workspace, unprivileged).
+  # ---------------------------------------------------------------------------
+  setup-packages:
+    name: "setup.sh package matrix (Docker)"
+    if: github.event_name != 'schedule'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve every package group and its tools (ubuntu, fedora 40/44, arch)
+        run: ./tests/docker/setup_packages_test.sh
+
+  # ---------------------------------------------------------------------------
   # Job 6h: the push sender system service (ADR 2026-10-23 "Push Sender as a
   # Sandboxed System Service", matrix PSS14): release soos-push-sender built in the
   # tests/docker/Dockerfile.ubuntu image, packaging/soos-push-sender@.{socket,service}
@@ -698,7 +720,7 @@ jobs:
   ci-success:
     name: "CI Success"
     if: always() && github.event_name != 'schedule'
-    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit, network-lock-polkit, setup-root-preview, push-sender-unit]
+    needs: [lint, clippy, test, security, pam-integration, authselect-profile, pam-rollback, package-deploy, systemd-unit, network-lock-polkit, setup-root-preview, push-sender-unit, setup-packages]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

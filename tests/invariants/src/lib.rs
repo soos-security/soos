@@ -440,6 +440,16 @@ mod setup_user_phase_contract;
 #[cfg(all(test, unix))]
 mod setup_scanner_contract;
 
+/// One-command setup, PR A of the owner decisions of 2026-10-23 (GitHub #362; spec
+/// AI/architect_spec_one_command_setup.md §5, §6, §19; ADR 2026-10-23 "One Command Without
+/// Manual Steps", part 1; rows SDP1-SDP26): the `companion` and `android` package groups, the
+/// scoped `REQUIRED_TOOLS` table and its lexer-based coverage check, the preflight of every
+/// requested group before the build, the `remote.toml.bak-<UTC>` backup of a user-written
+/// `remote.toml`, the trailing `[android]` table of the managed grammar, the Docker package
+/// matrix, and the push sender `--prefix` drop-in follow-ups of PR #473.
+#[cfg(all(test, unix))]
+mod setup_deps_contract;
+
 /// The push sender as a sandboxed system service: exact `soos-push-sender@.socket` and
 /// `soos-push-sender@.service` template units (`DynamicUser=yes`, socket-activated, instance =
 /// the desktop uid), their protocol constants, the system-instance dispatch of `main.rs`,

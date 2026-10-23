@@ -17,7 +17,7 @@
 use std::fs;
 use std::path::Path;
 
-use soos_remote::config::{parse_config, ConfigError};
+use soos_remote::config::{parse_config, parse_config_with_android, ConfigError};
 
 const RUNTIME_DIR: &str = "/run/user/1000";
 
@@ -94,4 +94,33 @@ fn test_set_render_never_written_variants_are_refused() {
             "{keys:?}: refused for its prerequisite, not its syntax"
         );
     }
+}
+
+/// SDP25 (GitHub #362 PR A, spec §6.3): the managed `remote.toml` with the trailing `[android]`
+/// table that setup renders (`tests/fixtures/setup/remote_android.toml`, byte-equal to the
+/// render, asserted by `soos-invariants::setup_deps_contract::test_sdp23`) is accepted by the
+/// real parser, binds `org.soos.remote` to both fingerprints in file order, and publishes them
+/// in the Digital Asset Links body.
+#[test]
+fn test_sdp25_android_render_is_accepted() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/setup/remote_android.toml");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let loaded = parse_config_with_android(&text, Some(Path::new(RUNTIME_DIR)))
+        .expect("the [android] render is accepted");
+    assert!(loaded.remote.auth.allow_funnel);
+    let android = loaded.android.expect("[android] parsed");
+    assert_eq!(android.package(), "org.soos.remote");
+    let digests = android.cert_fingerprints();
+    assert_eq!(digests.len(), 2);
+    assert_eq!(digests[0][0], 0xAA);
+    assert_eq!(digests[1][0], 0x01);
+    let body = String::from_utf8(android.asset_links_json()).expect("utf-8");
+    for fp in [
+        "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+        "01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF",
+    ] {
+        assert!(body.contains(fp), "assetlinks names {fp}: {body}");
+    }
+    assert!(body.contains("\"org.soos.remote\""), "{body}");
 }
