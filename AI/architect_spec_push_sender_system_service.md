@@ -101,7 +101,7 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 ProtectSystem=strict
-ProtectHome=tmpfs
+ProtectHome=yes
 TemporaryFileSystem=/run:ro
 InaccessiblePaths=-/var/log -/var/lib/systemd/coredump
 BindReadOnlyPaths=-/run/systemd/resolve/stub-resolv.conf -/run/systemd/resolve/resolv.conf
@@ -137,7 +137,7 @@ No `[Install]` section: the service is only started by its socket.
 | Capabilities | none | none (`CapabilityBoundingSet=` empty, `AmbientCapabilities=` empty) |
 | Every mount directive of the user unit | yes (but needs an unprivileged user namespace) | yes, applied by PID 1 without any user namespace |
 | `/run` | ro tmpfs, own runtime dir bound back | ro tmpfs; **no** directory bound back (the socket arrives as fd 0); only the two systemd-resolved `resolv.conf` files read-only (`-` = optional) |
-| Home | `ProtectHome=tmpfs` + the binary bound back | `ProtectHome=tmpfs` (`/home`, `/root`, `/run/user`), nothing bound back (binary in `/usr/libexec`) |
+| Home | `ProtectHome=tmpfs` + the binary bound back | `ProtectHome=yes` (`/home`, `/root`, `/run/user` inaccessible: read-only, mode 000; stronger than `tmpfs`, which systemd 255 mounts read-write), nothing bound back (binary in `/usr/libexec`) |
 | Added | — | `ProtectControlGroups=yes`, `ProtectProc=invisible`, `ProcSubset=pid`, `RemoveIPC=yes`, `KeyringMode=private`, `SystemCallFilter=~@privileged` (none available to the user manager) |
 | Network | `AF_UNIX AF_INET AF_INET6`, push host allowlist + public-address filter in code | unchanged |
 
@@ -390,3 +390,15 @@ The owner decision moves the sender out of the user manager; `setup.sh` must the
 enabling the user unit. These pre-existing assertions pin the old behaviour and are **not**
 changed by this branch (test-integrity rule); the lead applies them after owner approval. The
 exact list, with red evidence, is in `AI/plan_evaluator_report.md` §6 and the walkthrough §4.
+
+Exact list: `AI/plan_evaluator_report.md` §6 (SET24 `test_set_u6_full_run_sets_up_the_default_on_companion`,
+SET33 `test_set_u22_rollback_stops_a_unit_started_by_the_run`, SET37
+`test_set_u21_push_switched_on_later_enables_the_sender`) and one expected line of
+`tests/docker/setup_root_preview_test.sh` (`companion_ran`).
+
+## 14. Revision after the Docker evidence
+
+The first run of `tests/docker/push_sender_system_unit_test.sh` showed that under systemd 255 a
+system service's `ProtectHome=tmpfs` mounts `/home` and `/root` read-write, so the self-check
+refused to start. The unit uses `ProtectHome=yes` instead (read-only binds of systemd's
+inaccessible directory, mode 000: stronger); the self-check rule (read-only tmpfs) is unchanged.

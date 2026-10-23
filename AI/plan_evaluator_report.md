@@ -104,5 +104,12 @@ approve the contract migrations of §6, applied by the lead.)
 
 ## 6. Existing assertions contradicted by the setup change (owner-approved migration required)
 
-Filled with the observed red evidence after the implementation (see the walkthrough §4 for the run log); each entry
-names file, test, the current assertion, the required change and why.
+Observed after the implementation (`cargo test -p soos-invariants`: every other test passes). None of them is changed on
+this branch; the full current/required text is in `AI/walkthroughs/255_push_sender_system_service.md` §4.
+
+| Test (`tests/invariants/src/setup_user_phase_contract.rs`) | Current assertion | Required change | Why |
+|---|---|---|---|
+| `test_set_u6_full_run_sets_up_the_default_on_companion` (SET24) | `uid=1000 systemctl --user enable --now soos-push-sender.service` logged; user unit `active` | `uid=0 systemctl enable --now soos-push-sender@1000.socket` logged between `install.sh` and `install_remote.sh`; user unit not enabled | The owner decision moves the sender to the system manager |
+| `test_set_u22_rollback_stops_a_unit_started_by_the_run` (SET33) | Fails the second user unit (`STUB_USER_FAIL_UNIT=soos-push-sender.service`) after `soos-remote.service` started; sender user unit `enabled` | Another failure trigger after the `soos-remote.service` start (a stub knob failing the user's `is-active` of the socket); sender-unit lines removed; `soos-remote.service` assertions unchanged | Only one user unit is started by the companion now |
+| `tests/docker/setup_root_preview_test.sh` `companion_ran` (SET34 harness, CI `setup-root-preview`) | `expect_out "[DONE] companion: soos-remote.service soos-push-sender.service running"` | `expect_out "[DONE] companion: soos-remote.service running"` (verified locally: every case passes with only that line changed) | The companion no longer starts the sender user unit |
+| `test_set_u21_push_switched_on_later_enables_the_sender` (SET37) | Sender user unit `enabled`/`active` after `--push on`; text `soos-push-sender.service is not enabled` | `uid=0 systemctl enable --now soos-push-sender@<uid>.socket` after `--push on`; a stub knob for a disabled socket and the text `soos-push-sender@<uid>.socket is not enabled` | Same rule ("switching push on enables it like a first write") applied to the socket |

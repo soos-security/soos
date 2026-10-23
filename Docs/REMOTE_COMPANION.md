@@ -36,7 +36,7 @@
 
 - listens on **one Unix socket** (`0600`, inside a `0700` directory under `$XDG_RUNTIME_DIR`)
   and never opens a network socket itself (`RestrictAddressFamilies=AF_UNIX` in the unit); the
-  optional `soos-push-sender` unit (section 2d) is the only part of the companion that makes
+  optional `soos-push-sender` system service (section 2d) is the only part of the companion that makes
   outbound HTTPS requests, to three push services only;
 - is reached from the phone through the owner's Tailscale tailnet (`tailscale serve`
   terminates HTTPS with the node's `*.ts.net` certificate and proxies to the socket) and,
@@ -389,8 +389,10 @@ these limits), exactly like the false alerts of section 2c.
    # push_previews = "detailed"
    ```
 
-3. Run `scripts/install_remote.sh` (it installs `soos-push-sender` and its unit
-   `soos-push-sender.service`), then `systemctl --user enable --now soos-push-sender` and
+3. Make the push sender listen for your account. `scripts/setup.sh` does it for you; by hand,
+   after `scripts/install.sh` (it installs `/usr/libexec/soos/soos-push-sender` and the system
+   units `soos-push-sender@.socket` and `soos-push-sender@.service`), as root:
+   `systemctl enable --now soos-push-sender@$(id -u <you>).socket`, then, as you,
    `systemctl --user restart soos-remote`.
 4. On the iPhone, open the app **from the home-screen icon** (section 4); on Android, open the
    page in Chrome, Samsung Internet or Firefox, installed or in a tab (section 2h). Tap
@@ -419,47 +421,71 @@ subscriptions live in `remote-push.json` (`0600`, next to the passkey store, at 
 subscriptions, never rewritten when invalid; only the service start and `push reset` create
 it). For each notification `soos-remote` encrypts the payload with the phone's keys, signs a
 VAPID token (ES256, 12 h) and hands the encrypted body over a `0600` Unix socket to
-`soos-push-sender`. The sender is a separate user unit: the only part of the companion with
+`soos-push-sender`. The sender is a separate **system service**, one instance per desktop user
+(ADR 2026-10-23 "Push Sender as a Sandboxed System Service"): PID 1 listens on
+`/run/soos-push/<uid>/push.sock` (`soos-push-sender@<uid>.socket`, owned by your uid, mode
+`0600`, in root-owned `0755` directories) and the first connection starts
+`soos-push-sender@<uid>.service` as a **dynamic uid** (`DynamicUser=yes`): never root, never your
+uid, no capability, so it cannot read your files nor signal or trace your processes even outside
+its mount sandbox. It serves only the peer whose `SO_PEERCRED` uid is the instance uid, and
+`soos-remote` only talks to that socket when it is owned by your uid and its listener is PID 1
+(uid 0). The sender is the only part of the companion with
 network access (`AF_INET`/`AF_INET6`), it holds no key, accepts only `https://` endpoints on
 `web.push.apple.com`, `fcm.googleapis.com` and `updates.push.services.mozilla.com`, refuses
 the whole request if any resolved address is private (loopback, LAN, tailnet `100.64.0.0/10`
 and `fd7a:115c:a1e0::/48`, …), follows no redirect, uses no proxy, and gives up after 10 s.
-Its sandbox hides your home directory (except its own binary), `/run` (except its socket
-directory) and the system logs (`/var/log`, the journal included, and
-`/var/lib/systemd/coredump`), which your `wheel`/`adm`/`systemd-journal` membership would
-otherwise let it read, so it cannot read your files, `remote.sock`, the session bus,
-`tailscaled` or the system journal. At start-up it checks that sandbox itself (a read-only
-`/run`, a read-only tmpfs over the home directory with nothing mounted back on top of it except
-its own binary, and `/var/log` not listable) and refuses to start otherwise (exit 78).
+Its sandbox hides `/home`, `/root` and `/run` (except the two systemd-resolved `resolv.conf`
+files, read only, so names resolve on Ubuntu) and the system logs (`/var/log`, the journal
+included, and `/var/lib/systemd/coredump`), so it cannot read your files, `remote.sock`, the
+session bus, `tailscaled` or the system journal. At start-up it checks that sandbox itself (a
+read-only tmpfs over `/run`, `/home` and `/root` with nothing mounted back inside the last two,
+and `/var/log` not listable) and refuses to start otherwise (exit 78).
 Its logging filter is fixed in code (no `RUST_LOG`): the HTTP and TLS libraries never log the
 endpoint or the request. A 404/410 answer removes the device; other refusals are shown as
 "The push service refused the last notification".
 
+**Why a system service (Ubuntu 23.10 and later).** Earlier versions ran the sender as the user
+unit `soos-push-sender.service` (`systemctl --user enable --now soos-push-sender`). The user
+manager is unprivileged: each sandbox directive needs an unprivileged user namespace, which
+Ubuntu denies by default (`kernel.apparmor_restrict_unprivileged_userns=1`), so that unit exits
+with `status=226/NAMESPACE` ("Failed to set up mount namespacing: Operation not supported") and
+setup failed in its companion phase. The system manager applies the same sandbox, and more
+(`ProtectControlGroups=`, `ProtectProc=invisible`, `ProcSubset=pid`, `RemoveIPC=`), without any
+user namespace, on Ubuntu, Debian, Fedora and Arch alike. `scripts/setup.sh` migrates an existing
+install: it enables the system socket, then runs
+`systemctl --user disable --now soos-push-sender` (a rollback re-enables it). `soos-remote`
+uses the system socket first and falls back to the user unit's `$XDG_RUNTIME_DIR/soos-push/push.sock`
+only when the system socket does not exist; an explicit `push_socket_path` is the only socket
+tried (its listener must then run as your uid). `scripts/install_remote.sh` still installs the
+user unit as the root-free alternative for hosts that allow unprivileged user namespaces; setup
+never enables it.
+
 **Limits.** A compromised sender keeps outbound network access, can reach **abstract**
 Unix sockets of the host (not files, so no sandbox directive hides them), and can forge
 answers (at worst a wrong delivery state or a removed device). On a host whose
-`/etc/resolv.conf` points into `/run/systemd/resolve/` the sender cannot resolve names inside
-its sandbox and every notification fails; `scripts/install_remote.sh` prints a warning when it
-detects this. The workaround is a user drop-in (`systemctl --user edit soos-push-sender`) that adds
-`BindReadOnlyPaths=-/run/systemd/resolve`; the packaged unit keeps `/run` fully hidden. The sandbox and the delivery to the iPhone are
-verified on the owner's hardware (matrix rows RMC74 and RSH18); on a host whose systemd is older
-than the supported range, check the unit with `systemd-analyze --user security soos-push-sender`.
+`/etc/resolv.conf` points into `/run` somewhere else than the two systemd-resolved files (for
+example `/run/NetworkManager/resolv.conf`), the sender cannot resolve names inside its sandbox
+and every notification fails; `scripts/setup.sh` prints a warning when it detects this. The
+workaround is a drop-in (`systemctl edit soos-push-sender@.service`, as root) that adds
+`BindReadOnlyPaths=-<that file>`. The sandbox and the delivery to the iPhone are verified on the
+owner's hardware for the user unit (matrix rows RMC74 and RSH18); the system unit is verified
+under a real systemd in Docker (row PSS14) and still needs the owner's check on Ubuntu 24.04.
+Check the unit with `systemd-analyze security soos-push-sender@<uid>.service`.
 
-The sender refuses to start (exit 78, not restarted; `journalctl --user -u soos-push-sender`
-shows "sandbox not detected") when it is run by hand, when a drop-in removes
-`ProtectHome=tmpfs`, `TemporaryFileSystem=/run:ro` or `InaccessiblePaths=`, when a drop-in mounts
-the home directory (or a path inside it other than the sender binary) back on top of the hidden
-home (for example `BindPaths=%h`), when its binary is not at `~/.local/bin/soos-push-sender`, and
-when the home directory lies outside the paths `ProtectHome=` covers: the push sender needs a
-home directory under `/home` (or a path `ProtectHome=` covers); elsewhere it refuses to start,
-because its sandbox could not hide it. It derives the home directory from its own binary path,
-never from the environment. A mount table containing a mount point that is not valid UTF-8
-also makes it refuse to start (fail closed). A bind added under `/run` by a drop-in (for example
-`BindReadOnlyPaths=/run/dbus`) is **not** detected: the resolver drop-in below legitimately adds
-one there.
+The sender refuses to start (exit 78, not restarted; `journalctl -u soos-push-sender@<uid>`
+shows "sandbox not detected", "instance identity refused" or "socket setup failed") when it is
+run by hand, when a drop-in removes `ProtectHome=yes`, `TemporaryFileSystem=/run:ro` or
+`InaccessiblePaths=`, when a drop-in mounts something back inside the hidden `/home` or `/root`
+(for example `BindPaths=/home/you`), when it would run as root or as the instance uid (a drop-in
+removing `DynamicUser=yes`), and when its standard input is not the listening socket. A mount
+table containing a mount point that is not valid UTF-8 also makes it refuse to start (fail
+closed). A bind added under `/run` by a drop-in (for example `BindReadOnlyPaths=/run/dbus`) is
+**not** detected: the resolver binds legitimately add files there.
 
-Opt-in drop-in for such hosts only (check first with `readlink -f /etc/resolv.conf`; nothing
-to do when it does not start with `/run/systemd/resolve/`):
+The user unit `soos-push-sender.service` (root-free alternative) keeps the earlier rules: its
+binary must be at `~/.local/bin/soos-push-sender`, the home directory under a path
+`ProtectHome=` covers, and on a host whose `/etc/resolv.conf` points into `/run/systemd/resolve/`
+it needs this opt-in user drop-in:
 
 ```bash
 mkdir -p ~/.config/systemd/user/soos-push-sender.service.d
@@ -1574,7 +1600,7 @@ the PC is unreachable (off, asleep, or Tailscale disconnected).
 | `lock_screen_programs` | no | `["/usr/bin/swaylock", "/usr/bin/hyprlock", "/usr/bin/gtklock", "/usr/bin/waylock"]` | 0..=4 absolute paths (at most 4096 bytes each, no trailing `/`, no `..`, no control byte, not ending in ` (deleted)`), duplicates removed; the lock-screen programs whose `pam_unix` lines are trusted (section 2c) |
 | `push_notifications` | no | `false` | TOML boolean; `true` sends failed-password alerts as Web Push notifications (section 2d); requires `password_alerts = true` and `rp_id` |
 | `vapid_subject` | no | `https://<rp_id>` | `mailto:<you>@<domain>` or `https://<host>[/path]`, at most 256 printable bytes, no space, no port, no reserved name (`localhost`, `.local`, `.test`, `.example`, `.invalid`, `.internal`, `.home.arpa`) |
-| `push_socket_path` | no | `$XDG_RUNTIME_DIR/soos-push/push.sock` | absolute, at most 107 bytes; the socket of `soos-push-sender` |
+| `push_socket_path` | no | `/run/soos-push/<uid>/push.sock` (system service, listener PID 1), else `$XDG_RUNTIME_DIR/soos-push/push.sock` (user unit, listener your uid) | absolute, at most 107 bytes; the socket of `soos-push-sender`; when set, it is the only socket tried and its listener must run as your uid |
 | `push_previews` | no | `"detailed"` | `"detailed"` (source, account, counts) or `"generic"` (fixed text on the lock screen) |
 | `camera_view` | no | `false` | TOML boolean; `true` enables the live camera view (section 2f); requires `rp_id`, and the daemon must allow it (`[preview] enabled`, `allowed_uids`, `remote_view`) |
 | `camera_view_funnel` | no | `false` | TOML boolean; `true` also allows the view over Funnel; requires `camera_view = true` and `allow_funnel = true` |
@@ -1690,6 +1716,9 @@ reason classes.
 | Camera: `503 camera_format_unsupported` | A daemon older than the 2026-10-12 hardening (it forwards NV12 or MJPEG previews, which `soos-remote` does not convert), or a frame the daemon could not convert | Update and restart `soos-daemon`; check the camera with `soos-gui` |
 | Camera: `403 camera_refused` while an SSH session of yours is open | An SSH session of yours, or a process left running from one (e.g. `tmux`), is open: the daemon refuses previews to processes under your user manager while your UID owns a remote session (a `soos-gui` started as a user unit is refused for the same reason) | `loginctl list-sessions` (a `remote` session of your user, possibly in state `closing`); end that process or run `loginctl terminate-session <id>` |
 | Push sender unit `failed`, exit status 78, "sandbox not detected" | The sender runs outside its packaged sandbox: started by hand, a drop-in weakened `ProtectHome=`, `TemporaryFileSystem=/run:ro` or `InaccessiblePaths=`, or mounted the home back, the binary is not at `~/.local/bin/soos-push-sender`, the binary was replaced while the sender was starting (its path then ends in ` (deleted)`; the self-check fails closed and a restart on the new binary passes), or the home directory lies outside `/home` | Reinstall with `scripts/install_remote.sh`, remove the drop-in, then `systemctl --user restart soos-push-sender` (section 2d, Limits) |
+| `soos-push-sender.service` (user unit) `failed` with `status=226/NAMESPACE`, "Failed to set up mount namespacing" (Ubuntu 23.10 and later) | The user manager needs an unprivileged user namespace for the sandbox and AppArmor denies it (`kernel.apparmor_restrict_unprivileged_userns=1`) | Use the system service: re-run `scripts/setup.sh` (it enables `soos-push-sender@<uid>.socket` and disables the user unit), or by hand `sudo systemctl enable --now soos-push-sender@$(id -u).socket` and `systemctl --user disable --now soos-push-sender` (section 2d) |
+| `soos-push-sender@<uid>.service` `failed`, exit status 78 | "sandbox not detected": a drop-in weakened the system unit's sandbox; "instance identity refused": it would run as root or as `<uid>` (`DynamicUser=` removed); "socket setup failed": started without its socket; "arguments refused": the instance is not a numeric uid | Remove the drop-in (`systemctl revert soos-push-sender@.service`), then `sudo systemctl restart soos-push-sender@<uid>.socket` (section 2d) |
+| "Push sender not running on the PC" with the system service | `soos-push-sender@<uid>.socket` is not enabled, or `/run/soos-push/<uid>/push.sock` is not owned by your uid | `systemctl status soos-push-sender@$(id -u).socket`; `sudo systemctl enable --now soos-push-sender@$(id -u).socket` |
 | Camera: `403 camera_tailnet_only` | Over Funnel without `camera_view_funnel = true` | Use the tailnet, or section 2f |
 | Camera: `409 view_in_progress` | Another view is open (one view for the whole PC; there is no cooldown after a view) | Stop the other view, then start again |
 | Face unlock falls back to the password during a view | The view and `soos-gui` hold both daemon connections of your UID (`max_connections_per_uid` = 2) and the lock screen did not send its request on the auth-reserved connection within 200 ms (a slow PAM conversation), or another process of yours holds that reserve | Close `soos-gui` during a view, or raise `max_connections_per_uid` (section 2f) |
