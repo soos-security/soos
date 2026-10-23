@@ -1003,6 +1003,16 @@ system_up_to_date() {
             cmp -s -- "${artifacts}/${name}" "${PREFIX}/bin/${name}" || return 1
         fi
     done
+    # Push sender system service (ADR 2026-10-23): compared when this build has the sender and
+    # this checkout has both template units (install.sh installs them only then).
+    if [[ -f "${artifacts}/soos-push-sender" && -s "${artifacts}/soos-push-sender" \
+            && -f "${WORKSPACE_ROOT}/packaging/soos-push-sender@.socket" \
+            && -f "${WORKSPACE_ROOT}/packaging/soos-push-sender@.service" ]]; then
+        cmp -s -- "${artifacts}/soos-push-sender" "${PREFIX}/libexec/soos/soos-push-sender" || return 1
+        for name in soos-push-sender@.socket soos-push-sender@.service; do
+            cmp -s -- "${WORKSPACE_ROOT}/packaging/${name}" "${SYSCONFDIR}/systemd/system/${name}" || return 1
+        done
+    fi
     if gnome_extension_in_checkout; then
         for name in "${GNOME_EXTENSION_FILES[@]}"; do
             cmp -s -- "${GNOME_EXT_SRC}/${name}" "${GNOME_EXT_DIR}/${name}" || return 1
@@ -2798,6 +2808,9 @@ companion_failed() {
     fi
     if [[ "${CAMERA_DAEMON}" == on && "${DAEMON_PREVIEW_STATE}" == absent ]]; then
         error "The [preview] section the root half created in ${DAEMON_TOML} is kept (an administrator file; remove it by hand if unwanted)."
+    fi
+    if [[ "${PUSH_SENDER_PLAN}" == on ]]; then
+        error "The push sender socket ${SENDER_SOCKET_UNIT} enabled by the system phase is kept (idle: the sender only starts when soos-remote connects); disable it with: sudo systemctl disable --now ${SENDER_SOCKET_UNIT}"
     fi
     return "${EXIT_COMPANION}"
 }
