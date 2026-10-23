@@ -1226,15 +1226,21 @@ fn test_rac_capture_scripts_are_hardware_free() {
 
 /// RAC26: the RAC15 exception of the Playwright bench (GitHub #464, owner-approved additive
 /// migration of 2026-10-23) is narrow. `scripts/remote_browser_tests.sh` builds the loopback
-/// fixture server by its name, with `--locked` and only from `soos-test-fixtures`, and never
-/// names or enables the `readme-capture` feature.
+/// fixture server by its name, with `--locked` and only from `soos-test-fixtures`, on its only
+/// `cargo build` line, with no feature flag, and never names the `readme-capture` feature.
 #[test]
 fn test_rac_browser_bench_exception_is_narrow() {
     let bench = read(BROWSER_BENCH_SCRIPT);
-    let build = bench
+    let builds: Vec<&str> = bench
         .lines()
-        .find(|l| l.contains("cargo build"))
-        .unwrap_or_else(|| panic!("{BROWSER_BENCH_SCRIPT} builds the fixture server with cargo"));
+        .filter(|l| l.contains("cargo build"))
+        .collect();
+    assert_eq!(
+        builds.len(),
+        1,
+        "{BROWSER_BENCH_SCRIPT} has exactly one cargo build line: {builds:?}"
+    );
+    let build = builds[0];
     for needle in [
         "--locked",
         "-p soos-test-fixtures",
@@ -1246,7 +1252,10 @@ fn test_rac_browser_bench_exception_is_narrow() {
         );
     }
     assert!(
-        !build.contains("--examples") && !build.contains("--features") && !build.contains("-F "),
+        !build.contains("--examples")
+            && !build.contains("--features")
+            && !build.contains("--all-features")
+            && !build.contains("-F "),
         "{BROWSER_BENCH_SCRIPT}: the fixture build names one example and enables no feature: {build}"
     );
     assert!(

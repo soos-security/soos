@@ -2,7 +2,7 @@
 
 - **Date**: 2026-10-23
 - **Issue**: follow-up of GitHub #464 (PR 2 of #355); open question of walkthrough 249 §6
-  **Branch**: `chore/rac15-bench-exception`
+- **Branch**: `chore/rac15-bench-exception`
 - **Decision**: owner decision of 2026-10-23 — "add `scripts/remote_browser_tests.sh` to the RAC15
   named exceptions (additive migration approved)". ADR 2026-10-13 "README Assets Are Generated From
   Synthetic Data, Never Hand-Edited" and its Playwright amendment are otherwise unchanged.
@@ -28,14 +28,17 @@ to make the bench a named exception instead.
   still from cargo's JSON build report so `CARGO_TARGET_DIR` is honoured, still exactly one
   executable or exit 2).
 - **New contract RAC26** pins the narrowness: the build line carries `--locked`,
-  `-p soos-test-fixtures` and the named example, has no `--examples`, `--features` or `-F`, and the
-  script never names `readme-capture`.
+  `-p soos-test-fixtures` and the named example, is the script's only `cargo build` line, has no
+  `--examples`, `--features`, `--all-features` or `-F`, and the script never names
+  `readme-capture`.
 
 ## 3. Tester (Phase 2)
 
 `test_rac_browser_bench_exception_is_narrow` was added first and failed against the previous
 script (`--examples` instead of the named example). The RAC15 test body is unchanged except for the
-new exception branch (9 added lines, 0 removed).
+new exception branch (6 lines, plus a 3-line `BROWSER_BENCH_SCRIPT` constant; 0 lines
+removed). The candid review then suggested rejecting `--all-features` and checking every
+`cargo build` line; both were added to RAC26 before the PR.
 
 ## 4. Auditor (Phase 3)
 
