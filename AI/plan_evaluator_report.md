@@ -108,3 +108,59 @@ VALIDATION_VERDICT: APPROVED
 ## 6. Post-verdict note
 
 The architect applied the four MINOR text fixes r1 to r4 in place (`STUCK_SPAN_S` in §3 and §7.4, the §6.1 identity order, the build-tools hash keys in §8.1 and SAN-S1, the table-header rule in R2-1). None of them changes the verdict.
+
+---
+
+# Round 3 — §19 "Owner decisions of 2026-10-23" against `main` after #473 (2026-10-23)
+- **Branch**: `feat/setup-preflight-deps` (PR A of §13)
+- **Base commit**: `d5e3c09` (`origin/main`, push sender system service merged)
+- **Scope**: §19 was not re-evaluated after the owner's answers; this round checks it, and the
+  parts of §5/§6/§12 that PR A implements, against the code on `main` and against the package
+  repositories of the pinned images (read-only `docker run` of `ubuntu:24.04`, `fedora:40`,
+  `fedora:44` and `archlinux` with `apt-cache show`, `dnf repoquery --available`, `pacman -Si`).
+
+## 1. Facts verified
+
+| Fact cited by the spec | Where | Actual | Match |
+|---|---|---|---|
+| `UNIT_START_TIMEOUT_S` bounds `systemctl enable --now tailscaled.service` (§19 OD-Q1) | `scripts/setup.sh:68` | `readonly UNIT_START_TIMEOUT_S=90` | Yes |
+| `setup.sh` holds no `curl`/`wget` and no `tailscale up`/`status` (S-1, SET3, SET20) | `scripts/setup.sh`; `setup_contract.rs`, `setup_user_phase_contract.rs` | true; §19 keeps every new call in `setup_exposure.sh` | Yes |
+| A user `remote.toml` is refused with options and kept without (AS-U3) | `scripts/setup.sh:1671-1681` | exit 2 with options; `CONFIG_ACTION=kept` otherwise | Yes (M1/M2 encode the change) |
+| `classify_remote_config` reads the size first | `scripts/setup.sh:1431-1435` | `> MAX_REMOTE_CONFIG_BYTES` → `user` without parsing | Yes (F4) |
+| `[android]` needs `allow_funnel` and at most 2 upper-case fingerprints | `crates/remote/src/config.rs:509-540`, `crates/remote/src/lib.rs:291` | as stated | Yes |
+| `applicationId = "org.soos.remote"` | `android/app/build.gradle.kts:17` | as stated | Yes |
+| §5.1 companion names | images | `jq bind9-dnsutils curl ca-certificates` (ubuntu), `jq bind-utils curl ca-certificates` (fedora 40, 44), `jq bind curl ca-certificates` (arch) all resolve | Yes |
+| §5.1 android names | images | ubuntu `openjdk-17-jdk-headless unzip android-sdk-platform-tools-common` resolve (universe is enabled in the image); arch `jdk17-openjdk unzip android-udev` resolve; fedora 40 `java-17-openjdk-devel` resolves, **fedora 44 has no `java-17`/`java-21` package** (only `java-25-openjdk`, `java-latest-openjdk` 26/27) | **No** (F1) |
+| §19 `tailscale` group | arch image | `tailscale` resolves in `extra`; `gnupg` (ubuntu) and `gnupg2` (fedora) resolve | Yes (PR B) |
+| The SCN lexer can be reused by SDP-S3 | `tests/invariants/src/setup_scanner_contract.rs` | private items; M14 is assigned to PR B | Partly (F6) |
+| The default harness `tailscale` stub "fails" `status` (STX-B16) | `setup_user_phase_contract.rs:338-341` | exits 0 with no output for anything but `version` | **No** (F8, PR B) |
+| `system_up_to_date` and the push sender drop-in (#473 review) | `scripts/setup.sh:1006-1015`; PSS16 | no drop-in compared; PSS16 models a fake-prefix install without the drop-in | F10 |
+
+## 2. Findings
+
+- **F1 [MAJOR]** No JDK package name resolves on both `fedora:40` and the current `fedora:44`
+  (pinned by digest for the package matrix, m7), and Gradle 8.14.5 does not run on the only
+  Fedora 44 JDK (25). §5.1 as written makes the required Docker job fail. — PR A: the Fedora
+  `android` group is `unzip android-tools`; the Fedora JDK becomes an owner question for PR C;
+  PR C refuses `--android` on fedora in preflight until decided (OD-T4 kept). ADR record.
+- **F2 [MINOR]** The §19 `tailscale` group is PR B work; its debian/fedora package comes from
+  Tailscale's repository, absent from the matrix images. — Group lists `gnupg`/`gnupg2` there;
+  the repository package name is an exempted constant of `setup_exposure.sh`.
+- **F3 [MINOR]** §6.1 item 1 ("companion skipped") contradicts the approved M2 ("kept"). — M2
+  wins; spec text fixed.
+- **F4 [MINOR]** An oversized user file would fail with exit 5 after a plan that promised a
+  backup. — Preflight exit 2 when a backup would be needed; spec text fixed; SDP13.
+- **F5 [MINOR]** SDP-B1 (android half) and SDP-B3 need `--android` (PR C). — Moved; SDP-B2's
+  fatal path is tested on the `toolchain` scope in PR A.
+- **F6 [MINOR]** SDP-S3 needs the lexer before M14. — Visibility only (`pub(crate)`), SCN bodies
+  byte-identical; category S.
+- **F7 [MINOR]** R2-11 names `--android` before it exists. — PR A wording points to §2j.
+- **F8 [MINOR, PR B]** Empty `status --json` output with exit 0 must be "unavailable".
+- **F9 [MINOR, PR B]** The post-E2 identity question is the one late prompt; acceptable.
+- **F10 [MINOR, scope]** The #473 follow-up (2) needs a setup-only change of PSS16 (M17,
+  category S): the lead decides; no assertion text changes.
+
+No CRITICAL finding. All fixes are applied in the spec as §20 (and in place in §5.1 and §6.1).
+
+## 3. Verdict
+VALIDATION_VERDICT: APPROVED

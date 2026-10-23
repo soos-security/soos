@@ -212,7 +212,7 @@ it succeeds.
 | Group | debian (Ubuntu 24.04, Debian 12) | fedora (40+) | arch | Needed by |
 |---|---|---|---|---|
 | `companion` | `jq` `bind9-dnsutils` `curl` `ca-certificates` | `jq` `bind-utils` `curl` `ca-certificates` | `jq` `bind` `curl` `ca-certificates` | `setup_exposure.sh` (JSON, `dig`, probe) |
-| `android` | `openjdk-17-jdk-headless` `unzip` `android-sdk-platform-tools-common` | `java-17-openjdk-devel` `unzip` `android-tools` | `jdk17-openjdk` `unzip` `android-udev` | JDK, `unzip` (Gradle and cmdline-tools archives; today undeclared), udev rules so `adb` sees the phone without root |
+| `android` | `openjdk-17-jdk-headless` `unzip` `android-sdk-platform-tools-common` | `unzip` `android-tools` (no JDK: §20 F1) | `jdk17-openjdk` `unzip` `android-udev` | JDK, `unzip` (Gradle and cmdline-tools archives; today undeclared), udev rules so `adb` sees the phone without root |
 
 Array names `DEBIAN_COMPANION`, `FEDORA_COMPANION`, `ARCH_COMPANION`, `DEBIAN_ANDROID`, … in the
 existing style. The `udev` package names and the Fedora JDK name are **verified by the Docker job
@@ -259,11 +259,11 @@ For `CONFIG_STATE == user` (replaces the ADR 2026-10-15 item (5) / AS-U3 refusal
 1. **Identity source**, first that yields both values (R2-9): flags → the user file's own `allowed_logins` (exactly one entry passing `valid_login`) and `rp_id` (passing
    `valid_rp_id`), read with the existing bounded line parser (no TOML library, no `source`)
    → auto-detection (§7.1), with the R1-8 `[WARN]` when detection disagrees.
-   None → companion skipped exactly as today without identity, the file **untouched**.
+   None → the file is **untouched** and kept exactly as today for a user file (`[PLAN] companion config: kept`; M2, §20 F3).
 2. Plan line: `[PLAN] companion config: back up <path> to remote.toml.bak-<UTC> and write it -
    the file was not written by setup`.
 3. The run (P6) copies the file to `${CONFIG_DIR}/remote.toml.bak-$(date -u +%Y%m%dT%H%M%SZ)`:
-   bounded read (`MAX_REMOTE_CONFIG_BYTES` + 1; larger → exit 5 rollback, nothing written), written
+   bounded read (`MAX_REMOTE_CONFIG_BYTES` + 1; a larger file is refused in preflight, exit 2, nothing changed: §20 F4), written
    with `set -C` (noclobber, `O_EXCL`) under `umask 077`, mode 0600, never through a link
    (`[[ -L ]]` re-checked immediately before; the directory is the already-validated 0700 one).
    A name that exists → suffix `-1`..`-9` (`MAX_BACKUP_SUFFIX`), then exit 5. The backup is
@@ -1196,3 +1196,42 @@ No other existing assertion changes:
 `platform-tools` and `platforms;android-36` stay unpinned: `sdkmanager` installs the latest
 revision, checked by Google's repository checksums over HTTPS. The ADR and
 `Docs/SECURITY_AND_QUALITY_GUIDELINES.md` record this as an owner-accepted residual.
+
+## 20. Plan evaluation of §19 against `main` after #473 (2026-10-23, PR A)
+
+Findings of the plan-evaluation round on §19 (`AI/plan_evaluator_report.md`, section "Round 3");
+authoritative over §1–§19 where they differ.
+
+- **F1 Fedora JDK.** The current Fedora image (`fedora:44`, pinned by digest in the Docker
+  package matrix) ships no JDK 17 or 21 package, only `java-25-openjdk` and `java-latest-openjdk`
+  (26/27), and Gradle 8.14.5 does not run on Java 25. No JDK package name resolves on both
+  `fedora:40` and `fedora:44`. The Fedora `android` group is therefore `unzip android-tools`
+  without a JDK; the Fedora JDK is an owner question for PR C (pinned, checksum-verified JDK 17
+  archive in the user's home like the SDK, a third-party repository, or a Gradle upgrade). Until
+  it is decided, PR C refuses `--android` on the fedora family in preflight (exit 2), so nothing
+  is discovered mid-run (OD-T4). Recorded in the ADR.
+- **F2 `tailscale` group.** The `tailscale` group of §19 OD-Q1 belongs to PR B. On debian and
+  fedora the `tailscale` package comes from Tailscale's repository, which the package matrix
+  image does not have: the group lists `gnupg` / `gnupg2` there (and `tailscale` on arch), and the
+  repository package name is a constant of `setup_exposure.sh` with an SDP-S2 exemption.
+- **F3** §6.1 item 1 now matches the approved M2: a user file without identity is kept as today.
+- **F4** An oversized user file is refused in preflight (exit 2) when a backup would be needed,
+  instead of failing with exit 5 after the plan said it would be backed up.
+- **F5** SDP-B1 (android half) and SDP-B3 need `--android` and move to PR C. SDP-B2's fatal path
+  is tested in PR A on the `toolchain` scope (`cargo` still missing after `install_rustup.sh` →
+  exit 1 before the build); the `companion` half is non-fatal by R1-3.
+- **F6** SDP-S3 needs the SCN lexer in PR A: its items are exposed with `pub(crate)` in
+  `setup_scanner_contract.rs` (visibility only; every SCN test body byte-identical). The move of
+  M14 can still happen in PR B.
+- **F7** R2-11's summary text names `--android`, which exists only from PR C: PR A says "until it
+  is added again (Docs/REMOTE_COMPANION.md section 2j)"; PR C switches the text to `--android`.
+- **F8** (PR B) The default `tailscale` stub of the user-phase harness answers every call other
+  than `version` with exit 0 and no output: detection must classify an empty or unparsable JSON
+  with exit 0 as "unavailable" (§3 sentinel), which never triggers install, start or login.
+- **F9** (PR B) §19's identity question after E2 is the only plan-time question that moves; it
+  happens only right after an interactive install or login, so the user is present.
+- **F10** (scope) PR A also carries the review follow-ups of #473 (`install.sh`, `uninstall.sh`,
+  `setup.sh` `system_up_to_date` and `--prefix` normalisation). The drop-in rule of
+  `system_up_to_date` for a `--prefix` other than `/usr` needs a setup-only change of the existing
+  PSS16 test (it models a full install under a fake prefix without the drop-in that `install.sh`
+  writes there): migration **M17**, category S, reported to the lead.
