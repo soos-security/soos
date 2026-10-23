@@ -3,7 +3,7 @@
 - **Date**: 2026-10-23
 - **Target Branch**: `fix/push-sender-system-service`
 - **Base (merge-base)**: `c3ad0ee`
-- **Reviewed-Diff-Fingerprint**: `69d90c05ab33836a43dba42a2ba6f33f77b87b132d1e42a1d56daeb5d32f8d1e`
+- **Reviewed-Diff-Fingerprint**: `f65c01a45d35905d2bbb4f3f5c30fb4f4909606b3b3a21b9f6aa781142466e1f`
 - **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`,
   `.github/workflows/ci.yml`, `AGENTS.md`, `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`,
   `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_push_sender_system_service.md`,
@@ -64,6 +64,7 @@ additions):
 - Stub knobs `STUB_USER_DIE_UNIT` / `STUB_SYSTEM_OFF_UNIT` are inert when unset (the latter
   guarded by `-n`), so no other test can pass vacuously.
 - 28e2f98 changes only branch-new PSS12 tests (`test_pss12_setup_enables_the_system_sender_not_the_user_unit`, `test_pss12_setup_disables_a_legacy_user_unit`): the same lines are still required, with the fixed `uid=1000` role label instead of the real uid; nothing is weakened.
+- 2fddbef changes only the Docker client of `tests/docker/push_sender_system_unit_test.sh`: the Perl client ignores SIGPIPE and prints `NO_REPLY` when the frame write fails (a peer the sender closes without reading), and two `journalctl | grep -q` checks use a here-string (no SIGPIPE under `pipefail`). Not vacuous: alice and carol must still get `REPLY peer=0 `, bob must still get `CONNECT_FAIL`, root must still get exactly `NO_REPLY` (a reply fails the case), and a failed write on an accepted peer yields `NO_REPLY`, which fails those cases. shellcheck is clean.
 - The round-2 commits (bca9e03..2247134) remove no test line at all; they add PSS16-PSS19
   invariants and Docker case 7. No `#[ignore]`, `should_panic`, tolerance or inline
   `mod tests` change in the patch.
