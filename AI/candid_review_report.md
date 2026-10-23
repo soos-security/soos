@@ -1,84 +1,93 @@
 # Candid Review Report
 
-- **Date**: 2026-10-21
-- **Target Branch**: `dependabot/github_actions/actions-4430c5f07e` (Dependabot PR #466)
-- **Base (merge-base)**: `fdf6039` (`origin/main` is now `ecfefa4`, which does not touch `.github/`)
-- **Reviewed-Diff-Fingerprint**: `e5f4213760da1f2c24b7876f952577a391fa0c6679bd1b2116b7c2fe9a50ae41`
-- **Audited Files**: `.github/workflows/android.yml`
+- **Date**: 2026-10-23
+- **Target Branch**: `fix/clipboard-win-yanked` (commits `7fc6068`, `6bf7a59`)
+- **Base (merge-base)**: `fb2a0bf` (`origin/main`)
+- **Reviewed-Diff-Fingerprint**: `7c4e7709a93ea144493b5aa9bf315c623b41812c85dff9c37fee2b92205163b7`
+- **Audited Files**: `Cargo.lock`, `AI/walkthroughs/253_clipboard_win_yanked.md`
 
 ## 1. Executive Summary
 
-The diff changes one pinned GitHub Action reference and nothing else:
+The diff changes one `Cargo.lock` entry and adds a walkthrough:
 
-- `.github/workflows/android.yml:50` — `actions/setup-java` `de7274f081f381c8f8158605e0321c36c376e2e6`
-  (v6.0.1) → `b843ebf9b913146b38da2eaa7aeddf76074ae1ad` (v6.1.0).
+- `Cargo.lock` `clipboard-win`: version `5.4.1` → `5.4.3`, checksum
+  `bde03770…` → `052af7878466feccda12ba7a6a67d019d712f296809559b47c12c8cc196d3a9a`. The dependency
+  list (`error-code`) is unchanged. No other lockfile entry, no `Cargo.toml` and no `deny.toml` change.
+- `AI/walkthroughs/253_clipboard_win_yanked.md`: new walkthrough (number 252 is held by the open
+  `chore/rac15-bench-exception` branch, so 253 is correct).
 
-The new SHA was independently resolved against the upstream repository and matches the tag named in the
-trailing comment. No Rust code, test, script, hook or permission block is touched. No findings.
+The yank fixes a real upstream memory-safety bug. 5.4.3 is the minimal, bounds-checked fix. No blocking
+findings.
 
 ## 2. Test Changes
 
 Mechanical listing from `target/candid_diff.patch`:
 
-- Test files touched: none (only `.github/workflows/android.yml` appears in `diff --git` headers).
-- Removed or changed assertions: none (0 matches).
+- Test files touched: none (only `Cargo.lock` and the walkthrough appear in `diff --git` headers).
+- Removed or changed assertions: none.
 - New escape hatches (`#[ignore]`, `should_panic`, tolerance, epsilon): none.
 - Inline test modules: none.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- Scenario: the new SHA does not correspond to the commented tag (a mislabelled or attacker-supplied pin).
-  Checked with `gh api repos/actions/setup-java/git/ref/tags/v6.1.0` → commit
-  `b843ebf9b913146b38da2eaa7aeddf76074ae1ad` (lightweight tag, object type `commit`); the moving `v6` tag
-  points at the same commit. The old pin resolves to `v6.0.1`. The commit carries a GitHub-verified
-  signature. PASS.
-- Scenario: the upstream delta changes how our step resolves the JDK. Compare `v6.0.1...v6.1.0` is 9
-  commits ahead, 0 behind. The only Temurin resolution change (#1279, JEP 322 patch versions) adds an
-  extra OR-branch for exact build requests matched against the OpenJDK version fields; the previous
-  `isVersionSatisfies` match is kept, so the pinned `java-version: "17.0.16+8"` resolves as before. The
-  PR's "Android (debug build)" job is green with the new pin. PASS.
-- Scenario: input names change and break the step. `action.yml` only adds optional inputs
-  (`mvn-server-repository-origins`, `mvn-plugin-repositories`) and a `riscv64` architecture note; our
-  inputs (`distribution`, `java-version`) are unchanged. PASS.
+- Scenario: the lockfile checksum does not match the published crate. The crates.io API for
+  `clipboard-win/5.4.3` returns checksum `052af787…3a9a` (published 2026-10-23T05:43Z by `DoumanAsh`, the
+  long-standing sole publisher, not yanked). `sha256sum` of the downloaded `.crate` gives the same value.
+  PASS.
+- Scenario: the bump drags other packages along. `git diff fb2a0bf..HEAD -- Cargo.lock` shows only the
+  version and checksum lines of `clipboard-win`. PASS.
+- Scenario: the crate is reachable from a shipped Linux artifact. `cargo tree --locked -i clipboard-win
+  --target all` gives a single path `soos-gui` → `eframe` 0.35.0 → `egui-winit` 0.35.0 → `arboard` 3.6.1 →
+  `clipboard-win` 5.4.3, Windows-only through `arboard`. `cargo check --locked -p soos-gui` (Linux)
+  finishes cleanly. PASS.
+
+### Yank Reason (upstream)
+- Upstream issue DoumanAsh/clipboard-win#42 (2026-10-23): `raw::get_html` reads past the clipboard data
+  when the HTML fragment offsets point beyond it. That is an out-of-bounds read in `unsafe`
+  `ptr::copy_nonoverlapping`, so a crafted `HTML Format` clipboard payload can trigger it. The
+  maintainer yanked 5.2.0 to 5.4.1 and published 5.4.2 and 5.4.3. 5.1.0 and earlier stay unyanked. soos
+  never compiles the crate on its Linux targets, so it has no runtime exposure.
+
+### Supply Chain (5.4.1 → 5.4.3 source diff)
+- `src/raw.rs`: the unchecked `size > data_size` test and the `copy_nonoverlapping` + `set_len` copy are
+  replaced by `data.get(start_idx..start_idx+size)` with an `invalid_data()` error on `None`. This is a
+  strict safety improvement.
+- `src/lib.rs`: the open-retry loop sleep changes from `Sleep(0)` to `Sleep(5)` (matching Chromium), the
+  clippy attribute changes, and a doc string changes. `src/formats.rs` and `README.md` only change doc text.
+  `tests/test_clip.rs` adds a regression test for the invalid fragment offsets.
+- No `build.rs` (`build = false` in both versions), no new or changed dependencies, no network, process
+  or filesystem code added. `.cargo_vcs_info.json` points at upstream commit `ed27008a`. PASS.
+- Cooldown: 5.4.3 is less than one day old. This is acceptable because it is the maintainer's targeted
+  security fix, and the alternative (5.4.2 or an ignore entry) is no better. PASS.
 
 ### PAM Concurrency & Deadlines
 - Not applicable: no change under `crates/pam` or any runtime code. PASS.
 
 ### Panic Safety & Fail-Closed
-- Not applicable: no production Rust code changed. PASS.
+- Not applicable: no production Rust code in the workspace changed. PASS.
 
 ### Test Integrity & Anti-Weakening
-- No test touched (section 2). `cargo test --locked -p soos-invariants -- --test-threads=3` on the
-  reviewed tree: 871 passed, 0 failed. PASS.
+- No test touched. `deny.toml` keeps `yanked = "deny"` and `ignore = []`, so the gate is not loosened.
+  `cargo deny check`: `advisories ok, bans ok, licenses ok, sources ok`. `./scripts/candid_review.sh`
+  Layer 1: PASSED. PASS.
 
 ### Memory, Bounds & Secrets
-- Credentials: the `src/auth.ts` changes (#1282, #1286) only add opt-in Maven repository-origin and
-  plugin-repository generation; with the new inputs unset, the generated `settings.xml` server entry is
-  built exactly as before (default server id and env var names, no secret values). The Android build uses
-  Gradle, not Maven, and no secret is passed to the step. PASS.
-- Signature verification: #1273 stops the GPG agent before removing the temporary verification home, a
-  cleanup hardening with no change to what is verified. PASS.
-
-### Supply Chain & Automation
-- Pinning: the reference remains a full 40-hex commit SHA with a version comment. PASS.
-- Runtime: `runs.using` is `node24` in both v6.0.1 and v6.1.0 (no runtime change). PASS.
-- Bundled dependency updates: `undici` 6.28.0 → 6.29.0 and a monthly npm group bump are compiled into
-  `dist/`; upstream CI built and tagged them. Accepted risk consistent with pinning a first-party
-  `actions/*` release by SHA. PASS.
-- Cooldown: v6.1.0 was published 2026-10-14T20:17Z; Dependabot opened the PR on 2026-10-21T08:06Z under
-  the configured `cooldown.default-days: 7` (day granularity). No newer release, retraction or yank was
-  observed at review time; v6.1.0 is still the latest release. Note: the full 7×24 h window closes at
-  2026-10-21T20:17Z. Non-blocking. PASS.
-- Permissions: workflow-level permissions in `android.yml` are unchanged; no new
-  `${{ github.event.* }}` interpolation in `run:`. PASS.
+- The upstream change removes an out-of-bounds read. No secrets or biometric data are involved. PASS.
 
 ### English-Only Policy
-- The diff contains only a SHA and an English version comment. PASS.
+- Walkthrough and commit message are in English, and the commit follows Conventional Commits
+  (`fix(deps): …`) with the co-author trailer. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-None.
+1. (Resolved in `6bf7a59`) The walkthrough said "every `clipboard-win` release up to 5.4.1" was yanked and
+   gave no reason. It now states the yanked range 5.2.0 to 5.4.1 and the reason: upstream #42, an
+   out-of-bounds read in `raw::get_html` fixed by a bounds-checked slice in 5.4.3. Both claims were
+   re-checked against crates.io and the source diff and are accurate.
+2. (Non-blocking, cosmetic) The subject line of commit `7fc6068` still says "up to 5.4.1", and one
+   rewrapped walkthrough line exceeds the surrounding wrap width. The squash-merge message can carry the
+   corrected wording.
 
 ## 5. Final Verdict
 
