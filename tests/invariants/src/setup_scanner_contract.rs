@@ -49,10 +49,10 @@ fn read_repo(rel: &str) -> String {
 /// continuation removed), whether it runs inside a command or process substitution at any
 /// depth, and the line of its first word.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ShCmd {
-    words: Vec<String>,
-    in_subst: bool,
-    line: usize,
+pub(crate) struct ShCmd {
+    pub(crate) words: Vec<String>,
+    pub(crate) in_subst: bool,
+    pub(crate) line: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -669,7 +669,7 @@ impl Lexer<'_> {
 /// Every simple command of `script`, in substitutions too (a substitution's commands are
 /// listed on their own, and its raw text also stays in the enclosing word), or why the script
 /// cannot be read (unbalanced, truncated or nested deeper than `MAX_NESTING`). Never panics.
-fn try_lex(script: &str) -> Result<Vec<ShCmd>, String> {
+pub(crate) fn try_lex(script: &str) -> Result<Vec<ShCmd>, String> {
     let chars: Vec<char> = script.chars().collect();
     let mut line_of = Vec::with_capacity(chars.len());
     let mut line = 1;
@@ -699,12 +699,12 @@ fn try_lex(script: &str) -> Result<Vec<ShCmd>, String> {
 
 /// `try_lex` for the checks: a script the lexer cannot follow fails the test loudly, with the
 /// reason, instead of passing.
-fn lex(script: &str) -> Vec<ShCmd> {
+pub(crate) fn lex(script: &str) -> Vec<ShCmd> {
     try_lex(script).unwrap_or_else(|e| panic!("setup.sh lexer: {e}"))
 }
 
 /// A word without its quotes and backslashes.
-fn unquote(word: &str) -> String {
+pub(crate) fn unquote(word: &str) -> String {
     word.chars().filter(|c| !"\"'\\".contains(*c)).collect()
 }
 
@@ -833,7 +833,7 @@ fn tailscale_in_substitution_by_any_name(script: &str) -> Vec<String> {
 }
 
 /// Length of the `NAME=`, `NAME+=` or `NAME[...]=` prefix of an assignment word.
-fn assignment_prefix(word: &str) -> Option<usize> {
+pub(crate) fn assignment_prefix(word: &str) -> Option<usize> {
     let mut chars = word.char_indices().peekable();
     match chars.next() {
         Some((_, c)) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -1450,7 +1450,7 @@ fn test_scn5_traceability() {
 
 /// A variable expanded by a word: `$NAME`, `${NAME...}`, `$1`, `$@`, `${!NAME}`.
 #[derive(Debug, PartialEq, Eq)]
-enum VarRef {
+pub(crate) enum VarRef {
     Named(String),
     /// A positional or special parameter (`$1`, `$@`, `$*`, `$#`, `$?`, `$$`, `$!`, `$-`).
     Special(char),
@@ -1460,7 +1460,7 @@ enum VarRef {
 
 /// The variables a raw word or value expands, inside its substitutions too (single-quoted
 /// text excluded; `${#NAME}` is the length of `NAME`).
-fn variable_refs(text: &str) -> Vec<VarRef> {
+pub(crate) fn variable_refs(text: &str) -> Vec<VarRef> {
     let chars: Vec<char> = text.chars().collect();
     let mut refs = Vec::new();
     let mut in_double = false;
@@ -1526,7 +1526,7 @@ fn variable_refs(text: &str) -> Vec<VarRef> {
 /// directory, never which program runs.
 /// Only when every expansion is double-quoted: an unquoted one is word split, so
 /// `TS='tailscale serve '` makes `$TS/x` run `tailscale`.
-fn names_fixed_program(text: &str) -> bool {
+pub(crate) fn names_fixed_program(text: &str) -> bool {
     if !all_expansions_quoted(text) {
         return false;
     }
@@ -1568,7 +1568,7 @@ fn all_expansions_quoted(text: &str) -> bool {
 }
 
 /// Where a variable gets its value in the script.
-enum Origin {
+pub(crate) enum Origin {
     /// An assignment word's value, or a `for NAME in` list word.
     Value(String),
     /// `read`, `mapfile`, `readarray`, `printf -v`: from input, not from the script.
@@ -1576,7 +1576,7 @@ enum Origin {
 }
 
 /// Every variable the script assigns, with the origin of each of its values.
-fn script_assignments(cmds: &[ShCmd]) -> std::collections::HashMap<String, Vec<Origin>> {
+pub(crate) fn script_assignments(cmds: &[ShCmd]) -> std::collections::HashMap<String, Vec<Origin>> {
     let mut map: std::collections::HashMap<String, Vec<Origin>> = std::collections::HashMap::new();
     let is_ident = |w: &str| {
         w.chars()
@@ -1622,7 +1622,7 @@ fn script_assignments(cmds: &[ShCmd]) -> std::collections::HashMap<String, Vec<O
 /// function headers and the wrappers that run their arguments (`run_bounded <secs>`,
 /// `as_root`, `as_build_user`, `command`, `exec`, `env`, `timeout`, `sudo`, `doas`, ...);
 /// `None` when it runs none (assignments only, `command -v`).
-fn command_word_index(words: &[String]) -> Option<usize> {
+pub(crate) fn command_word_index(words: &[String]) -> Option<usize> {
     let mut k = 0;
     loop {
         let word = words.get(k)?;

@@ -582,6 +582,10 @@ impl Harness {
             ("pam-auth-update", STUB_LOG_ONLY),
             ("authselect", STUB_LOG_ONLY),
             ("curl", STUB_LOG_ONLY),
+            // Harness wiring M3 (spec §12.2): the companion package group's tools are present
+            // and inert (setup.sh never runs them in PR A).
+            ("jq", STUB_LOG_ONLY),
+            ("dig", STUB_LOG_ONLY),
         ] {
             write_exec(&stubs.join(name), &stub(body));
         }
@@ -609,7 +613,8 @@ impl Harness {
         fs::create_dir_all(root.join("etc/systemd/system")).expect("unit dir");
         fs::create_dir_all(dir.join("roothome")).expect("root home");
         fs::write(root.join("etc/os-release"), ARCH_OS_RELEASE).expect("os-release");
-        for group in ["build", "models", "gui"] {
+        // Harness wiring M3: the companion group is installed like the other groups.
+        for group in ["build", "models", "gui", "companion"] {
             for p in print_packages(group) {
                 fs::write(state.join(format!("pkg_{p}")), "").expect("pkg");
             }
