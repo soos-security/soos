@@ -1738,7 +1738,6 @@ reason classes.
 | `keytool -list -v … \| grep SHA256` prints nothing (exit status 1) | `keytool` output is localised: the French one prints `SHA 256:` with a space | Run it without the filter and copy the `SHA256`/`SHA 256` line, or use `apksigner verify --print-certs app.apk` |
 | `scripts/android_build.sh`: `SDK location not found` | No Android SDK or `ANDROID_HOME` unset | Install the command-line tools to `~/Android/Sdk/cmdline-tools/latest`, export `ANDROID_HOME=$HOME/Android/Sdk`, accept `sdkmanager --licenses`, then `sdkmanager "platforms;android-36" "build-tools;35.0.0" "platform-tools"` (`platforms;android-36` and `build-tools;35.0.0` are the versions of the CI job; `platform-tools` adds `adb`) |
 | `scripts/setup.sh` stops at preflight: `remote.toml was not written by setup, which never edits it` | A `remote.toml` from a manual install or an older version exists | Move it aside (`mv ~/.config/soos/remote.toml ~/.config/soos/remote.toml.mine`) and run setup again; the one-command setup (GitHub #362, owner decision of 2026-10-23) will back it up automatically |
-| `soos-push-sender` fails with `226/NAMESPACE` (`Failed to set up mount namespacing: Operation not supported`) on Ubuntu 24.04 | Ubuntu restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns = 1`), which the sandbox of a **user** unit needs | Until the push sender runs as a system service (owner decision of 2026-10-23), run `scripts/setup.sh … --push off --offline-alerts off`; never lower the sysctl |
 
 ## 8. Residual limitations
 
