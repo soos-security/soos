@@ -205,6 +205,14 @@ for unit in soos-push-sender@.socket soos-push-sender@.service; do
 done
 rm -f "${TARGET_SYSTEMD_DIR}/soos-push-sender@.socket"
 rm -f "${TARGET_SYSTEMD_DIR}/soos-push-sender@.service"
+# The --prefix drop-in of install.sh; a symbolic link is never followed.
+PUSH_SENDER_DROP_IN_DIR="${TARGET_SYSTEMD_DIR}/soos-push-sender@.service.d"
+if [[ -L "${PUSH_SENDER_DROP_IN_DIR}" ]]; then
+    warn "${PUSH_SENDER_DROP_IN_DIR} is a symbolic link: not followed, left in place."
+elif [[ -d "${PUSH_SENDER_DROP_IN_DIR}" ]]; then
+    rm -f "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
+    rmdir "${PUSH_SENDER_DROP_IN_DIR}" 2>/dev/null || true
+fi
 if [[ "${LIVE_SYSTEMD}" = true ]]; then
     systemctl daemon-reload 2>/dev/null || true
 fi

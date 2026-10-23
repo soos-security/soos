@@ -162,6 +162,14 @@ if [ "$1" -eq 0 ]; then
             systemctl stop "soos-push-sender@${instance}.service" || true
         done
     fi
+    # A prefix drop-in written by scripts/install.sh (recognised by its marker line) would
+    # override the packaged unit later: remove it with the package.
+    drop_in=/etc/systemd/system/soos-push-sender@.service.d/prefix.conf
+    if [ -f "$drop_in" ] && [ ! -L "$drop_in" ] \
+            && grep -q '^# Written by scripts/install.sh for --prefix ' "$drop_in"; then
+        rm -f "$drop_in"
+        rmdir /etc/systemd/system/soos-push-sender@.service.d 2>/dev/null || true
+    fi
 fi
 
 # On package removal, leave authselect on a valid profile before the custom

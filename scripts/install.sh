@@ -131,6 +131,28 @@ OPTIONAL_ARTIFACTS=(soos-lockstatus soos-lock-widget)
 # per desktop user is enabled by scripts/setup.sh or the administrator.
 PUSH_SENDER_ARTIFACT="soos-push-sender"
 PUSH_SENDER_UNITS=(soos-push-sender@.socket soos-push-sender@.service)
+# The units name /usr/libexec/soos/soos-push-sender; with another --prefix a drop-in resets
+# ExecStart= to <prefix>/libexec/soos/soos-push-sender (lead decision of 2026-10-23).
+PUSH_SENDER_DROP_IN_NAME="soos-push-sender@.service.d"
+readonly PUSH_SENDER_PREFIX_RE='^(/[A-Za-z0-9._+-]+)+$'
+
+# A prefix the drop-in can name: absolute and normalised (no empty, `.` or `..` component, no
+# trailing slash), only characters that need no quoting in a unit file, and outside the paths
+# the sender's sandbox hides.
+push_sender_prefix_ok() {
+    local prefix="$1" component
+    local -a parts=()
+    [[ "${prefix}" =~ ${PUSH_SENDER_PREFIX_RE} ]] || return 1
+    IFS=/ read -r -a parts <<< "${prefix#/}"
+    for component in "${parts[@]}"; do
+        [[ "${component}" == "." || "${component}" == ".." ]] && return 1
+    done
+    case "${prefix}/" in
+        /home/*|/root/*|/run/*|/tmp/*|/var/tmp/*|/var/log/*|/var/lib/systemd/coredump/*|/proc/*|/sys/*|/dev/*)
+            return 1 ;;
+    esac
+    return 0
+}
 GNOME_EXTENSION_UUID="soos-lockscreen@soos"
 GNOME_EXTENSION_FILES=(metadata.json extension.js stylesheet.css)
 
@@ -668,8 +690,8 @@ if [[ -n "${RESOLVED_ARTIFACT_DIR:-}" ]]; then
             [[ -f "${WORKSPACE_ROOT}/packaging/${unit}" ]] \
                 || preflight_fail "Push sender unit missing from the checkout: packaging/${unit}"
         done
-        if [[ "${PREFIX}" != "/usr" ]]; then
-            warn "--prefix ${PREFIX}: the push sender units run /usr/libexec/soos/soos-push-sender, not ${PREFIX}/libexec/soos/soos-push-sender."
+        if [[ "${PREFIX}" != "/usr" ]] && ! push_sender_prefix_ok "${PREFIX}"; then
+            preflight_fail "--prefix ${PREFIX}: the push sender unit cannot run a binary there (a drop-in needs an absolute, normalised path of letters, digits and . _ + - outside /home, /root, /run, /tmp, /var/tmp, /var/log and the kernel file systems, which its sandbox hides)."
         fi
     else
         info "Optional push sender not built, skipped: ${PUSH_SENDER_ARTIFACT} (cargo build --release --locked --workspace builds it)"
@@ -984,6 +1006,33 @@ if [[ -n "${ARTIFACT_PATHS[${PUSH_SENDER_ARTIFACT}]:-}" ]]; then
         tracked_install 0644 "${WORKSPACE_ROOT}/packaging/${unit}" "${TARGET_SYSTEMD_DIR}/${unit}"
         success "Installed ${TARGET_SYSTEMD_DIR}/${unit}"
     done
+    PUSH_SENDER_DROP_IN_DIR="${TARGET_SYSTEMD_DIR}/${PUSH_SENDER_DROP_IN_NAME}"
+    if [[ -L "${PUSH_SENDER_DROP_IN_DIR}" || -L "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" ]]; then
+        error "Refusing to write the push sender drop-in through the symbolic link ${PUSH_SENDER_DROP_IN_DIR}"
+        exit 1
+    fi
+    if [[ "${PREFIX}" != "/usr" ]]; then
+        ensure_dir "${PUSH_SENDER_DROP_IN_DIR}" 0755
+        PUSH_SENDER_DROP_IN_SRC="${BACKUP_DIR}/push-sender-prefix.conf"
+        printf '%s\n' \
+            "# Written by scripts/install.sh for --prefix ${PREFIX} (ADR 2026-10-23 \"Push Sender as a Sandboxed System Service\")." \
+            "# The shipped unit runs /usr/libexec/soos/soos-push-sender; this install put it under ${PREFIX}." \
+            "# Removed by scripts/uninstall.sh and by a package removal." \
+            "[Service]" \
+            "ExecStart=" \
+            "ExecStart=${PREFIX}/libexec/soos/soos-push-sender --system-instance %i" \
+            > "${PUSH_SENDER_DROP_IN_SRC}"
+        tracked_install 0644 "${PUSH_SENDER_DROP_IN_SRC}" "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
+        success "Installed ${PUSH_SENDER_DROP_IN_DIR}/prefix.conf (ExecStart=${PREFIX}/libexec/soos/soos-push-sender)"
+    elif [[ -e "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" ]]; then
+        # A stale drop-in of an earlier --prefix install: journaled removal (restored on rollback).
+        PUSH_SENDER_DROP_IN_BACKUP="${BACKUP_DIR}/${#JOURNAL_BACKUP_ORIG[@]}"
+        cp -a -- "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf" "${PUSH_SENDER_DROP_IN_BACKUP}"
+        JOURNAL_BACKUP_ORIG+=("${PUSH_SENDER_DROP_IN_DIR}/prefix.conf")
+        JOURNAL_BACKUP_COPY+=("${PUSH_SENDER_DROP_IN_BACKUP}")
+        rm -f -- "${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
+        success "Removed the stale push sender drop-in ${PUSH_SENDER_DROP_IN_DIR}/prefix.conf"
+    fi
 fi
 
 # 6a. Record the pre-install PAM state (GitHub #166): scripts/uninstall.sh
