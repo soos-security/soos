@@ -1,9 +1,9 @@
 # Candid Review Report
 
 - **Date**: 2026-10-23
-- **Target Branch**: `fix/clipboard-win-yanked` (commit `7fc6068`)
+- **Target Branch**: `fix/clipboard-win-yanked` (commits `7fc6068`, `6bf7a59`)
 - **Base (merge-base)**: `fb2a0bf` (`origin/main`)
-- **Reviewed-Diff-Fingerprint**: `1eb33a6c4d45fd84ab81067fd1700cc4c668e632754c22cbb0638c831e9488a4`
+- **Reviewed-Diff-Fingerprint**: `7c4e7709a93ea144493b5aa9bf315c623b41812c85dff9c37fee2b92205163b7`
 - **Audited Files**: `Cargo.lock`, `AI/walkthroughs/253_clipboard_win_yanked.md`
 
 ## 1. Executive Summary
@@ -81,10 +81,13 @@ Mechanical listing from `target/candid_diff.patch`:
 
 ## 4. Detailed Findings & Action Items
 
-1. (Non-blocking, documentation) The walkthrough and commit message say "every `clipboard-win` release up
-   to 5.4.1 was yanked". The yanked range is actually 5.2.0 to 5.4.1; 5.1.0, 5.0.0 and 4.x are not yanked.
-   The walkthrough also does not give the yank reason (upstream #42, out-of-bounds read in
-   `raw::get_html`). Optional follow-up wording fix; it does not affect the change.
+1. (Resolved in `6bf7a59`) The walkthrough said "every `clipboard-win` release up to 5.4.1" was yanked and
+   gave no reason. It now states the yanked range 5.2.0 to 5.4.1 and the reason: upstream #42, an
+   out-of-bounds read in `raw::get_html` fixed by a bounds-checked slice in 5.4.3. Both claims were
+   re-checked against crates.io and the source diff and are accurate.
+2. (Non-blocking, cosmetic) The subject line of commit `7fc6068` still says "up to 5.4.1", and one
+   rewrapped walkthrough line exceeds the surrounding wrap width. The squash-merge message can carry the
+   corrected wording.
 
 ## 5. Final Verdict
 
