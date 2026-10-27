@@ -162,7 +162,7 @@ jobs:
       - name: Install Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install --profile minimal && rustc --version && cargo clippy --version
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Only main writes caches; PRs restore them (avoids cache thrash and poisoning).
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -222,7 +222,7 @@ jobs:
       - name: Install Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install --profile minimal && rustc --version
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -283,7 +283,7 @@ jobs:
           persist-credentials: false
 
       - name: Install cargo-deny (prebuilt, checksum-verified)
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2
 
@@ -681,7 +681,7 @@ jobs:
       - name: Install Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install --profile minimal && rustc --version && cargo clippy --version
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
