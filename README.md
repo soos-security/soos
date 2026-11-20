@@ -49,7 +49,7 @@ Every feature below is merged on `main` and documented.
 |---|---|---|
 | Face verification in PAM | `pam_soos.so` for `sudo`, console login, screen lockers and GDM, with password fallback | [`Docs/PAM_MODULE.md`](Docs/PAM_MODULE.md), [`Docs/DISTRIBUTION_DEPLOYMENT.md`](Docs/DISTRIBUTION_DEPLOYMENT.md) |
 | Presence auto-unlock | Unlocks your locked local session when your face is seen (GNOME, KDE Plasma; wlroots lockers through `swayidle` hooks); respects `pam_faillock` and account expiry; on by default and easy to turn off | [`Docs/DAEMON.md`](Docs/DAEMON.md) §6 |
-| One-command setup | `scripts/setup.sh` detects the host, installs the build dependencies and the pinned Rust toolchain, builds, installs and enrolls your face; with your Tailscale login and node name it also sets up the phone companion with every feature on; PAM activation stays a separate step | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0 |
+| One-command setup | `scripts/setup.sh` detects the host, installs the build dependencies and the pinned Rust toolchain, builds, installs and enrolls your face; with your Tailscale login and node name it also sets up the phone companion with every feature on except remote unlock and the camera view over Funnel, which it asks about; PAM activation stays a separate step | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §3.0 |
 | Packages and installer | `.deb`, `.rpm` and Arch packages, a fail-closed installer that rolls back on error, upgrade and uninstall procedures | [`Docs/PACKAGING_AND_PROVISIONING.md`](Docs/PACKAGING_AND_PROVISIONING.md) §7, §9 |
 | Desktop app `soos-gui` | Live diagnostic, guided enrollment with liveness checks, enrolled profiles, first-run tour with feature switches | [`Docs/GUI_APPLICATION.md`](Docs/GUI_APPLICATION.md) |
 | Lock-screen widget | Shows on the lock screen whether soos is scanning your face: a swaylock-plugin background widget, a hyprlock label and a GNOME Shell 45+ extension (a KDE Plasma adapter comes later) | [`Docs/LOCKSCREEN_WIDGET.md`](Docs/LOCKSCREEN_WIDGET.md) |
@@ -108,7 +108,8 @@ running it again is safe. It enrolls your face only from a local seat (from SSH 
 at the PC), stops `soos-daemon` during the enrollment (the daemon owns the camera) and starts it again. Presence
 auto-unlock stays on (`--presence off` turns it off). It does **not** activate PAM (step 4 stays explicit).
 With your Tailscale login and node name (`--tailscale-login you@example.com --rp-id mypc.tail1234.ts.net`, or
-asked interactively) it also sets up the phone companion as you, with every feature on (all but the failed-password
+asked interactively) it also sets up the phone companion as you, with every feature on except remote unlock and the
+camera view over Funnel, which it asks about (all but the failed-password
 alerts can be turned off later in soos-gui, and every key in `remote.toml` together with the keys that depend
 on it, see the [Security model](#security-model)), and prints the Tailscale and passkey steps it never runs
 itself; `--no-remote` skips it. A `remote.toml` you wrote yourself is first saved as
@@ -305,15 +306,21 @@ of trust.
   or mask may still pass.
 - **Phone companion.** When it sets up the companion, the one-command setup (`scripts/setup.sh`) writes
   `remote.toml` (in `~/.config/soos/`, or `$XDG_CONFIG_HOME/soos/`) with Internet access through Tailscale
-  Funnel (`allow_funnel`), remote unlock (`allow_unlock`) and the live camera view, on the tailnet and over
-  Funnel (`camera_view`, `camera_view_funnel`), turned on, together with the failed-password, push and offline
-  alerts. Each of the four is passkey-protected: a request over Funnel needs a passkey sign-in, every unlock
+  Funnel (`allow_funnel`) and the live camera view on the tailnet (`camera_view`) turned on, together with the
+  failed-password, push and offline alerts. Remote unlock (`allow_unlock`) and the camera view over Funnel
+  (`camera_view_funnel`) stay off unless you pass `--remote-unlock on` or `--camera-view-funnel on`, answer
+  yes to their own question in an interactive run, or your `remote.toml` already sets them `true`; a re-run
+  never turns on a key your file leaves out. Setup also keeps your `allowed_hosts` (pinned to the node name),
+  `push_previews`, `battery_status`, `lock_screen_programs` and `credentials_path` when it rewrites the file.
+  Each of the four is passkey-protected: a request over Funnel needs a passkey sign-in, every unlock
   needs a fresh passkey check with user verification, and every camera view starts with one. On the tailnet,
   status and lock need no passkey. Funnel, remote unlock, the camera view, push and offline alerts each have an
   off switch in `soos-gui` (the feature switches of the `soos-gui` first-run tour, also reached with its
   **Features** button; the two phone tours, in the web app and in the native Android app, switch nothing and
   only say where each feature is turned off); turning Funnel or the camera view off there also sets
-  `camera_view_funnel` to `false`, and turning push off also sets `offline_alerts` to `false`. While
+  `camera_view_funnel` to `false`, and turning push off also sets `offline_alerts` to `false`. Turning Funnel
+  off there refuses every Funnel request with `403` but leaves the public Funnel listener published until you
+  remove it with the Tailscale command the tour shows. While
   `remote.toml` has an `[android]` table, `soos-gui` does not turn Internet access (`allow_funnel`) off: remove
   that table first. The failed-password alerts have no switch there. These offline alerts are the back-online
   notifications sent by `soos-remote` (`offline_alerts`, [`Docs/REMOTE_COMPANION.md`](Docs/REMOTE_COMPANION.md)

@@ -1,168 +1,127 @@
 # Candid Review Report
 
-- **Date**: 2026-10-23
-- **Target Branch**: `feat/setup-preflight-deps`
-- **Base (merge-base)**: `d5e3c09`
-- **Reviewed-Diff-Fingerprint**: `443966868121a10ec6348439ee36d3240679fac85ae4d6bb7d7477c5e3fbe38e`
-- **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/architect_spec_one_command_setup.md`, `AI/auditor_constraints_setup_preflight_deps.md`,
-  `AI/plan_evaluator_report.md`, `AI/walkthroughs/256_setup_preflight_deps.md`,
-  `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`,
-  `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/check_build_deps.sh`,
-  `scripts/install.sh`, `scripts/setup.sh`, `scripts/uninstall.sh`,
-  `tests/docker/setup_packages_test.sh`, `tests/fixtures/setup/remote_android.toml`,
-  `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`,
-  `tests/invariants/src/setup_deps_contract.rs`, `tests/invariants/src/setup_scanner_contract.rs`,
+- **Date**: 2026-11-20
+- **Target Branch**: `fix/setup-remote-defaults`
+- **Base (merge-base)**: `0cce947`
+- **Reviewed-Diff-Fingerprint**: `45502ca6f051bb8d007e662993516ea5e05015017a4f8c823aabd49f24552b00`
+- **Audited Files**: `AI/ARCHITECTURE.md`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+  `AI/walkthroughs/259_setup_remote_defaults.md`, `Docs/GUI_APPLICATION.md`,
+  `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`, `README.md`,
+  `android/app/src/main/res/values/strings.xml`, `crates/gui/src/onboarding.rs`,
+  `crates/gui/src/onboarding_view.rs`, `crates/gui/tests/onboarding_feature_tests.rs`,
+  `crates/remote/assets/app.js`, `crates/remote/tests/setup_render_tests.rs`,
+  `scripts/install_remote.sh`, `scripts/setup.sh`, `tests/fixtures/setup/remote.toml`,
+  `tests/fixtures/setup/remote_android.toml`, `tests/fixtures/setup/remote_carried.toml`,
+  `tests/invariants/src/readme_contract.rs`, `tests/invariants/src/setup_deps_contract.rs`,
   `tests/invariants/src/setup_user_phase_contract.rs`
 
 ## 1. Executive Summary
 
-PR A of the one-command setup (GitHub #362, owner decisions of 2026-10-23; spec §5, §6, §19,
-§20): `companion` and `android` package groups in `check_build_deps.sh`, the scoped
-`REQUIRED_TOOLS` table of `setup.sh` with a lexer-based coverage invariant (SDP3), a preflight of
-every requested group, the `remote.toml.bak-<UTC>` backup of a user-written `remote.toml` with a
-tolerant fail-safe parser, the trailing `[android]` table of the managed grammar, a
-digest-pinned Docker package matrix job, and the #473 drop-in follow-ups.
+Security review batch 3 (GitHub #480): findings #548 GUI-03, #597 RCFG-02, #625 SETB-01,
+#626 SETB-02, #627 SETB-03, #629 SETBB-01. The diff touches only setup scripts, the GUI tour text,
+the web/Android tour strings, docs and tests; no PAM, FFI, daemon or `soos-remote` runtime code.
+Reviewed against the batch issue, each finding's fix-design caveats, `AI/ARCHITECTURE.md` and
+`Docs/SECURITY_AND_QUALITY_GUIDELINES.md`. No CRITICAL or MAJOR finding. Four MINOR items, two
+of them owner questions already recorded as deferrals in the ADR and walkthrough.
 
-Second review round. Round 1 (at `6209533`) raised one MAJOR finding: a TOML quoted key
-(`"allow_funnel" = false`, `'allow_unlock' = false`) was silently skipped by the line parser, so
-setup's default profile turned Funnel and remote unlock on against the user's written `false`.
-It is fixed in `dcbcc47` (bare, double- and single-quoted keys; any unparsed top-level line that
-names a feature key forces it off and lists it as not recognized; multi-line strings and arrays
-tracked so a `[` line inside them is not a header) and pinned by SDP27. The two MINOR round-1
-items are also fixed: the drop-in marker is checked on the first line only, on a regular
-non-link file, in `install.sh` and `uninstall.sh` (SDP29), and the `optional` scope is enforced
-by SDP28.
+Tests run by the reviewer (per-worktree target dir, `CARGO_INCREMENTAL=0`, `CARGO_BUILD_JOBS=3`,
+`--test-threads=4`): `soos-invariants` 932 passed / 0 failed; `soos-remote` `setup_render_tests`
+5 passed; `soos-gui` `onboarding_feature_tests` 29 passed. `bash -n` clean on both scripts.
 
-Rebind after `e14b604` (round 3). The developer closed the two MINOR fail-open residuals of
-round 2 (escaped keys, and an escaped quote before `"""`; see §4). The reviewer proved each
-SDP27 case red:
+## 2. Test Changes (mechanical listing, with justification)
 
-- `escapedkey` against the round-2 `setup.sh` of `5f7f315`;
-- `escapedquotes` against the current `setup.sh` with only the `count_of` hunk removed.
+Removed/changed assertion lines found by the step-3 grep: the `ARCHITECTURE.md` Unlock row (doc,
+not a test), `assert!(config.allow_unlock)` in `setup_render_tests.rs` (now
+`assert!(!config.allow_unlock)` on the default fixture, and the all-on variant still asserts
+`allow_unlock` and `camera.funnel` on), and one `assert_eq!(written, managed(LOGIN, [true; 7], ...))`
+in SDP16 (reformatted to the new default vector). No `#[ignore]`, `should_panic`, tolerance or
+inline test-module change.
 
-Both are green on this tree. No test line was removed in this round.
-
-Gates re-run on this tree: `cargo fmt --check`; workspace clippy (all targets, all features,
-`-D warnings`); `cargo test -p soos-invariants -p soos-remote --test-threads=3` (invariants 923
-passed, every suite green, 0 failed); shellcheck on every touched script (no error-severity
-finding; `setup.sh`, `check_build_deps.sh` and the Docker test are fully clean, and the
-`install.sh`/`uninstall.sh` warnings already exist on `origin/main`); and, in round 1,
-`tests/docker/setup_packages_test.sh` (every name resolves on ubuntu:24.04, fedora:40, fedora:44
-and arch, with the asserted Fedora `java` gap). The package lists did not change since. The
-remaining findings are MINOR only.
-
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
-
-Removed or changed pre-existing lines in `git diff origin/main...HEAD -- tests crates/*/tests`
-(19 lines; everything else is an addition). Every line is in the owner-approved or acknowledged
-set; no other pre-existing assertion changed. Rounds 2 and 3 (`a25b60e`..`defac7e`) only add
-tests.
-
-- `tests/invariants/src/setup_user_phase_contract.rs`
-  `test_set_u12_template_replaced_user_file_untouched`: `let before = h.snapshot();`, the
-  expected exit code `2` (now `0`) and `assert_eq!(before, h.snapshot());` are replaced by the
-  owner-approved M1. M1 checks: exit 0, exactly one byte-equal 0600 `remote.toml.bak-<YYYYmmddTHHMMSSZ>`, managed file
-  `[false,true,true,true,true,true,false]`, no `funnel --bg`. The `--yes` case becomes M2
-  (identity from the file, backup, managed file, units enabled, no Tailscale change command). The
-  former "kept" assertions are carried unchanged onto a new no-identity user file, plus an added
-  "no backup" assertion.
-- Same file, `Harness::new`: `for group in ["build", "models", "gui"]` gains `"companion"`, and
-  inert `jq`/`dig` log-only stubs are added. This is harness wiring M3 (acknowledged): setup never
-  runs either tool in PR A, so the stubs cannot make a test pass vacuously.
-- Same file, `test_pss16_system_up_to_date_includes_the_push_sender`: setup-only fixture
-  M17 (approved). It writes the `prefix.conf` drop-in that `install.sh` leaves for the fake
-  non-`/usr` prefix. No assertion changes.
-- `tests/invariants/src/setup_scanner_contract.rs`: `struct ShCmd` and its fields, `try_lex`,
-  `lex`, `unquote`, `assignment_prefix`, `VarRef`, `variable_refs`, `names_fixed_program`,
-  `Origin`, `script_assignments` and `command_word_index` become `pub(crate)`. This is a
-  visibility change only (acknowledged, §20 F6), and every SCN test body is byte-identical.
-- `tests/invariants/src/setup_contract.rs`: `cksum` is appended to `SAFE_TOOLS` (M3 wiring).
-- `crates/remote/tests/setup_render_tests.rs`: the import line adds `parse_config_with_android`
-  (for the new SDP25 test).
-
-CI portability: the new harness labels user calls `uid=1000` (fixed role label). The real uid
-only feeds the `id` stub and `SUDO_UID`, so CI runners with uid 1001 behave the same.
+Every changed expectation in `setup_user_phase_contract.rs` (SET23, SET24, SET27, SET30, SET38),
+`setup_deps_contract.rs` (SDP9, SDP10, SDP14, SDP16, SDP18, SDP27), `readme_contract.rs` (RDM12)
+and the two fixtures was diffed line by line: each flips only index 1 (`allow_unlock`) and/or
+index 6 (`camera_view_funnel`) from `true` to `false`, or removes `allow_unlock` from the
+"turned on by setup's default profile" note, or narrows RDM12's expected on-set to the keys setup
+still turns on. All fall within the owner-approved batch-3 migration of the old ON defaults
+(decision of 2026-11-20). Setup-only changes (SET26 and the SET33 restart case pass
+`--remote-unlock on` / `--camera-view-funnel on`; `with_off` starts from `fixture_all_on()`)
+leave every assertion unchanged and are needed only because the default changed; they are listed
+in walkthrough 259. No other test is weakened. New tests: SRD1-SRD8 (invariants), SRD6 render
+parse (`soos-remote`), GUI-03 tour test (`soos-gui`).
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Preflight:**
-  - `check_scope_tools base` and `family:<f>` run before any change (exit 2, `command -v` only).
-  - Group tools are checked after the package step and before the build. A missing `companion` tool is non-fatal (R1-3), and in PR A no group with entries other than `companion` is ever requested.
-  - `cargo` is checked after `install_rustup.sh` (exit 1).
-- **SDP3 coverage, verified by mutation:** I injected `frobnicate --x`, `X="$(tr a b <<< c)"`,
-  `… | sed -n p`, `run_bounded 5 udevadm settle` and `if ! awk …` into `setup.sh` one at a
-  time. SDP3 failed for each and named the tool. The tree was restored byte for byte.
-- **User file:** with an identity (options first, then the file) it is backed up and replaced; without one it is
-  kept as before (M2, §20 F3). An oversized file is refused in preflight (§20 F4).
-- **`[android]` binding:** an `[android]` binding while Funnel resolves off is refused in preflight. The managed grammar
-  keeps a trailing strict `[android]` block and re-renders it last.
-- **Push sender drop-in:** `push_sender_drop_in_current` reads only a regular non-link file. Its first-line rule now
-  matches `install.sh` and `uninstall.sh`. With `/usr`, a marked stale file forces an install.sh
-  run that removes it.
+- SETB-01: `resolve_features` now resolves option, then explicit file value (true or false), then
+  the default; `ASKED_KEYS` default off unless an interactive yes. Tried: `--yes` fresh run (off),
+  managed file with both lines deleted (written off, SRD2), user file with absent keys (off, not
+  named in the default-profile note), `--yes` with `--remote-unlock on` (on). PASS.
+- Questions only when `INTERACTIVE` (excludes `--yes`, `--dry-run`, non-tty); default no on
+  empty input or EOF; skipped when an option or file value decides or a prerequisite is off. PASS.
+- SETB-02 / SETBB-01: `toml_scan_line` replaces `count_of`/`bracket_depth`. Adversarial inputs
+  were run against the extracted functions and compared with Python `tomllib`: line-ending
+  backslash in `"""`, `'''` closed by four quotes, `"""` closed by five quotes, inline table
+  containing `"]"`, array with a comment containing `]`, `"a\\"`, `\"""` inside `"""`, literal
+  ending in a backslash, a real header followed by a key. Every case agreed with TOML on which
+  top-level booleans exist. Unclosed constructs, a stray `]` and a bare backslash set
+  `USER_UNMODELED` and turn every feature off (SRD5). The caveat (follow the real opener, and fail
+  safe on any construct the reader cannot model) is respected. PASS.
+- RCFG-02: carried keys pass a strict grammar; a `credentials_path` that cannot be written back
+  refuses the run before any change (the verifier's safer option) rather than silently reverting
+  the passkey store. The path grammar is stricter than `validate_credentials_path` and bounded
+  like `soos-remote`. `allowed_hosts` is pinned only when the file already sets it (MINOR 1).
+  PASS with a recorded deferral.
+- SETB-03: the guide prints `tailscale serve status` and the port-443 warning before the Funnel
+  command, in both `setup.sh` and `install_remote.sh`; setup still runs no tailscale command
+  except `tailscale version` and never contains `--https` (SET3). PASS.
+- GUI-03: the Off line is corrected in the three tours (kept equal, PTR-S5 green); the GUI shows a
+  copyable command block and never runs `tailscale`; the accepted residual is recorded. PASS.
 
 ### PAM Concurrency & Deadlines
-Not touched: no PAM, FFI or daemon code changes. Setup's bounded calls (`run_bounded`) are
-unchanged.
+- No file under `crates/pam` or the daemon is touched. N/A, PASS.
 
 ### Panic Safety & Fail-Closed
-- **Fail-safe parser.** I ran the extracted parser on adversarial inputs:
-  - **Kept off, as required:** double- and single-quoted keys, tabs, CRLF, `false` then `true` duplicates (`false` wins), dotted keys, inline tables, a UTF-8 BOM, Unicode quotes, unterminated multi-line strings, `[` lines inside multi-line strings and arrays, `'''` literals, and comments naming a key. Every written `false` stayed `false`. Ambiguity only ever turns keys off.
-- **Keys below a real table header are ignored** (spec R2-1, SDP14). This opens no path for a valid config: `FileConfig` and `FileAndroid` use `deny_unknown_fields`, and `[android]` is the only table, so soos-remote refuses any feature key under a header.
-- **Round-3 adversarial run, all fail-safe:**
-  - Quoted feature keys spelled with a short or long TOML unicode escape turn every feature key off.
-  - An escaped quote followed by `""` keeps a multi-line basic string open.
-  - An escaped backslash followed by `"""` closes the string, and the `[x]` line that follows is a real header, as in TOML.
-  - A backslash inside a value (a `mailto:` subject, a Windows-style path, `"a=b"` with a backslash) changes nothing, because only text before the first `=` triggers the rule.
-  - A comment line with a backslash is skipped before the rule applies.
-  - Every round-2 input still keeps the written `false`.
-- **No known residual input enables a feature the user wrote `false` for.**
-- **Backup:**
-  - **Creation:** `set -C` (O_EXCL) under `umask 077`; a name that exists or is a link (dangling included) is skipped; suffixes go up to `-9`, then the run fails with nothing replaced; the read is bounded by `head -c`; `cmp` runs before the replacement.
-  - **Never deleted:** setup does not remove the backup.
-  - **Rollback:** restores through a temporary file and rename under `set +e`.
-  - **Privilege:** the companion phase runs as the session owner, so there is no cross-privilege race.
+- No new `unwrap`/`expect` in production Rust (a `const`, a `match` and egui view code only). No
+  path converts an error into `PAM_SUCCESS`. Script failure modes fail safe: an unreadable file
+  keeps every feature off; a bad `credentials_path` exits 2 before any change. PASS.
 
 ### Test Integrity & Anti-Weakening
-See §2: only approved or acknowledged lines changed. SDP27 to SDP29 are additions, and their synthetic
-self-checks reject and accept as stated. The SDP28 guard check is heuristic (a `command -v
-<tool>` anywhere in the function or in all of its callers up to depth 3), which is enough for the
-current call sites.
+- See section 2. The new tests target the old defects: SRD4 rows reproduce the issue bodies of
+  #626/#629 and check the default-on keys `allow_funnel`/`camera_view`, so they distinguish the
+  old parser; SRD6 checks the carried render byte-exact and parses it with the real `soos-remote`
+  parser. PASS.
 
 ### Memory, Bounds & Secrets
-- **Bounded reads:** the user file is read only through `head -c MAX_REMOTE_CONFIG_BYTES`, and nothing is sourced or evaluated.
-- **No values printed:** plan and result lines print only key names, reduced to `[A-Za-z0-9_.-]` and capped at `MAX_REPORTED_KEYS`. SDP14 and SDP27 assert that no value is printed.
-- **Login:** never printed, and never passed to the root half.
+- Reads stay bounded by `MAX_REMOTE_CONFIG_BYTES`; nothing is sourced or evaluated; carried
+  values cannot break out of a TOML string (the character class excludes quotes and
+  backslashes); the notes print key names only, never values (SRD5/SRD6 check that no value or
+  path is printed). PASS.
 
 ### Supply Chain & Automation
-The `setup-packages` job:
-- uses the pinned `actions/checkout` SHA with `persist-credentials: false`, under workflow-level `contents: read`;
-- uses no secrets;
-- runs digest-pinned images in unprivileged containers on a read-only mount;
-- has a 60-minute ceiling and is required through `ci-success`.
-
-`setup.sh` adds no `curl`, `wget`, repository or Tailscale command.
+- No `Cargo.*`, `deny.toml`, `.github/` or hook change; no new external command in `setup.sh`
+  (SDP3 green). PASS.
 
 ### English-Only Policy
-All code, comments, docs, the walkthrough and commit messages are in English (checked on the
-diff).
+- All added text is English; no host-specific path, login or private review material in the
+  diff. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. **CLOSED (round 3), escaped quoted keys.** A quoted key that spells a feature key with a
-   TOML escape sequence (valid TOML, the same key for soos-remote) now turns all seven feature
-   keys off and names them. The rule is a backslash before the first `=` of a top-level line.
-   Pinned by SDP27 `escapedkey`.
-2. **CLOSED (round 3), an escaped quote before `"""` inside a multi-line basic string.**
-   `count_of` drops the escaped backslash and escaped quote pairs before counting the delimiter,
-   so the string stays open and its `[x]` line is not read as a header. Pinned by SDP27
-   `escapedquotes`.
-3. **CLOSED (round 3), `scripts/install.sh` `drop_in_first`:** now initialised at top level.
-4. **INFO, SDP3 lexer:** it does not resolve `find -exec <cmd>` or `xargs <cmd>` targets. Neither
-   is used in `setup.sh` today.
-
-No CRITICAL or MAJOR finding remains.
+- **[MINOR]** `scripts/setup.sh:1554` — `allowed_hosts = ["<rp_id>"]` is rendered only when the
+  existing file already sets `allowed_hosts`; fresh installs still leave the host allowlist at
+  "any `*.ts.net`". Deferred as an owner question in the ADR and walkthrough (it needs changes to
+  byte-exact render tests outside the approved migration). Keep #597 open, or record the
+  deferral explicitly when closing it.
+- **[MINOR]** `scripts/setup.sh` `resolve_features` — an install made with the former default
+  keeps `allow_unlock = true` / `camera_view_funnel = true` on a re-run, because setup cannot tell
+  a value it wrote by default from an owner choice; the guide's risk line names them, but no
+  question is asked. Owner question; consider a one-time note on re-run when both are `true` in a
+  managed file.
+- **[MINOR]** `scripts/setup.sh:2379` — the refusal message says "one absolute path in double
+  quotes" while `carried_value` also accepts a single-quoted literal path; wording only.
+- **[MINOR]** `Docs/PACKAGING_AND_PROVISIONING.md` §3.0 — "carries over `allowed_hosts` (always
+  written as `["<rp_id>"]`)" can be read as a pin in every render; say "when the file sets it".
 
 ## 5. Final Verdict
+
 **VERDICT: APPROVED**

@@ -150,7 +150,9 @@ impl Feature {
             }
             Self::RemoteUnlock => "Off: the phone can still lock this PC, never unlock it.",
             Self::InternetAccess => {
-                "Off: the page is reachable only from devices signed in to your tailnet."
+                "Off: requests from the Internet are refused with 403, so only devices signed in \
+                 to your tailnet can use the page; the public Funnel listener stays published \
+                 until you run tailscale funnel --https=443 off on this PC."
             }
             Self::PushAlerts => {
                 "Off: no notification is sent; alerts remain visible on the phone page."
@@ -164,6 +166,25 @@ impl Feature {
                 "Off: no offline history is recorded and no back-online notification is sent; \
                  push alerts keep working."
             }
+        }
+    }
+}
+
+/// Tailscale commands that remove the public Funnel listener and restore the tailnet-only
+/// handler (`Docs/REMOTE_COMPANION.md` section 2b). Shown when Internet access is off: the GUI
+/// only sets `allow_funnel = false`, which refuses Funnel requests with 403 but leaves the
+/// listener published, and it never runs `tailscale` itself (GitHub #480, GUI-03).
+pub const FUNNEL_LISTENER_OFF_COMMANDS: &str = "tailscale funnel --https=443 off\n\
+     # if tailscale serve status no longer lists the companion socket:\n\
+     tailscale serve --bg unix:$XDG_RUNTIME_DIR/soos-remote/remote.sock";
+
+impl Feature {
+    /// Commands the owner runs after turning the feature off, when the switch alone does not
+    /// undo everything (only Internet access: the public Funnel listener stays published).
+    pub fn off_follow_up(self) -> Option<&'static str> {
+        match self {
+            Self::InternetAccess => Some(FUNNEL_LISTENER_OFF_COMMANDS),
+            _ => None,
         }
     }
 }

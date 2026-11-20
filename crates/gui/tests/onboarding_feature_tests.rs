@@ -650,3 +650,35 @@ fn test_obt_presence_off_on_both_sides_shows_the_daemon_command_first() {
         other => panic!("expected a command, got {other:?}"),
     }
 }
+
+/// SRD (GitHub #480, GUI-03): turning Internet access off refuses Funnel requests with 403 but
+/// leaves the public Funnel listener published, so the off text never claims tailnet-only
+/// reachability and the tour shows the Tailscale commands that remove the listener (the GUI
+/// never runs them). No other feature has such a follow-up.
+#[test]
+fn test_obt_internet_access_off_names_the_public_listener() {
+    let off = Feature::InternetAccess.when_off();
+    assert!(
+        !off.contains("reachable only from devices"),
+        "the off text must not claim tailnet-only reachability: {off}"
+    );
+    assert!(off.contains("403"), "{off}");
+    assert!(off.to_ascii_lowercase().contains("listener"), "{off}");
+    let commands = Feature::InternetAccess
+        .off_follow_up()
+        .expect("Internet access has an off follow-up");
+    assert!(
+        commands.contains("tailscale funnel --https=443 off"),
+        "{commands}"
+    );
+    assert!(
+        commands.contains("tailscale serve --bg unix:$XDG_RUNTIME_DIR/soos-remote/remote.sock"),
+        "{commands}"
+    );
+    assert!(commands.is_ascii());
+    for feature in FEATURES {
+        if feature != Feature::InternetAccess {
+            assert!(feature.off_follow_up().is_none(), "{feature:?}");
+        }
+    }
+}

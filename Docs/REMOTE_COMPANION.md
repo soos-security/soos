@@ -211,16 +211,34 @@ allow_unlock = true               # optional, section 2a
    agent runs `tailscale`):
 
    ```sh
+   tailscale serve status         # first: what this node already serves
    tailscale funnel --bg unix:$XDG_RUNTIME_DIR/soos-remote/remote.sock
-   tailscale funnel status        # must list https://<pc>.<tailnet>.ts.net (port 443) only
+   tailscale funnel status        # must list only `/` proxy unix:<that socket> on https://<pc>.<tailnet>.ts.net (port 443)
    ```
+
+   Funnel publishes every handler on port 443 of this node, not only the companion: Tailscale
+   allows Funnel per host and port, not per path, so another handler served on port 443 (for
+   example `tailscale serve --set-path /admin ...`) becomes reachable from the Internet too, and
+   the handler at `/` is replaced by the companion. Move any other port-443 handler to another
+   port before you run the command; `tailscale funnel status` must then list only `/` proxy unix:
+   followed by the companion socket. `scripts/setup.sh` and `scripts/install_remote.sh` print
+   the same check before their Funnel command (security review 2026-11-10, GitHub #480 SETB-03).
+   With Funnel on, whoever holds a passkey of this PC (for example a stolen phone that passes its
+   screen lock) can sign in from the Internet, see the lock state and lock the PC, and also unlock
+   it when `allow_unlock = true` and open the live camera when `camera_view_funnel = true`; setup
+   prints that list before the command.
 
    The public DNS name can take up to 10 minutes to resolve after the first activation. Tailnet
    clients (VPN on) keep reaching the same address directly and keep their Tailscale identity.
    To stop the public exposure: `tailscale funnel --https=443 off`, then, if
    `tailscale serve status` no longer lists the socket, restore the tailnet-only handler with
-   `tailscale serve --bg unix:$XDG_RUNTIME_DIR/soos-remote/remote.sock`; or simply set
-   `allow_funnel = false` and restart the unit (Funnel requests are then `403`).
+   `tailscale serve --bg unix:$XDG_RUNTIME_DIR/soos-remote/remote.sock`; or set
+   `allow_funnel = false` and restart the unit (Funnel requests are then `403`). Only the
+   Tailscale command removes the public listener: with `allow_funnel = false` (the soos-gui
+   Internet access switch writes exactly that) the node name stays published and `soos-remote`
+   still reads and parses each request head and checks its Host before refusing it with `403`
+   (accepted residual, security review 2026-11-10, GitHub #480 GUI-03; the soos-gui tour shows the
+   command when Internet access is off).
 3. With the VPN off, open the same address in the browser or the installed web app: *Sign in
    with your passkey* creates a web session (cookie `__Host-soos_session`, `Secure`, `HttpOnly`,
    `SameSite=Strict`, 15 min idle, 8 h at most, at most 4 sessions, stored on the PC only as a
@@ -1444,12 +1462,17 @@ Matrix rows PTR1–PTR11; invariant `remote_tour_contract`.
 ## 4. Installation (per user, no root)
 
 **One command.** `./scripts/setup.sh --tailscale-login you@example.com --rp-id <this-pc>.<tailnet>.ts.net`
-(run as yourself, not with `sudo`) installs soos and then this companion with every feature on
-(Funnel, remote unlock, camera view also over Funnel, password alerts, push, offline alerts; owner
-decisions of 2026-10-12 and 2026-10-15, GitHub #400): it writes a setup-managed `remote.toml`
+(run as yourself, not with `sudo`) installs soos and then this companion with Funnel, the camera
+view, password alerts, push and offline alerts on (owner decisions of 2026-10-12 and 2026-10-15,
+GitHub #400). Remote unlock and the camera view over Funnel stay off unless `--remote-unlock on` /
+`--camera-view-funnel on` is given, the existing `remote.toml` already sets them `true`, or you
+answer yes to their own question in an interactive run (default no); a re-run never turns on a key
+the file leaves out (security review 2026-11-10, GitHub #480). It writes a setup-managed `remote.toml`
 (mode 0600; a key you turned off later, for example in the soos-gui feature tour, stays off;
 a `remote.toml` you wrote yourself is first saved as `remote.toml.bak-<UTC>`, mode 0600, and its
-explicit `false` values and a valid trailing `[android]` table are kept),
+explicit `false` values, a valid trailing `[android]` table and the hardening keys `allowed_hosts`
+(written as `["<rp_id>"]`), `push_previews`, `battery_status`, `lock_screen_programs` and
+`credentials_path` are kept; a file setup cannot read entirely keeps every feature off),
 runs `scripts/install_remote.sh`, validates the file with `soos-remote passkeys list`, enables
 and starts the user units, creates the daemon `[preview]` section when `/etc/soos/daemon.toml`
 does not exist yet, and prints the steps below that need your Tailscale account (it runs no

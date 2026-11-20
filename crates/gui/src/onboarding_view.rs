@@ -330,6 +330,16 @@ fn feature_control(
         },
         _ => {}
     }
+    if state == FeatureState::Off {
+        if let Some(commands) = feature.off_follow_up() {
+            ui.add_space(6.0);
+            command_block(
+                ui,
+                "The public Funnel listener stays published; to remove it, run:",
+                commands,
+            );
+        }
+    }
 }
 
 fn footer(ui: &mut egui::Ui, tour: &Tour, busy: bool, events: &mut Vec<TourEvent>) {
