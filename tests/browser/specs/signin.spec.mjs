@@ -100,3 +100,61 @@ test("sign out drops this phone's notifications before ending the session", asyn
   expect(unsubscribeBody).toEqual({ endpoint: "endpoint-of-this-phone" });
   expect(await page.evaluate(() => window.soosPushRecord.unsubscribed)).toBe(1);
 });
+
+// RTI5b (independent review of #616): Sign out never waits on a worker registration. Here
+// register() never settles and no registration exists, so this phone has no subscription to
+// drop: the logout is still posted at once and the sign-in screen shows "Signed out".
+test("sign out still ends the session when the worker registration never settles", async ({ page, app }) => {
+  await ensureWebAuthnSurface(page);
+  await page.addInitScript(() => {
+    const record = { registerCalls: 0 };
+    window.soosPushRecord = record;
+    const container = {
+      register: () => {
+        record.registerCalls += 1;
+        return new Promise(() => {});
+      },
+      getRegistration: () => Promise.resolve(undefined),
+      ready: new Promise(() => {}),
+      addEventListener: () => {},
+    };
+    Object.defineProperty(Navigator.prototype, "serviceWorker", {
+      configurable: true,
+      get: () => container,
+    });
+    if (!("PushManager" in window)) {
+      window.PushManager = function PushManager() {};
+    }
+    if (!("Notification" in window)) {
+      window.Notification = { permission: "default", requestPermission: () => Promise.resolve("default") };
+    }
+  });
+  await fulfillJson(page, "/api/auth/state", SIGNED_IN_AUTH_STATE);
+  const order = [];
+  await page.route("**/api/push/unsubscribe", (route) => {
+    order.push("push-unsubscribe");
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ result: "unsubscribed" }),
+    });
+  });
+  await page.route("**/api/auth/logout", (route) => {
+    order.push("logout");
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ result: "logged_out" }),
+    });
+  });
+  await openApp(page, app);
+  const logout = page.locator("#logout");
+  await expect(logout).toBeVisible();
+  const registerCallsBefore = await page.evaluate(() => window.soosPushRecord.registerCalls);
+  await logout.click();
+  await expect(page.locator("#login")).toBeVisible();
+  await expect(page.locator("#login-feedback")).toHaveText("Signed out");
+  expect(order).toEqual(["logout"]);
+  // Sign out started no new registration.
+  expect(await page.evaluate(() => window.soosPushRecord.registerCalls)).toBe(registerCallsBefore);
+});

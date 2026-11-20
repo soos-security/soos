@@ -1202,11 +1202,25 @@ function requestLogin() {
 // this browser's endpoint (the request of "Disable notifications") before the logout, and the
 // browser subscription is dropped in the background, so a slow push service never delays the
 // logout. Best effort: every failure is ignored and the logout is always sent.
+// Sign out never registers a worker: register() may never settle, which would hold the logout
+// back. It reuses the registration already made (registerServiceWorker() then answers at once)
+// or looks up an existing one without waiting for any installation; with neither, there is no
+// subscription to drop.
 function dropPushSubscription() {
   if (!pushSupported()) {
     return Promise.resolve(null);
   }
-  return registerServiceWorker()
+  const lookup =
+    pushRegistration !== null
+      ? registerServiceWorker()
+      : Promise.resolve()
+          .then(function () {
+            return navigator.serviceWorker.getRegistration();
+          })
+          .then(function (registration) {
+            return registration || null;
+          });
+  return lookup
     .then(function (registration) {
       return registration === null ? null : registration.pushManager.getSubscription();
     })

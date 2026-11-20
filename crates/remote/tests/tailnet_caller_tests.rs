@@ -303,7 +303,17 @@ async fn test_rti2_one_login_cannot_lock_another_out() {
     );
 
     // The owner's failures do not lift or extend login A's lockout; it ends with its window.
-    h.advance_ms(AUTH_FAILURE_WINDOW_MS).await;
+    h.advance_ms(AUTH_FAILURE_WINDOW_MS / 2).await;
+    for _ in 0..2 {
+        assert_result(
+            &h.post_unlock(&Via::Tailnet, Some("{}")).await,
+            400,
+            "bad_request",
+        );
+    }
+    assert_result(&h.unlock_options(&other).await, 429, "rate_limited");
+    h.advance_ms(AUTH_FAILURE_WINDOW_MS - AUTH_FAILURE_WINDOW_MS / 2)
+        .await;
     assert_eq!(h.unlock_options(&other).await.status, 200, "window over");
 }
 

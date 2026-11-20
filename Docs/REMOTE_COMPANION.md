@@ -266,7 +266,9 @@ Rules on the Funnel path (requests carrying `Tailscale-Funnel-Request: ?1`):
 - **Sign out** also turns off this phone's notifications (review finding RWEB-02, #616): before
   ending the session the page asks the PC to forget this browser's endpoint (the request of
   *Disable notifications*) and drops the browser's push subscription in the background; both are
-  best effort and the session ends in every case. Enable notifications again after the next
+  best effort and the session ends in every case. Sign out never starts a service worker
+  registration: it reuses the one already made, or looks up an existing one, so a registration
+  that never settles cannot hold the logout back. Enable notifications again after the next
   sign-in to keep receiving them. A phone that is already gone is removed on the PC with
   `soos-remote push remove N`.
 

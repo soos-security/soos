@@ -4,7 +4,7 @@
 - **Issue**: GitHub #479 (security review 2026-11-10, batch 2; tracking #477), no backlog id —
   **Branch**: `fix/remote-tailnet-identity`
 - **Findings**: #584 PTSN-03, #616 RWEB-02, #583 PTSN-02, #601 RIDN-01, #605 RPSHB-01
-- **Matrix criteria**: RTI1–RTI9 (RTI5 pending on the browser CI job)
+- **Matrix criteria**: RTI1–RTI9
 - **ADR**: "[2026-11-20] Per-Login Tailnet Limiters, Sign-Out Push Clean-Up and the Tailnet Local
   Listener Residual"
 
@@ -64,6 +64,10 @@ the global enrollment-code counter, RMC-S21 and PSS1.
   the session" (RTI5): synthetic push registration installed before any page script; asserts the
   request order `push-unsubscribe` then `logout`, the endpoint body and one browser unsubscribe.
   The spec file list of the bench is pinned (RPW-S3), so the test was added to the existing file.
+  Round 1 of the independent review added "sign out still ends the session when the worker
+  registration never settles": `register()` never settles and no registration exists; asserts
+  that only `/api/auth/logout` is posted, that "Signed out" is shown and that sign out starts no
+  new registration. Red: on the previous `app.js` the sign-in screen never appeared (Chromium).
 - Migrated existing tests: none. The shared harness gained `Options.extra_logins` (default empty)
   and `Via::TailnetAs(String)`; no assertion changed.
 
@@ -117,8 +121,26 @@ cargo test --locked -p soos-invariants --all-targets --all-features        all g
 ```
 
 The seven `tailnet_caller_tests` ran 10 times in a row, all green. The browser bench (RTI5) was not
-run locally: `tests/browser/node_modules` is absent and the pinned Playwright image was not
-pulled; the browser CI job runs it on Chromium, Firefox and WebKit.
+run locally in the first round; after review round 1 it ran with
+`scripts/remote_browser_tests.sh -- specs/signin.spec.mjs`: 9/9 green on Chromium, Firefox and
+WebKit.
+
+### Review round 1 (independent review, `CHANGES_REQUESTED`)
+
+- **MAJOR, sign out could hang before the logout.** `dropPushSubscription` called
+  `registerServiceWorker()`, which starts a fresh `navigator.serviceWorker.register()` whenever
+  `pushRegistration` is still null (the start-up registration pending or failed); `register()` may
+  never settle, so the logout was never posted. Fix: sign out never registers a worker. It reuses
+  the cached registration, else it looks up an existing one with
+  `navigator.serviceWorker.getRegistration()` (no installation wait); with neither there is no
+  subscription to drop and the logout goes at once. No timer is added (RMO-S9 unchanged). New
+  browser case above.
+- **MINOR, test comment.** `test_rti2_one_login_cannot_lock_another_out` (new in this branch) now
+  records two owner failures half-way through login A's window and checks that login A is still
+  locked before the window ends and open after it, so the comment "the owner's failures do not
+  lift or extend login A's lockout" is proven. No existing assertion changed.
+- **Documented residuals kept**: #601 and #605 (owner questions in section 9), register-body
+  decode errors on the unlock lockout (section 9 item 3).
 
 ## 9. Known Limitations / Follow-ups (owner questions)
 
