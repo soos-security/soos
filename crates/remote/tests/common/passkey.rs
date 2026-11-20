@@ -158,7 +158,7 @@ impl Authenticator {
 
     /// SEC1 uncompressed point (65 bytes).
     pub fn public_key(&self) -> [u8; 65] {
-        let point = self.key.verifying_key().to_encoded_point(false);
+        let point = self.key.verifying_key().to_sec1_point(false);
         point.as_bytes().try_into().expect("65-byte SEC1 point")
     }
 

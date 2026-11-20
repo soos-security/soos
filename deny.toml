@@ -76,6 +76,12 @@ wildcards = "deny"
 #   getrandom@0.3.4        skipped: ahash (egui/eframe/winit) and rand_core 0.9 (proptest)
 #   getrandom@0.2.17       skipped: rand_core 0.6 (crypto-common via aes-gcm) and ring (via
 #                          ureq/rustls of soos-push-sender)
+#   rand_core@0.10.1       skipped: crypto-bigint 0.7, crypto-common 0.2, elliptic-curve 0.14,
+#                          ff 0.14, group 0.14, primefield 0.14 and signature 3 (p256 0.14 via
+#                          soos-remote)
+#   rand_core@0.9.5        kept (not skipped): rand, rand_chacha and rand_xorshift (proptest
+#                          dev-dependency)
+#   rand_core@0.6.4        kept (not skipped): crypto-common 0.1 (aes-gcm, hmac 0.12, sha2 0.10)
 #   redox_syscall@0.9.4    kept: libredox
 #   windows-sys@0.61.2     kept: tokio, mio, socket2, rustix 1, tempfile, eframe and others
 skip = [
@@ -93,7 +99,13 @@ skip = [
     { crate = "calloop@0.13.0", reason = "Used by winit 0.30, smithay-client-toolkit 0.19 and calloop-wayland-source 0.3" },
     { crate = "calloop-wayland-source@0.3.0", reason = "Used by smithay-client-toolkit 0.19 (winit 0.30)" },
     { crate = "core-foundation@0.9.4", reason = "Used by winit 0.30, core-graphics and core-graphics-types (macOS only)" },
-    { crate = "der@0.7.10", reason = "Used by ecdsa 0.16 and sec1 0.7 (p256 0.13 via soos-remote) while ureq 3 (build dependency of ort-sys) uses der 0.8" },
+    { crate = "block-buffer@0.12.1", reason = "Used by digest 0.11 (p256 0.14 via soos-remote) while sha2 0.10 and hmac 0.12 use digest 0.10 with block-buffer 0.10" },
+    { crate = "cpufeatures@0.3.1", reason = "Used by sha2 0.11 (p256 0.14 via soos-remote) while aes, polyval and sha2 0.10 use cpufeatures 0.2" },
+    { crate = "crypto-common@0.2.2", reason = "Used by digest 0.11, elliptic-curve 0.14 and primefield 0.14 (p256 0.14 via soos-remote) while aes-gcm and digest 0.10 use crypto-common 0.1" },
+    { crate = "digest@0.11.3", reason = "Used by ecdsa 0.17, elliptic-curve 0.14, hmac 0.13, sha2 0.11 and signature 3 (p256 0.14 via soos-remote) while the workspace sha2 0.10 and hmac 0.12 use digest 0.10" },
+    { crate = "hmac@0.13.0", reason = "Used by rfc6979 0.6 (ecdsa 0.17 via p256 0.14 in soos-remote) while soos-remote pins hmac 0.12 for Web Push (RMC-S33)" },
+    { crate = "rand_core@0.10.1", reason = "Used by crypto-bigint 0.7, crypto-common 0.2, elliptic-curve 0.14, ff 0.14, group 0.14, primefield 0.14 and signature 3 (p256 0.14 via soos-remote)" },
+    { crate = "sha2@0.11.1", reason = "Used by p256 0.14 (soos-remote) while the workspace crates use sha2 0.10 with hmac 0.12" },
     { crate = "foreign-types@0.3.2", reason = "Used by openssl (native-tls via the ureq build dependency of ort-sys)" },
     { crate = "foreign-types-shared@0.1.1", reason = "Used by foreign-types 0.3 (openssl)" },
     { crate = "jni-sys@0.3.1", reason = "Used by ndk 0.9 and ndk-sys 0.6 (winit on Android only)" },
