@@ -88,6 +88,22 @@ Reason 1 was verified on **Tailscale 1.102.4** (ADR 2026-10-12 "soos-remote Secu
 Hardening"): run Tailscale 1.102.4 or later on this PC, for `tailscale serve` as for Funnel
 (check with `tailscale version`). The service cannot detect the proxy version.
 
+**Known gap: other local accounts (review finding RIDN-01, open issue #601).** Reason 2 protects
+the socket, not the proxy in front of it. When `tailscaled` runs in its default kernel (TUN)
+mode, `tailscale serve` (and `tailscale funnel`) also listens on this PC's
+own Tailscale addresses, port 443, for connections opened on the PC itself, and stamps them with the
+identity of the PC's owner: the login `scripts/setup.sh` writes into `allowed_logins`. Any other
+local account, a service running under its own uid, a host-network container or a compromised
+push sender can therefore reach every route the tailnet identity alone opens: status, battery
+and offline history, the failed-password alerts and their acknowledgement, the notification
+devices, remote lock and camera stop. Unlock, the camera view and passkey registration still
+need a passkey assertion (and, for registration, an enrollment code). Both candidate fixes (refuse
+requests whose `X-Forwarded-For` is one of this PC's own addresses, or require a passkey session
+on the tailnet path too) change pinned contracts of the companion and wait for an owner decision.
+Until then, do not expose the companion with `tailscale serve` or `tailscale funnel` on a PC that
+other people or untrusted services log in to, and check `soos-remote push list` whenever in
+doubt. A `tailscaled` started with `--tun=userspace-networking` has no such local listener.
+
 Consequences:
 
 - **Never** put any other reverse proxy in front of the socket, and never run
@@ -162,7 +178,10 @@ reach the socket directly and read a pending enrollment code, which grants nothi
 already do (it can call logind on its own session). To revoke the capability at once: set
 `allow_unlock = false` (or remove the login from `allowed_logins`) and restart the unit, remove
 the passkey with `soos-remote passkeys remove N`, or remove the device from the tailnet in the
-Tailscale admin console.
+Tailscale admin console. None of these removes a notification device that the revoked phone or
+identity added (section 2d): list them with `soos-remote push list`, remove an unknown one with
+`soos-remote push remove N`, or all of them with `soos-remote push reset` (review finding PTSN-02,
+#583).
 
 ## 2b. Internet access through Tailscale Funnel, and passkeys
 
@@ -236,12 +255,20 @@ Rules on the Funnel path (requests carrying `Tailscale-Funnel-Request: ?1`):
 - without a valid session only the page, its assets, `GET /api/auth/state`, the login ceremony
   and `POST /api/auth/logout` are reachable; status, events, lock and unlock answer
   `403 {"result":"login_required"}`; the register routes answer `403 forbidden`;
-- limits: 10 challenges per minute and 5 failures per 5 minutes per limiter key (tailnet,
-  signed-in Funnel owner, each anonymous client address), at most 8 of the 16 connections for
+- limits: 10 challenges per minute and 5 failures per 5 minutes per limiter key (each allowed tailnet login,
+  signed-in Funnel owner, each anonymous client address; review finding PTSN-03, #584: a second
+  allowed login cannot lock the owner's login out, and each allowed login has its own 4 pending
+  unlock and 4 pending camera challenges; devices that share one login share its key), at most 8 of the 16 connections for
   Funnel, 4 of them anonymous, 2 anonymous request bodies, 2 Funnel event streams; a refused
   request is `503 busy` and never counts as a failure;
 - removing a passkey (`soos-remote passkeys remove N`) ends the sessions it opened at their next
-  request or keep-alive.
+  request or keep-alive;
+- **Sign out** also turns off this phone's notifications (review finding RWEB-02, #616): before
+  ending the session the page asks the PC to forget this browser's endpoint (the request of
+  *Disable notifications*) and drops the browser's push subscription in the background; both are
+  best effort and the session ends in every case. Enable notifications again after the next
+  sign-in to keep receiving them. A phone that is already gone is removed on the PC with
+  `soos-remote push remove N`.
 
 Passkey management on the PC: `soos-remote passkeys list` prints, per passkey, its number, its
 registration time, its backup state and an 8-hex fingerprint (never the credential id);
@@ -438,7 +465,12 @@ and `fd7a:115c:a1e0::/48`, …), follows no redirect, uses no proxy, and gives u
 Its sandbox hides `/home`, `/root` and `/run` (except the two systemd-resolved `resolv.conf`
 files, read only, so names resolve on Ubuntu) and the system logs (`/var/log`, the journal
 included, and `/var/lib/systemd/coredump`), so it cannot read your files, `remote.sock`, the
-session bus, `tailscaled` or the system journal. At start-up it checks that sandbox itself (a
+session bus, `tailscaled` or the system journal. These are file-system limits: over TCP the
+sender can still connect to this PC's own Tailscale address, where `tailscale serve` hands the
+request to `remote.sock` with your tailnet identity (section 2, known gap), and to loopback and
+LAN services; the address filter above applies to its own push requests only. An
+`IPAddressDeny=` egress filter for the system unit waits for an owner decision (review finding
+RPSHB-01, #605). At start-up it checks that sandbox itself (a
 read-only tmpfs over `/run`, `/home` and `/root` with nothing mounted back inside the last two,
 and `/var/log` not listable) and refuses to start otherwise (exit 78).
 Its logging filter is fixed in code (no `RUST_LOG`): the HTTP and TLS libraries never log the
@@ -1800,8 +1832,9 @@ reason classes.
   hosts; a compromised sender can reach abstract-namespace sockets (for example Xwayland's
   `@/tmp/.X11-unix/X0`) and forge replies; a client of your uid that delays `soos-remote`
   beyond 18 s can cause a duplicate notification; a newer summary replaces a pending
-  `Retry-After` retry and is sent at once; a stolen Funnel session can register a device (check
-  the device list); a renewal without the old subscription (some browsers) or above the
+  `Retry-After` retry and is sent at once;
+  any signed-in caller (an allowed tailnet identity or a Funnel session) can register a device
+  (check the device list); a renewal without the old subscription (some browsers) or above the
   2048-byte limit leaves the stale device until a 404/410 or `push remove`; the sender still
   reads world-readable files outside its hidden paths (`/etc`, `/usr`) and the `/proc` entries of
   your other processes, and its start-up check does not detect a bind added under `/run`; `ring`, `rustls` and the RustCrypto crates are not independently audited.

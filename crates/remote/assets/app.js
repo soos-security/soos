@@ -1198,10 +1198,41 @@ function requestLogin() {
     });
 }
 
+// Sign out also stops this phone's notifications (review RWEB-02, GitHub #616): the PC forgets
+// this browser's endpoint (the request of "Disable notifications") before the logout, and the
+// browser subscription is dropped in the background, so a slow push service never delays the
+// logout. Best effort: every failure is ignored and the logout is always sent.
+function dropPushSubscription() {
+  if (!pushSupported()) {
+    return Promise.resolve(null);
+  }
+  return registerServiceWorker()
+    .then(function (registration) {
+      return registration === null ? null : registration.pushManager.getSubscription();
+    })
+    .then(function (subscription) {
+      if (subscription === null) {
+        return null;
+      }
+      const endpoint = subscription.endpoint;
+      subscription.unsubscribe().catch(function () {
+        return false;
+      });
+      return postJson(PUSH_UNSUBSCRIBE_PATH, "push-unsubscribe", { endpoint: endpoint });
+    })
+    .catch(function () {
+      return null;
+    });
+}
+
 function requestLogout() {
-  postJson(LOGOUT_PATH, "logout").finally(function () {
-    showLogin("Signed out");
-  });
+  dropPushSubscription()
+    .then(function () {
+      return postJson(LOGOUT_PATH, "logout");
+    })
+    .finally(function () {
+      showLogin("Signed out");
+    });
 }
 
 // --- passkey enrollment (tailnet only, with a code from `soos-remote enroll-code`) -----

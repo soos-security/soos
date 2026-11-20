@@ -104,7 +104,9 @@ use crate::http::{
     encode_sse_battery_event, encode_sse_event, encode_sse_head, parse_request, read_body,
     write_bounded, BodyError, HttpError, Method, ParsedRequest, RequestHead, Response, WriteError,
 };
-use crate::identity::{check_host, classify_request, client_hint, ClientHint, PathClass};
+use crate::identity::{
+    check_host, classify_request, client_hint, Caller, ClientHint, PathClass, TailnetCaller,
+};
 use crate::journal::JournalSource;
 use crate::logind::{SessionSource, SourceError};
 use crate::offline::{NetworkSource, OfflineClock, OfflineRuntime, OfflineSettings, OfflineView};
@@ -1123,6 +1125,8 @@ struct RequestContext {
     prefix: Zeroizing<Vec<u8>>,
     normalized_host: String,
     class: PathClass,
+    /// The tailnet caller (`Some` exactly for the tailnet class).
+    tailnet: Option<TailnetCaller>,
     /// Anonymous rate-limit bucket (Funnel only; `UNKNOWN` on the tailnet, never used there).
     hint: ClientHint,
     /// SHA-256 of a valid web-session token (Funnel only).
@@ -1134,18 +1138,21 @@ impl RequestContext {
         &self.parsed.head
     }
 
-    /// The limiter key of the unlock routes.
+    /// The limiter key of the unlock, camera and register routes: the caller's own key on the
+    /// tailnet (review PTSN-03), the session key on Funnel.
     fn unlock_key(&self) -> LimitKey {
-        match self.class {
-            PathClass::Tailnet => LimitKey::Tailnet,
-            PathClass::Funnel => LimitKey::FunnelSession,
+        match self.tailnet {
+            Some(caller) => LimitKey::Tailnet(caller),
+            None => LimitKey::FunnelSession,
         }
     }
 
-    /// The binding of an unlock challenge of this caller.
+    /// The binding of an unlock or camera-view challenge of this caller: the tailnet caller
+    /// (review PTSN-03) or the Funnel web session.
     fn unlock_binding(&self) -> ChallengeBinding {
-        match (self.class, self.session) {
-            (PathClass::Funnel, Some(hash)) => ChallengeBinding::WebSession(hash),
+        match (self.tailnet, self.class, self.session) {
+            (Some(caller), _, _) => ChallengeBinding::Tailnet(caller),
+            (None, PathClass::Funnel, Some(hash)) => ChallengeBinding::WebSession(hash),
             _ => ChallengeBinding::None,
         }
     }
@@ -1265,6 +1272,18 @@ async fn handle_connection<S: SessionSource>(
         (normalized_host, caller, hint, presented)
     };
     let class = caller.class();
+    let tailnet = match &caller {
+        Caller::Tailnet(login) => match TailnetCaller::of(login, &config.allowed_logins) {
+            Some(tailnet) => Some(tailnet),
+            None => {
+                debug!("tailnet caller not resolved");
+                let response = Response::json(403, "forbidden");
+                respond_with(&mut stream, method, &response, refusal_linger()).await;
+                return;
+            }
+        },
+        Caller::Funnel => None,
+    };
     let mut permits = ClassPermits::default();
 
     if class == PathClass::Funnel {
@@ -1332,6 +1351,7 @@ async fn handle_connection<S: SessionSource>(
         prefix,
         normalized_host,
         class,
+        tailnet,
         hint,
         session,
     };
@@ -1803,7 +1823,7 @@ async fn register_options<S: SessionSource>(
     if let Err(response) = auth_route_gate(shared, ctx, ACTION_REGISTER_OPTIONS) {
         return Some(response);
     }
-    let key = LimitKey::Tailnet;
+    let key = ctx.unlock_key();
     {
         let mut auth = shared.auth.lock().await;
         let now = Instant::now();
@@ -1907,7 +1927,7 @@ async fn register_verify<S: SessionSource>(
     if let Err(response) = auth_route_gate(shared, ctx, ACTION_REGISTER) {
         return Some(response);
     }
-    let key = LimitKey::Tailnet;
+    let key = ctx.unlock_key();
     if shared.auth.lock().await.locked_out(key, Instant::now()) {
         return Some(Response::json(429, "rate_limited"));
     }

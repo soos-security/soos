@@ -3,7 +3,10 @@
 //!
 //! Pools: the authenticated pools `(Tailnet, Register)`, `(Tailnet, Unlock)`,
 //! `(Funnel, Unlock)`, `(Tailnet, CameraView)` and `(Funnel, CameraView)` (ADR 2026-10-07)
-//! hold at most `MAX_PENDING_CHALLENGES` entries each and never evict;
+//! hold at most `MAX_PENDING_CHALLENGES` entries each and never evict; the server binds every
+//! tailnet unlock and camera-view challenge to its caller (`ChallengeBinding::Tailnet`, review
+//! PTSN-03), which bounds each allowed login to `MAX_PENDING_CHALLENGES` entries of its own and
+//! the pool to `MAX_PENDING_TAILNET_CHALLENGES`;
 //! the anonymous `(Funnel, Login)` pool holds at most `MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES`
 //! entries, at most `MAX_LOGIN_CHALLENGES_PER_HINT` per client hint, and evicts its oldest
 //! entry instead of refusing (eviction can only fail a ceremony, never admit one). An entry
@@ -16,10 +19,11 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::time::Instant;
 
-use crate::identity::{ClientHint, PathClass};
+use crate::identity::{ClientHint, PathClass, TailnetCaller};
 use crate::{
     CHALLENGE_BYTES, CHALLENGE_TTL_MS, MAX_LOGIN_CHALLENGES_PER_HINT,
-    MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES, MAX_PENDING_CHALLENGES, USER_HANDLE_BYTES,
+    MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES, MAX_PENDING_CHALLENGES, MAX_PENDING_TAILNET_CHALLENGES,
+    USER_HANDLE_BYTES,
 };
 
 /// Ceremony a challenge was issued for. Never rendered as text (invariant RMC-S3).
@@ -47,6 +51,8 @@ pub enum ChallengeBinding {
     WebSession([u8; 32]),
     /// SHA-256 of the normalized enrollment code (registration).
     EnrollCode([u8; 32]),
+    /// One allowed tailnet login (tailnet unlock and camera view; review PTSN-03).
+    Tailnet(TailnetCaller),
 }
 
 impl fmt::Debug for ChallengeBinding {
@@ -56,10 +62,12 @@ impl fmt::Debug for ChallengeBinding {
 }
 
 impl ChallengeBinding {
-    /// Constant-time binding comparison; for `Login(_)` only the variant is compared.
+    /// Constant-time binding comparison; for `Login(_)` only the variant is compared; a tailnet
+    /// caller (a non-secret position) matches only itself.
     fn matches(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::None, Self::None) | (Self::Login(_), Self::Login(_)) => true,
+            (Self::Tailnet(a), Self::Tailnet(b)) => a == b,
             (Self::WebSession(a), Self::WebSession(b))
             | (Self::EnrollCode(a), Self::EnrollCode(b)) => bool::from(a.ct_eq(b)),
             _ => false,
@@ -122,7 +130,9 @@ impl Entry {
 }
 
 /// Pending challenges, in issuance order (oldest first). At most
-/// `5 × MAX_PENDING_CHALLENGES + MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES` entries.
+/// `5 × MAX_PENDING_CHALLENGES + 2 × MAX_PENDING_TAILNET_CHALLENGES +
+/// MAX_PENDING_ANONYMOUS_LOGIN_CHALLENGES` entries (the caller-bound tailnet entries count
+/// in their `(class, purpose)` pool together with any unbound one).
 #[derive(Default)]
 pub struct ChallengeStore {
     entries: Vec<Entry>,
@@ -138,6 +148,10 @@ impl fmt::Debug for ChallengeStore {
 enum Pool {
     /// Bounded by `MAX_PENDING_CHALLENGES`, never evicts.
     Authenticated,
+    /// The tailnet unlock or camera-view entries of one allowed login: at most
+    /// `MAX_PENDING_CHALLENGES` of them and `MAX_PENDING_TAILNET_CHALLENGES` in the whole
+    /// `(class, purpose)` pool, never evicts (review PTSN-03).
+    Caller(TailnetCaller),
     /// The anonymous Funnel login pool of one hint.
     Anonymous(ClientHint),
 }
@@ -151,6 +165,11 @@ fn pool_of(
         (PathClass::Funnel, ChallengePurpose::Login, ChallengeBinding::Login(hint)) => {
             Some(Pool::Anonymous(*hint))
         }
+        (
+            PathClass::Tailnet,
+            ChallengePurpose::Unlock | ChallengePurpose::CameraView,
+            ChallengeBinding::Tailnet(caller),
+        ) => Some(Pool::Caller(*caller)),
         (PathClass::Tailnet, ChallengePurpose::Register, ChallengeBinding::EnrollCode(_))
         | (PathClass::Tailnet, ChallengePurpose::Unlock, ChallengeBinding::None)
         | (PathClass::Funnel, ChallengePurpose::Unlock, ChallengeBinding::WebSession(_))
@@ -215,6 +234,20 @@ impl ChallengeStore {
         match pool {
             Pool::Authenticated => {
                 if in_pool >= MAX_PENDING_CHALLENGES {
+                    return Err(ChallengeError::PoolFull);
+                }
+            }
+            Pool::Caller(caller) => {
+                let of_caller = self
+                    .entries
+                    .iter()
+                    .filter(|e| {
+                        e.in_pool(class, purpose)
+                            && matches!(e.binding, ChallengeBinding::Tailnet(c) if c == caller)
+                    })
+                    .count();
+                if of_caller >= MAX_PENDING_CHALLENGES || in_pool >= MAX_PENDING_TAILNET_CHALLENGES
+                {
                     return Err(ChallengeError::PoolFull);
                 }
             }

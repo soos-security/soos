@@ -25,7 +25,7 @@ use crate::challenge::{ChallengeBinding, ChallengePurpose, ChallengeStore, Taken
 use crate::credentials::{
     credential_hash, AuthenticatorTransport, CredentialStore, PasskeyFile, StoreError, TransportSet,
 };
-use crate::identity::{ClientHint, PathClass};
+use crate::identity::{ClientHint, PathClass, TailnetCaller};
 use crate::webauthn::{
     b64url_decode, parse_client_data_with_policy, verify_assertion, AssertionOutcome, CeremonyType,
     OriginPolicy, RelyingParty, StoredCredential,
@@ -106,8 +106,9 @@ fn failure_window() -> Duration {
 /// Limiter key (spec §4.6, F-2). `Debug` redacted (the hint is an address prefix).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LimitKey {
-    /// Tailnet caller (register, unlock options, unlock).
-    Tailnet,
+    /// Tailnet caller (register, unlock options, unlock, camera view), one key per allowed
+    /// login (review PTSN-03, GitHub #584).
+    Tailnet(TailnetCaller),
     /// Funnel caller holding a valid web session (unlock options, unlock).
     FunnelSession,
     /// Anonymous Funnel caller (login options, login verify), one bucket per client hint.
@@ -117,7 +118,7 @@ pub enum LimitKey {
 impl fmt::Debug for LimitKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tailnet => f.write_str("LimitKey::Tailnet"),
+            Self::Tailnet(_) => f.write_str("LimitKey::Tailnet(<redacted>)"),
             Self::FunnelSession => f.write_str("LimitKey::FunnelSession"),
             Self::FunnelAnonymous(_) => f.write_str("LimitKey::FunnelAnonymous(<redacted>)"),
         }
@@ -208,7 +209,7 @@ impl AuthState {
     ) -> Option<&mut Window> {
         let hint = match key {
             LimitKey::FunnelAnonymous(hint) => hint,
-            LimitKey::Tailnet | LimitKey::FunnelSession => {
+            LimitKey::Tailnet(_) | LimitKey::FunnelSession => {
                 let map = match limiter {
                     Limiter::Options => &mut self.options_windows,
                     Limiter::Failures => &mut self.failure_windows,
