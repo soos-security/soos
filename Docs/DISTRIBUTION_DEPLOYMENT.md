@@ -40,6 +40,39 @@ A face match jumps onto `auth optional pam_permit.so`, so `pam_env.so` and `pam_
 run exactly as after a correct password (the faillock tally is reset), while a locked account still
 fails at `pam_faillock.so preauth`. Any failure or `PAM_IGNORE` still takes `default=ignore`.
 
+**A `success=done` face rule ends the whole stack, callers included (GitHub #574, PSTK-01).**
+`done` returns to the application at once, and `include` / `@include` splice the shared stack
+into the calling service, so a face match also skips every auth rule placed **after the
+include** in the caller (a `pam_u2f.so`, `pam_google_authenticator.so` or `pam_oath.so` second
+factor, a `pam_shells.so` or `pam_group.so` gate). Only `substack` confines `done` to the
+delegated part. Whether this weakens a service depends on the password path:
+- **Debian/Ubuntu** (`common-auth` from `pam-auth-update`): the password module jumps onto
+  `pam_permit.so` and the caller's rules after the include still run, so a face match replaces
+  "password and second factor" with "face" for that service. Place a second factor *before*
+  `@include common-auth` when face must not replace it, and check with `soos-admin pam check`
+  (below).
+- **Fedora/RHEL** (`custom/soos`): `pam_unix.so` is `sufficient`, so a correct password already
+  ends a caller that uses `auth include system-auth`: nothing after the include runs on either
+  path. Use authselect's `with-pam-u2f-2fa` feature (its rule sits before `pam_soos.so`) for a
+  second factor.
+- **Arch**: the face rule jumps (`success=4`), the stack continues as after a password.
+
+`soos-admin pam check [--pam-dir /etc/pam.d] [SERVICE...]` is a read-only report of every
+service whose soos rule (`[success=done]` or `sufficient`) ends the stack before an enforcing
+auth rule that the password path still runs. It follows `include`, `@include` and `substack`
+(bounded: 4 levels, 32 files, 1024 rules, 8 conditional rules explored on both branches),
+treats `-auth` and bracketed controls by their actions, and exits `0` (nothing skipped), `1`
+(at least one skipped rule, listed with file and line) or `2` (a service could not be analysed:
+missing include target, for instance in a vendor directory such as `/usr/lib/pam.d`, line
+continuation, unknown control). `--format json` prints the same report. The analysis assumes a
+correct password for scenario "password" and a face match for scenario "face" and compares the
+rules each one runs; the credential modules the face replaces, `pam_permit.so`, `pam_env.so`
+and `pam_faildelay.so` are never reported. A skipped rule is not reported either when the face
+path already ran an identical copy before its soos rule (same module, `required`/`requisite`
+control and arguments, such as the gates `gdm enable` copies in front of its managed rule), or
+when it is `pam_faillock.so authsucc` and an enforcing `pam_faillock.so preauth` gate ran first
+(same tally check; the face path only skips the reset of the failure tally).
+
 ### Safety Invariants
 1. **Never bypass password authentication**: If `pam_soos.so` fails, times out, or encounters a missing daemon/socket, it **MUST** return `PAM_IGNORE`, yielding execution to `pam_unix`.
 2. **Never convert error into `PAM_SUCCESS`**: Any internal panic or unhandled error strictly returns `PAM_IGNORE` via `catch_unwind`.
@@ -127,7 +160,8 @@ sudo soos-admin gdm status                    # installed in PAM? disable flag p
 sudo soos-admin gdm enable                    # insert the managed block (below) unless a shared
                                               # soos rule is reached, remove the flag
 sudo soos-admin gdm enable --pam-module-dir /usr/lib64/security   # explicit module directory
-sudo soos-admin gdm disable                   # create /etc/soos/gdm.disable (PAM file untouched)
+sudo soos-admin gdm disable                   # create the flag pam_soos.so reads for the service
+                                              # (/etc/soos/gdm.disable for gdm-password; PAM file untouched)
 sudo soos-admin gdm restore                   # put back gdm-password.soos-backup, remove it
                                               # (refused if the file changed after enable; --force overrides)
 sudo soos-admin --format json gdm status      # machine-readable status
@@ -138,10 +172,44 @@ sudo soos-admin --format json gdm status      # machine-readable status
 and mentions in module arguments are ignored, and `gdm enable` inserts a real rule next to such
 a comment (GitHub #236). The PAM file is read with the same 64 KiB bound as `gdm enable`.
 
-`--pam-file` (default `/etc/pam.d/gdm-password`) and `--disable-file` (default
-`/etc/soos/gdm.disable`) select other paths. `gdm disable` is the immediate, lockout-free
-switch: `pam_soos.so` reads `PAM_SERVICE` and returns `PAM_IGNORE` for every `gdm*` service
-while the flag exists.
+`--pam-file` (default `/etc/pam.d/gdm-password`) selects another service file; its file name
+is the PAM service. `gdm disable` is the immediate, lockout-free switch: `pam_soos.so` reads
+`PAM_SERVICE` and returns `PAM_IGNORE` while one of the flags it reads for that service exists,
+all under `/etc/soos`: `disabled` (every service), `gdm.disable` (every service whose name
+contains `gdm`) and `<service>.disable` (GitHub #581, PSTKC-01). Without `--disable-file`,
+`gdm disable` writes `/etc/soos/gdm.disable` for a `gdm*` service and
+`/etc/soos/<service>.disable` otherwise (e.g. `/etc/soos/sddm.disable` for
+`--pam-file /etc/pam.d/sddm`). An explicit `--disable-file` must be one of those flags:
+`gdm disable` refuses any other name or a file outside `/etc/soos` (the module would never
+read it) and writes nothing. `gdm status` reports `Disabled` only when a flag the module reads
+for the service exists; with a `--disable-file` outside `/etc/soos` it warns on stderr and
+computes the status from `/etc/soos`.
+
+**Rules after the anchor (GitHub #574, PSTK-01).** The managed rule is `success=done` at the
+top level of `gdm-password`, so a face match ends the whole stack there. `gdm enable` therefore
+refuses (nothing written, the disable flag stays) when an enforcing auth rule that the password
+path still runs follows the credential module or shared stack, including a rule placed after
+the credential module **inside** the shared stack itself (for example `auth required
+pam_u2f.so` appended to `common-auth`): `required` / `requisite`, an
+unknown keyword, an `-auth` line with such a control, or a bracketed control that can fail the
+stack (`bad`, `die`, `ok` or `done` on a failure code, `reset`, no `default=`), including such a
+rule inside a later `include`, `substack` or `@include` (followed and analysed like the anchor,
+fail closed when a target is missing; only the Debian `common-account`, `common-password`,
+`common-session` and `common-session-noninteractive` stacks may be absent). The refusal names
+the rule and its line. `optional`, `sufficient`, `[... default=ignore]` and jumps are accepted,
+as is a tail that the password path never reaches (an inline `sufficient pam_unix.so`). Two
+rules of the shared stack are known to be equivalent for the face path and accepted:
+`pam_faillock.so authsucc` when an enforcing `pam_faillock.so preauth` gate runs before the
+managed rule (the stock Arch and Fedora layouts; the face path only skips the reset of the
+failure tally), and the `pam_deny.so` failure fallback of the shared stack when the password
+path reaches it on every branch (such a `pam_deny.so` denies the correct password too). A
+`pam_deny.so` of the shared stack reached on one branch of a conditional rule only (a group gate
+such as `[success=1 default=ignore] pam_succeed_if.so user ingroup admins` followed by
+`requisite pam_deny.so`) enforces that gate and is refused. An explicit `pam_deny.so` in
+`gdm-password` after the anchor is refused like any other rule. Move a
+second factor before the credential module or shared stack to keep it in force for face logins.
+`soos-admin pam check` reports the stack `gdm enable` wrote as clean: it recognises the gates
+copied in front of the managed rule.
 
 What `gdm enable` writes on a stack **without** a soos rule, e.g. Fedora 40 with the stock
 authselect `local` profile and `with-faillock`, before the soos `custom/soos` profile is
@@ -352,6 +420,12 @@ edits; instead it prints a `soos: WARNING:` when `pam-auth-update` fails or when
 local changes, then run `sudo pam-auth-update --enable soos soos-notify` (interactive, offers
 to override local changes) or add the two rules by hand.
 
+A face match ends `common-auth` with `done`, so every auth rule a service places after the
+include (`@include common-auth` followed by `auth required pam_u2f.so`, for instance) is skipped
+by a face match while a correct password still runs it (section 2, GitHub #574). Run
+`sudo soos-admin pam check` after enabling the profile and move such a factor before
+`@include common-auth` in the service file when face must not replace it.
+
 Resulting `/etc/pam.d/common-auth` (Ubuntu 24.04, verified by `tests/docker/pam_rollback_test.sh`
 D3 and the Docker matrix case T11):
 ```pam
@@ -452,6 +526,14 @@ profile therefore ships the full layout:
 The only lines that differ from the `local` profile are the two `pam_soos.so` lines in the `auth`
 sections of `system-auth` and `password-auth`.
 
+**The profile serves local accounts only (GitHub #575, PSTK-02).** Like `local`, it has no
+`pam_sss.so` / `pam_winbind.so` rule and no `sss` / `winbind` NSS source. Selecting it on a host
+that uses the `sssd`, `winbind` or `nis` profile (a host joined to IdM, Active Directory or
+LDAP) removes the directory accounts from NSS and PAM (every domain account, a domain-only
+administrator included, is locked out) and drops the features of that profile that `custom/soos`
+does not declare (`with-smartcard`, `with-smartcard-required`, ...). Do not select it there;
+an sssd-derived variant is not shipped yet.
+
 ### 4.2 Preservation of `pam_faillock` Lockout Policy
 To prevent brute-force attacks against user passwords, Fedora employs `pam_faillock`. The `soos`
 custom profile preserves `pam_faillock` with strict hook placement, using the `authselect`
@@ -487,13 +569,21 @@ When biometric verification succeeds (`pam_soos.so` returns `[success=done]`), `
 ### 4.3 Activation and Service Verification
 `scripts/install.sh` and the RPM `%post` scriptlet install the profile and record the currently
 selected profile (`authselect current --raw`, e.g. `local with-silent-lastlog`) in
-`/etc/soos/authselect.previous`; they never activate the profile themselves.
+`/etc/soos/authselect.previous`; they never activate the profile themselves. The profile serves
+local accounts only (section 4.1): `install.sh` prints the activation command only when the
+current profile is `local` or `minimal`, with the current features carried over and without
+`--force` (`authselect select custom/soos with-faillock with-silent-lastlog && authselect check`);
+on an `sssd`, `winbind`, `nis` or any other profile it prints a warning and no command, and the
+RPM `%post` prints a `soos: WARNING:` on `sssd`, `winbind` and `nis` hosts. `--force` is needed
+only on a host whose files authselect does not manage yet (no current profile).
 
 ```bash
 # Inspect the features currently enabled and carry them over
 authselect current --raw
 
-# Activate the custom profile with faillock enabled (add the other features from above)
+# Local accounts only: never on an sssd, winbind or nis host (section 4.1).
+# Activate the custom profile with faillock enabled (add the other features from above;
+# --force only when authselect does not manage this host yet)
 sudo authselect select custom/soos with-faillock --force
 
 # Verify authselect profile consistency and the generated stacks

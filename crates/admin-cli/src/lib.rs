@@ -11,6 +11,8 @@
 //!   the `[camera.ir_emitter]` writer (device written only with `--test-on-device`; GitHub #378)
 //! - `network-lock status|install|uninstall`: opt-in polkit Wi-Fi lock (GitHub #365); the
 //!   status is read-only and never prints a network name
+//! - `pam check`: read-only report of the services whose soos rule ends the auth stack before
+//!   an enforcing rule the password path still runs (GitHub #574)
 
 #![forbid(unsafe_code)]
 
@@ -22,6 +24,7 @@ pub mod gdm;
 pub mod ir_emitter;
 pub mod logs;
 pub mod network_lock;
+pub mod pam_check;
 mod pam_stack;
 pub mod redact;
 pub mod status;
@@ -30,8 +33,8 @@ pub mod user;
 
 pub use args::{
     AddUserArgs, CameraAction, CameraArgs, CameraListArgs, CameraProbeArgs, Cli, Commands,
-    GdmAction, GdmArgs, LogsArgs, NetworkLockAction, NetworkLockArgs, OutputFormat, StatusArgs,
-    TestPamArgs,
+    GdmAction, GdmArgs, LogsArgs, NetworkLockAction, NetworkLockArgs, OutputFormat, PamAction,
+    PamArgs, StatusArgs, TestPamArgs,
 };
 pub use camera::{CameraEnvironment, CameraListReport, CameraProbeReport};
 pub use error::AdminCliError;

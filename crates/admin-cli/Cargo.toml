@@ -30,6 +30,8 @@ soos-camera-v4l = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# PSTKC-01 (GitHub #581): pins the `gdm` flag rule to `PamConfig::is_disabled`.
+soos-pam = { workspace = true }
 soos-camera-v4l = { workspace = true, features = ["mock-camera"] }
 
 [lints]

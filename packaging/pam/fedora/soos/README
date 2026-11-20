@@ -15,6 +15,11 @@ AI/ARCHITECTURE.md section 5:
 3. pam_soos.so event=password-failed timeout_ms=20 (optional) notifies the
    daemon of a failed password attempt for the intrusion evidence store.
 
+This profile serves local accounts only. It has no pam_sss/pam_winbind rule
+and no sss/winbind NSS source: do not select it on a host that uses the
+"sssd", "winbind" or "nis" profile (directory accounts would be locked out and
+the features of that profile, such as smartcard or MFA requirements, dropped).
+
 pam_faillock.so keeps its "local" profile placement: preauth before pam_soos.so,
 authfail after pam_unix.so and the account-phase check, all enabled by the
 with-faillock feature.

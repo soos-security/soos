@@ -154,6 +154,20 @@ fn run() -> Result<(), AdminCliError> {
 
         Commands::NetworkLock(args) => run_network_lock(&args.action, cli.format)?,
 
+        Commands::Pam(args) => match &args.action {
+            soos_admin_cli::PamAction::Check { pam_dir, services } => {
+                let report = soos_admin_cli::pam_check::check_pam_services(pam_dir, services)?;
+                match cli.format {
+                    OutputFormat::Table => print!("{}", report.format_table()),
+                    OutputFormat::Json => println!("{}", report.to_json()),
+                }
+                let code = report.exit_code();
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+        },
+
         Commands::Gdm(args) => {
             if args.action == soos_admin_cli::GdmAction::Enable {
                 // Never point GDM at a module that is not installed (GitHub #177).
@@ -175,12 +189,44 @@ fn run() -> Result<(), AdminCliError> {
                     )));
                 }
             }
-            let status = soos_admin_cli::gdm::configure_gdm_with_options(
+            // GitHub #581: the flag is the one pam_soos.so reads for the service of --pam-file.
+            let flag_dir = std::path::Path::new(soos_admin_cli::gdm::DEFAULT_FLAG_DIR);
+            let service = soos_admin_cli::gdm::pam_service_name(&args.pam_file);
+            let disable_file = match (&args.disable_file, service) {
+                (Some(file), _) => file.clone(),
+                (None, Some(service)) => {
+                    soos_admin_cli::gdm::default_disable_file(flag_dir, service)
+                }
+                (None, None) => flag_dir.join("gdm.disable"),
+            };
+            let outside = disable_file.parent() != Some(flag_dir);
+            if outside {
+                if args.action == soos_admin_cli::GdmAction::Disable {
+                    return Err(AdminCliError::GdmConfig(format!(
+                        "pam_soos.so reads its disable flags only from {}; '{}' would never be \
+                         read, so nothing was written (omit --disable-file)",
+                        flag_dir.display(),
+                        disable_file.display()
+                    )));
+                }
+                eprintln!(
+                    "[WARN] pam_soos.so reads its disable flags only from {}; '{}' is not one \
+                     of them. The Status below is computed from {}.",
+                    flag_dir.display(),
+                    disable_file.display(),
+                    flag_dir.display()
+                );
+            }
+            let mut status = soos_admin_cli::gdm::configure_gdm_with_options(
                 &args.action,
                 &args.pam_file,
-                &args.disable_file,
+                &disable_file,
                 soos_admin_cli::gdm::GdmOptions { force: args.force },
             )?;
+            if outside {
+                status.enabled =
+                    status.installed && !soos_admin_cli::gdm::module_disabled(flag_dir, service);
+            }
             match cli.format {
                 OutputFormat::Table => {
                     println!("GDM Biometric Integration Status:");

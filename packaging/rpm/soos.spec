@@ -124,7 +124,10 @@ chown root:soos %{_rundir}/soos 2>/dev/null || :
 
 # Record the selected authselect profile (id + features) so that %preun can
 # restore it once custom/soos has been activated. The profile is never
-# activated automatically: run 'authselect select custom/soos with-faillock --force'.
+# activated automatically. custom/soos serves local accounts only (derived from
+# the "local" profile): on a local or minimal host run
+# 'authselect select custom/soos with-faillock <current features>'; never on an
+# sssd, winbind or nis host (GitHub #575, Docs/DISTRIBUTION_DEPLOYMENT.md 4.3).
 if command -v authselect >/dev/null 2>&1; then
     current="$(authselect current --raw 2>/dev/null || :)"
     case "${current}" in
@@ -134,6 +137,15 @@ if command -v authselect >/dev/null 2>&1; then
             echo "${current}" > %{_sysconfdir}/soos/authselect.previous || :
             chmod 0644 %{_sysconfdir}/soos/authselect.previous || :
             ;;
+    esac
+    # Match the whole recorded profile, never a prefix-strip parameter expansion:
+    # RPM halves a doubled percent sign in scriptlets, so the expansion would strip
+    # only the last feature word and the warning would stay silent (GitHub #575).
+    case "${current}" in
+        sssd|winbind|nis|"sssd "*|"winbind "*|"nis "*)
+            echo "soos: WARNING: custom/soos serves local accounts only; selecting it on this host (authselect profile: ${current}) would remove the directory identity source. See Docs/DISTRIBUTION_DEPLOYMENT.md section 4.3." >&2
+            ;;
+        *) : ;;
     esac
 fi
 

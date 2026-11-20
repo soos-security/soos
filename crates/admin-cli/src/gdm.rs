@@ -14,7 +14,11 @@ use std::path::{Path, PathBuf};
 
 use crate::args::GdmAction;
 use crate::error::AdminCliError;
+use crate::pam_check::gdm_tail_skips;
 use crate::pam_stack::{delegated_auth, read_bounded_utf8, DelegatedAuth, PamLine};
+
+/// Name of the edited service file in `gdm enable` refusals.
+const EDITED_FILE_LABEL: &str = "the edited PAM file";
 
 pub use crate::pam_stack::{MAX_PAM_FILE_BYTES, MAX_PAM_INCLUDE_DEPTH, MAX_PAM_STACK_READS};
 
@@ -62,6 +66,73 @@ pub fn find_pam_module(dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|path| fs::metadata(path).is_ok_and(|m| m.is_file()))
 }
 
+/// Directory of the disable flags read by `pam_soos.so` (`soos_pam::config::DEFAULT_FLAG_DIR`).
+pub const DEFAULT_FLAG_DIR: &str = "/etc/soos";
+
+/// Maximum length of a service name used as a flag file stem (`soos_protocol::MAX_SERVICE_LEN`,
+/// the bound the PAM module applies to `PAM_SERVICE`).
+const MAX_FLAG_SERVICE_LEN: usize = 64;
+
+/// The PAM service of `pam_file`: its file name (libpam names a service after its file in
+/// `/etc/pam.d`) when it can be used verbatim as a flag file stem, as `pam_soos.so` requires
+/// (`[A-Za-z0-9._-]`, not starting with `.`, at most 64 bytes); `None` otherwise.
+#[must_use]
+pub fn pam_service_name(pam_file: &Path) -> Option<&str> {
+    let name = pam_file.file_name()?.to_str()?;
+    let safe = !name.is_empty()
+        && name.len() <= MAX_FLAG_SERVICE_LEN
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    safe.then_some(name)
+}
+
+/// File names, inside the flag directory, of every disable flag `pam_soos.so` reads for
+/// `service` (`PamConfig::is_disabled` in `crates/pam/src/config.rs`; GitHub #581): the global
+/// `disabled`, `gdm.disable` for a service whose name contains `gdm`, and `<service>.disable`.
+#[must_use]
+pub fn module_flag_names(service: &str) -> Vec<String> {
+    let mut names = vec!["disabled".to_string()];
+    if service.contains("gdm") {
+        names.push("gdm.disable".to_string());
+    }
+    names.push(format!("{service}.disable"));
+    names
+}
+
+/// The flag `gdm disable` writes for `service`: `gdm.disable` for a `gdm*` service (shared by
+/// every GDM stack), `<service>.disable` otherwise.
+#[must_use]
+pub fn default_disable_file(flag_dir: &Path, service: &str) -> PathBuf {
+    if service.contains("gdm") {
+        flag_dir.join("gdm.disable")
+    } else {
+        flag_dir.join(format!("{service}.disable"))
+    }
+}
+
+/// True when a flag `pam_soos.so` reads for `service` exists in `flag_dir` (only the global
+/// flag when the service name is unusable as a flag stem).
+#[must_use]
+pub fn module_disabled(flag_dir: &Path, service: Option<&str>) -> bool {
+    match service {
+        Some(service) => module_flag_names(service)
+            .iter()
+            .any(|name| flag_dir.join(name).exists()),
+        None => flag_dir.join("disabled").exists(),
+    }
+}
+
+/// True when `disable_file` is a per-service flag `pam_soos.so` reads for `service`
+/// (`gdm.disable` for a `gdm*` service, or `<service>.disable`); the directory is not checked.
+fn is_module_service_flag(disable_file: &Path, service: &str) -> bool {
+    let Some(name) = disable_file.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name != "disabled" && module_flag_names(service).iter().any(|flag| flag == name)
+}
+
 /// Status summary of GDM PAM integration and disable flag.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct GdmStatus {
@@ -97,6 +168,11 @@ pub fn has_active_pam_soos_rule(content: &str) -> bool {
 /// `gdm enable` (GitHub #331; reported in `shared_stack`). The file is read with the same
 /// bound as `gdm enable` ([`MAX_PAM_FILE_BYTES`]), and an unreadable, oversized or
 /// non-UTF-8 file, or any refusal of the shared-stack analysis, reports `installed: false`.
+///
+/// `enabled` follows the rule of `pam_soos.so` (GitHub #581): the flag directory is the parent
+/// of `disable_file`, the service is the file name of `pam_file` ([`pam_service_name`]), and
+/// only the flags the module reads for that service ([`module_flag_names`]) count, plus the
+/// global `/etc/soos/disabled`. A `disable_file` the module never reads does not disable.
 pub fn get_gdm_status(pam_file: &Path, disable_file: &Path) -> GdmStatus {
     let content = if pam_file.is_file() {
         read_bounded_utf8(pam_file).ok()
@@ -112,7 +188,11 @@ pub fn get_gdm_status(pam_file: &Path, disable_file: &Path) -> GdmStatus {
         None => (false, None),
     };
 
-    let disabled = disable_file.exists() || Path::new("/etc/soos/disabled").exists();
+    // GitHub #581: only the flags the module reads for this service count; the flag directory
+    // is the one of `disable_file` (`/etc/soos` in production, a temporary one in tests).
+    let flag_dir = parent_dir(disable_file);
+    let disabled = module_disabled(flag_dir, pam_service_name(pam_file))
+        || Path::new(DEFAULT_FLAG_DIR).join("disabled").exists();
     let enabled = installed && !disabled;
 
     GdmStatus {
@@ -184,6 +264,23 @@ pub fn configure_gdm_with_options(
     match action {
         GdmAction::Status => Ok(get_gdm_status(pam_file, disable_file)),
         GdmAction::Disable => {
+            // GitHub #581: never write a flag the module ignores for this service.
+            let service = pam_service_name(pam_file).ok_or_else(|| {
+                AdminCliError::GdmConfig(format!(
+                    "the PAM service name of '{}' cannot be used as a disable flag name \
+                     ([A-Za-z0-9._-], not starting with '.'); nothing was written",
+                    pam_file.display()
+                ))
+            })?;
+            if !is_module_service_flag(disable_file, service) {
+                return Err(AdminCliError::GdmConfig(format!(
+                    "pam_soos.so never reads '{}' for the PAM service '{service}'; use '{}' \
+                     (the flag it reads for that service); nothing was written \
+                     (see Docs/DISTRIBUTION_DEPLOYMENT.md section 2.1)",
+                    disable_file.display(),
+                    default_disable_file(parent_dir(disable_file), service).display()
+                )));
+            }
             if let Some(parent) = disable_file.parent() {
                 if !parent.exists() {
                     fs::create_dir_all(parent).map_err(|e| {
@@ -744,6 +841,31 @@ fn plan_gdm_enable(content: &str, include_dir: &Path) -> Result<Option<EnablePla
         },
         None => Vec::new(),
     };
+
+    // GitHub #574 (PSTK-01): the managed `[success=done]` rule ends the whole stack, so it
+    // must not skip an enforcing auth rule that the password path still runs after the anchor
+    // (a second factor or gate after the include). Fix-design caveat G302-03: bracketed
+    // controls, `-auth` lines and later include/substack/@include lines are classified.
+    match gdm_tail_skips(include_dir, EDITED_FILE_LABEL, &lines, anchor_index) {
+        Ok(None) => {}
+        Ok(Some(rule)) => {
+            return Err(AdminCliError::GdmConfig(format!(
+                "the face rule would end the whole auth stack before the auth rule {} \
+                 ({} line {}), which the password path still runs: a face match would skip \
+                 that factor or gate; nothing was written and GDM face login is not enabled \
+                 automatically (move the rule before the credential module or shared stack, \
+                 see Docs/DISTRIBUTION_DEPLOYMENT.md section 2.1)",
+                rule.rule, rule.stack, rule.line
+            )))
+        }
+        Err(reason) => {
+            return Err(AdminCliError::GdmConfig(format!(
+                "cannot tell which auth rules run after the credential module or shared stack \
+                 ({reason}); a face match might skip a factor or gate placed there, so nothing \
+                 was written (see Docs/DISTRIBUTION_DEPLOYMENT.md section 2.1)"
+            )))
+        }
+    }
 
     let mut updated = String::with_capacity(pristine.len().saturating_add(512));
     for raw in lines.iter().take(anchor_index) {

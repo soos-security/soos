@@ -936,6 +936,40 @@ info "Installing executable binaries..."
 tracked_install 0755 "${KEY_HELPER_SRC}" "${TARGET_LIBEXEC_DIR}/provision-master-key"
 success "Installed ${TARGET_LIBEXEC_DIR}/provision-master-key"
 
+# Prints how to activate the custom/soos authselect profile for the recorded profile
+# "$1" (`authselect current --raw`: id followed by its features). custom/soos is derived
+# from the authselect "local" profile and serves local accounts only: activating it on an
+# sssd, winbind or nis host removes the directory identity source and its features
+# (security review 2026-11-10, PSTK-02, GitHub #575). The command is printed only for the
+# local and minimal profiles, with the recorded features carried over and without --force.
+authselect_activation_hint() {
+    local current="$1"
+    local id="${current%% *}"
+    local features="" feature
+    local -a words=()
+    if [[ "${current}" == *" "* ]]; then
+        read -r -a words <<< "${current#* }"
+    fi
+    for feature in "${words[@]}"; do
+        [[ "${feature}" == "with-faillock" ]] && continue
+        features+=" ${feature}"
+    done
+    case "${id}" in
+        "")
+            warn "No authselect profile is selected on this host. custom/soos serves local accounts only: only on a host with local accounts only, activate it with: authselect select custom/soos with-faillock --force && authselect check"
+            ;;
+        local|minimal)
+            info "Activate with: authselect select custom/soos with-faillock${features} && authselect check"
+            ;;
+        custom/soos*)
+            info "The custom/soos authselect profile is already selected."
+            ;;
+        *)
+            warn "The current authselect profile is '${id}'. custom/soos serves local accounts only (it is derived from the 'local' profile): activating it would remove the directory identity source (sssd, winbind, nis) and the features of '${id}', locking out every directory account. It is not activated; see Docs/DISTRIBUTION_DEPLOYMENT.md section 4.3."
+            ;;
+    esac
+}
+
 install_artifact() {
     local name="$1" mode="$2" dst="$3"
     if [[ -n "${ARTIFACT_PATHS[${name}]:-}" ]]; then
@@ -1096,7 +1130,7 @@ if [[ "${PAM_FAMILY}" == "fedora" && -d "${PAM_PKG_DIR}/fedora/soos" ]]; then
             tracked_install 0644 "${AUTHSELECT_RECORD}" "${AUTHSELECT_PREVIOUS_FILE}"
             success "Recorded current authselect profile for rollback: ${AUTHSELECT_CURRENT}"
         fi
-        info "Activate with: authselect select custom/soos with-faillock --force && authselect check"
+        authselect_activation_hint "${AUTHSELECT_CURRENT}"
     fi
 fi
 
