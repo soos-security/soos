@@ -2266,7 +2266,7 @@ const TOUR_STEPS = [
   {
     title: "Internet access",
     text: "Tailscale Funnel makes the phone page reachable from the Internet without the VPN app on the phone. Every action still needs your passkey, but the page is then exposed beyond your tailnet.",
-    off: "Off: the page is reachable only from devices signed in to your tailnet.",
+    off: "Off: requests from the Internet are refused with 403, so only devices signed in to your tailnet can use the page; the public Funnel listener stays published until you run tailscale funnel --https=443 off on this PC.",
     where:
       "On this phone, Sign out ends this phone's session. On the PC: set allow_funnel = false and camera_view_funnel = false in ~/.config/soos/remote.toml and remove its [android] table if there is one, then run: systemctl --user restart soos-remote.service. Without an [android] table, Features in soos-gui does the same.",
     target: "logout",

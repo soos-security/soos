@@ -17,7 +17,7 @@
 use std::fs;
 use std::path::Path;
 
-use soos_remote::config::{parse_config, parse_config_with_android, ConfigError};
+use soos_remote::config::{parse_config, parse_config_with_android, ConfigError, PushPreviews};
 
 const RUNTIME_DIR: &str = "/run/user/1000";
 
@@ -26,9 +26,22 @@ fn fixture() -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// The fixture with `key = true` turned to `key = false` for each listed key.
-fn with_off(keys: &[&str]) -> String {
+/// The render with every feature on: the fixture (setup's `--yes` default, where remote unlock
+/// and the camera view over Funnel are off, GitHub #480) with those two keys turned on through
+/// their options.
+fn fixture_all_on() -> String {
     let mut text = fixture();
+    for key in ["allow_unlock", "camera_view_funnel"] {
+        let from = format!("\n{key} = false\n");
+        assert!(text.contains(&from), "{key} is off in the fixture");
+        text = text.replace(&from, &format!("\n{key} = true\n"));
+    }
+    text
+}
+
+/// The every-feature-on render with `key = true` turned to `key = false` for each listed key.
+fn with_off(keys: &[&str]) -> String {
+    let mut text = fixture_all_on();
     for key in keys {
         let from = format!("\n{key} = true\n");
         assert!(text.contains(&from), "{key} is on in the fixture");
@@ -44,11 +57,17 @@ fn test_set_render_with_every_default_on_is_accepted() {
     assert_eq!(config.allowed_logins[0].as_str(), "owner.login@example.com");
     assert_eq!(config.auth.rp_id.as_deref(), Some("pc.tail1234.ts.net"));
     assert!(config.auth.allow_funnel);
-    assert!(config.allow_unlock);
+    assert!(!config.allow_unlock);
     assert!(config.alerts.enabled);
     assert!(config.push.enabled);
     assert!(config.offline.enabled);
     assert!(config.camera.enabled);
+    assert!(!config.camera.funnel);
+
+    // Both asked features on through their options: accepted too.
+    let config =
+        parse_config(&fixture_all_on(), Some(Path::new(RUNTIME_DIR))).expect("all on accepted");
+    assert!(config.allow_unlock);
     assert!(config.camera.funnel);
 }
 
@@ -123,4 +142,35 @@ fn test_sdp25_android_render_is_accepted() {
         assert!(body.contains(fp), "assetlinks names {fp}: {body}");
     }
     assert!(body.contains("\"org.soos.remote\""), "{body}");
+}
+
+/// SRD6 (GitHub #480, RCFG-02): the managed `remote.toml` with the hardening keys setup
+/// carries over (`tests/fixtures/setup/remote_carried.toml`, byte-equal to the render, asserted
+/// by `soos-invariants::setup_deps_contract::test_srd6`) is accepted by the real parser: the
+/// host allowlist is pinned to `rp_id`, the privacy choices and the credential store are kept,
+/// and remote unlock and the camera view over Funnel are off.
+#[test]
+fn test_srd6_carried_render_is_accepted() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/setup/remote_carried.toml");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let config = parse_config(&text, Some(Path::new(RUNTIME_DIR))).expect("render accepted");
+    assert_eq!(config.allowed_hosts, vec!["pc.tail1234.ts.net".to_string()]);
+    assert_eq!(config.push.previews, PushPreviews::Generic);
+    assert!(!config.battery.enabled);
+    assert_eq!(
+        config.alerts.lock_screen_programs,
+        vec![
+            "/usr/bin/swaylock".to_string(),
+            "/opt/locker/bin/lock".to_string()
+        ]
+    );
+    assert_eq!(
+        config.auth.credentials_path.as_deref(),
+        Some(Path::new("/srv/soos-passkeys/remote-passkeys.json"))
+    );
+    assert!(config.auth.allow_funnel);
+    assert!(!config.allow_unlock);
+    assert!(config.camera.enabled);
+    assert!(!config.camera.funnel);
 }

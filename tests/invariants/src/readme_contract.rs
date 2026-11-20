@@ -892,8 +892,8 @@ fn test_rdm_companion_opt_out_names_dependent_keys() {
     let on = keys_set_true(&read(SETUP_RENDER_FIXTURE));
     assert_eq!(
         on,
-        COMPANION_EXPOSURE_KEYS.to_vec(),
-        "{SETUP_RENDER_FIXTURE} must set every exposure key to `true` as `key = true` lines; update RDM10 and the README with the setup defaults"
+        vec!["allow_funnel", "camera_view"],
+        "{SETUP_RENDER_FIXTURE} must set the exposure keys setup turns on (every one except remote unlock and the camera view over Funnel, GitHub #480) to `true` as `key = true` lines; update RDM10 and the README with the setup defaults"
     );
     let readme = read("README.md");
     let independent: Vec<String> = text_units(&readme)

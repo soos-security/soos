@@ -194,7 +194,8 @@ the stored template (or `None` when the store lookup fails or finds nothing):
 
 On the first launch for a user, `soos-gui` opens a tour window (`egui::Modal`, brand modal frame)
 that explains every soos feature, shows its current state and offers its on/off control. The
-installer turns every feature on (owner decision on #362); the tour is where the user learns
+installer turns every feature on (owner decision on #362) except remote unlock and the camera view
+over Funnel, which it asks about (GitHub #480); the tour is where the user learns
 what each one does and can turn it off. The tour can be skipped, and the **Features** button in
 the header band reopens it at any time on its overview page (every feature with its switch, and
 "Replay the tour").
@@ -240,6 +241,13 @@ the header band reopens it at any time on its overview page (every feature with 
   shown "off" command for Internet access says so too. Any other table, a sub-table, an array of
   tables, a quoted header or a key of the switch inside a table is still refused
   (`RemoteEditError::UnsupportedLayout`), and nothing is written or restarted on a refusal.
+
+  Internet access off sets `allow_funnel = false`, so every Funnel request is refused with
+  `403`, but Tailscale keeps the public Funnel listener published and the request head is still
+  read and parsed before that refusal. The GUI never runs `tailscale`: when Internet access is off,
+  the tour shows `onboarding::FUNNEL_LISTENER_OFF_COMMANDS` (`Feature::off_follow_up`) in a
+  copyable block, `tailscale funnel --https=443 off` and the `tailscale serve --bg unix:...`
+  command that restores the tailnet-only handler (security review 2026-11-10, GitHub #480 GUI-03).
 
   The GUI process never writes a root-owned file: root changes run under `pkexec` (Polkit
   administrator authentication) with fixed argument vectors and absolute programs

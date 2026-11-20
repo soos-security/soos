@@ -1437,7 +1437,7 @@ fn test_sdp9_user_file_backed_up_and_replaced() {
     assert_eq!(mode_of(&backups[0]), 0o600);
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed(LOGIN, [false, true, true, true, true, true, false], &[])
+        managed(LOGIN, [false, false, true, true, true, true, false], &[])
     );
     assert_eq!(mode_of(&h.remote_toml()), 0o600);
     assert!(
@@ -1467,7 +1467,7 @@ fn test_sdp9_user_file_backed_up_and_replaced() {
     );
     // R2-10: keys absent from the file and turned on by the default profile are named.
     assert!(
-        t.contains("turned on by setup's default profile: allow_unlock, password_alerts, push_notifications, offline_alerts, camera_view"),
+        t.contains("turned on by setup's default profile: password_alerts, push_notifications, offline_alerts, camera_view"),
         "{t}"
     );
 }
@@ -1483,7 +1483,11 @@ fn test_sdp10_identity_from_the_user_file_else_kept() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed(USER_LOGIN, [true; 7], &[])
+        managed(
+            USER_LOGIN,
+            [true, false, true, true, true, true, false],
+            &[]
+        )
     );
     assert_eq!(h.backups().len(), 1);
     assert!(!text(&out).contains(USER_LOGIN), "{}", text(&out));
@@ -1633,37 +1637,37 @@ fn test_sdp14_tolerant_fail_safe_booleans_of_a_user_file() {
         (
             "nospace",
             "allow_funnel=false\n",
-            [false, true, true, true, true, true, false],
+            [false, false, true, true, true, true, false],
             false,
         ),
         (
             "comment",
             "allow_funnel = false # tailnet only\n",
-            [false, true, true, true, true, true, false],
+            [false, false, true, true, true, true, false],
             false,
         ),
         (
             "quoted",
             "allow_funnel = \"false\"\n",
-            [false, true, true, true, true, true, false],
+            [false, false, true, true, true, true, false],
             true,
         ),
         (
             "yes",
             "camera_view = yes\n",
-            [true, true, true, true, true, false, false],
+            [true, false, true, true, true, false, false],
             true,
         ),
         (
             "below",
             "[ android ]\nallow_funnel = false\n",
-            [true; 7],
+            [true, false, true, true, true, true, false],
             false,
         ),
         (
             "belowother",
             "[camera]\npush_notifications = false\n",
-            [true; 7],
+            [true, false, true, true, true, true, false],
             false,
         ),
     ] {
@@ -1763,7 +1767,14 @@ fn test_sdp16_user_android_block_carried_over() {
     let out = h.run_companion(&[]);
     assert_eq!(code(&out), 0, "{}", text(&out));
     let written = fs::read_to_string(h.remote_toml()).unwrap();
-    assert_eq!(written, managed(LOGIN, [true; 7], &[FP_A, FP_B]));
+    assert_eq!(
+        written,
+        managed(
+            LOGIN,
+            [true, false, true, true, true, true, false],
+            &[FP_A, FP_B]
+        )
+    );
     assert!(
         written.ends_with(&android_block(&[FP_A, FP_B])),
         "the block is last"
@@ -1784,7 +1795,7 @@ fn test_sdp16_user_android_block_carried_over() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed(LOGIN, [true; 7], &[FP_A])
+        managed(LOGIN, [true, false, true, true, true, true, false], &[FP_A])
     );
     assert!(!text(&out).contains("not carried over (see the backup)"));
 }
@@ -1843,7 +1854,7 @@ fn test_sdp18_non_strict_user_android_table_not_carried() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed(LOGIN, [false, true, true, true, true, true, false], &[])
+        managed(LOGIN, [false, false, true, true, true, true, false], &[])
     );
     assert!(
         text(&out).contains("your [android] table was not carried over (see the backup)"),
@@ -2127,19 +2138,19 @@ fn test_sdp27_quoted_keys_and_unparsed_lines_fail_safe() {
         (
             "dquote",
             "\"allow_funnel\" = false\n",
-            [false, true, true, true, true, true, false],
+            [false, false, true, true, true, true, false],
             None,
         ),
         (
             "squote",
             "'allow_unlock' = false # mine\n",
-            [true, false, true, true, true, true, true],
+            [true, false, true, true, true, true, false],
             None,
         ),
         (
             "quotedbad",
             "\"camera_view\"=maybe\n",
-            [true, true, true, true, true, false, false],
+            [true, false, true, true, true, false, false],
             Some("camera_view"),
         ),
         (
@@ -2151,13 +2162,13 @@ fn test_sdp27_quoted_keys_and_unparsed_lines_fail_safe() {
         (
             "mlarray",
             "lock_screen_programs = [\n  [\"swaylock\"],\n]\npush_notifications = false\n",
-            [true, true, true, false, false, true, true],
+            [true, false, true, false, false, true, false],
             None,
         ),
         (
             "twice",
             "allow_funnel = nope\nallow_funnel = also-nope\n",
-            [false, true, true, true, true, true, false],
+            [false, false, true, true, true, true, false],
             Some("allow_funnel"),
         ),
         // Lead review round 2: a key spelled with a TOML escape is the same key for soos-remote;
@@ -2173,7 +2184,7 @@ fn test_sdp27_quoted_keys_and_unparsed_lines_fail_safe() {
         (
             "escapedquotes",
             "note = \"\"\"\ntext \\\"\"\"\n[x]\n\"\"\"\nallow_funnel = false\n",
-            [false, true, true, true, true, true, false],
+            [false, false, true, true, true, true, false],
             None,
         ),
     ] {
@@ -2377,4 +2388,521 @@ fn test_sdp29_drop_in_marker_on_the_first_line_only() {
         install.contains("-f \"${PUSH_SENDER_DROP_IN_DIR}/prefix.conf\" && ! -L \"${PUSH_SENDER_DROP_IN_DIR}/prefix.conf\""),
         "install.sh checks a regular file, not a link, before the journaled copy and removal"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Security review 2026-11-10, batch 3 (GitHub #480): safe companion defaults and a fail-safe
+// remote.toml reader (rows SRD1-SRD9)
+// ---------------------------------------------------------------------------
+
+/// The feature values of the `--yes` default profile: remote unlock and the camera view over
+/// Funnel off, every other feature on.
+const SRD_DEFAULT: [bool; 7] = [true, false, true, true, true, true, false];
+
+/// `managed` followed by the carried hardening lines (rendered after the feature keys).
+fn managed_carried(values: [bool; 7], carried: &str) -> String {
+    format!("{}{carried}", managed(LOGIN, values, &[]))
+}
+
+/// The plan line of the companion configuration.
+fn config_plan_line(t: &str) -> String {
+    t.lines()
+        .find(|l| l.contains("[PLAN] companion config:"))
+        .unwrap_or_else(|| panic!("no companion config plan line:\n{t}"))
+        .to_string()
+}
+
+/// Runs setup under a pseudo-terminal (`script`), so the run is interactive, feeding `input`
+/// line by line.
+fn run_tty(h: &Harness, args: &[&str], input: &str) -> Output {
+    fs::write(&h.log, "").expect("reset log");
+    let prefix = h.root.join("usr").display().to_string();
+    let mut words: Vec<String> = vec![
+        bash_path().display().to_string(),
+        h.repo.join(SETUP).display().to_string(),
+    ];
+    words.extend(h.root_args(&prefix));
+    words.extend(args.iter().map(|a| (*a).to_string()));
+    let command = words
+        .iter()
+        .map(|w| format!("'{}'", w.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = ["/usr/bin/script", "/bin/script"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| is_executable(p))
+        .expect("util-linux script is needed to drive an interactive run");
+    let mut cmd = Command::new(script);
+    cmd.args(["-q", "-e", "-c", &command, "/dev/null"])
+        .current_dir(&h.dir)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in &h.env {
+        cmd.env(k, v);
+    }
+    cmd.env("SHELL", bash_path());
+    cmd.env("TERM", "dumb");
+    let mut child = cmd.spawn().expect("spawn script");
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("stdin");
+        stdin.write_all(input.as_bytes()).expect("write answers");
+    }
+    child.wait_with_output().expect("wait script")
+}
+
+/// SRD1 (SETB-01): a `--yes` run writes remote unlock and the camera view over Funnel off and
+/// says how to turn each on; their options turn them on.
+#[test]
+fn test_srd1_yes_run_leaves_unlock_and_camera_view_funnel_off() {
+    let h = Harness::new("srd1");
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(h.remote_toml()).unwrap(),
+        managed(LOGIN, SRD_DEFAULT, &[])
+    );
+    let line = config_plan_line(&text(&out));
+    for needle in [
+        "remote unlock off (--remote-unlock on to turn it on)",
+        "camera view over Funnel off (--camera-view-funnel on to turn it on)",
+        "Funnel on",
+        "camera view on",
+    ] {
+        assert!(line.contains(needle), "{needle}: {line}");
+    }
+
+    let h = Harness::new("srd1on");
+    let out = h.run_companion(&["--remote-unlock", "on", "--camera-view-funnel", "on"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(h.remote_toml()).unwrap(),
+        managed(LOGIN, [true; 7], &[])
+    );
+}
+
+/// SRD2 (SETB-01): an absent key is never turned on by a re-run (managed file with a deleted
+/// line, user file); an explicit `true` already written stays on; the default-profile note
+/// never names the two keys.
+#[test]
+fn test_srd2_an_absent_key_is_never_turned_on_by_a_rerun() {
+    // Managed file, both keys on through their options, then re-run without them: kept on.
+    let h = Harness::new("srd2keep");
+    let first = h.run_companion(&["--remote-unlock", "on", "--camera-view-funnel", "on"]);
+    assert_eq!(code(&first), 0, "{}", text(&first));
+    let out = h.run(&["--yes"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(h.remote_toml()).unwrap(),
+        managed(LOGIN, [true; 7], &[]),
+        "an explicit true is kept"
+    );
+    assert!(text(&out).contains("[PLAN] companion config: already done"));
+
+    // Managed file whose two lines were deleted by hand: the rewrite writes them off.
+    let content = managed(LOGIN, [true; 7], &[])
+        .replace("allow_unlock = true\n", "")
+        .replace("camera_view_funnel = true\n", "");
+    fs::write(h.remote_toml(), &content).unwrap();
+    let out = h.run(&["--yes"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(h.remote_toml()).unwrap(),
+        managed(LOGIN, SRD_DEFAULT, &[])
+    );
+
+    // User file: an explicit true is kept, an absent key is off and never named as turned on.
+    for (tag, body, expected) in [
+        ("srd2user", "", SRD_DEFAULT),
+        (
+            "srd2usertrue",
+            "allow_unlock = true\n",
+            [true, true, true, true, true, true, false],
+        ),
+    ] {
+        let h = Harness::new(tag);
+        h.user_file(&format!(
+            "allowed_logins = [\"{USER_LOGIN}\"]\nrp_id = \"{RP_ID}\"\n{body}"
+        ));
+        let out = h.run_companion(&[]);
+        assert_eq!(code(&out), 0, "{tag}: {}", text(&out));
+        assert_eq!(
+            fs::read_to_string(h.remote_toml()).unwrap(),
+            managed(LOGIN, expected, &[]),
+            "{tag}"
+        );
+        let line = config_plan_line(&text(&out));
+        let on = line
+            .split("turned on by setup's default profile:")
+            .nth(1)
+            .unwrap_or("");
+        let on = on.split(';').next().unwrap_or("");
+        assert!(
+            !on.contains("allow_unlock") && !on.contains("camera_view_funnel"),
+            "{tag}: {line}"
+        );
+    }
+}
+
+/// SRD3 (SETB-01): an interactive run asks one question for each of the two features, after
+/// the identity and before the plan; only a yes turns it on (default no).
+#[test]
+fn test_srd3_interactive_run_asks_each_question_default_no() {
+    for (tag, input, expected) in [
+        (
+            "srd3yn",
+            "y\n\ny\n",
+            [true, true, true, true, true, true, false],
+        ),
+        (
+            "srd3ny",
+            "n\nyes\ny\n",
+            [true, false, true, true, true, true, true],
+        ),
+        ("srd3nn", "\n\ny\n", SRD_DEFAULT),
+    ] {
+        let h = Harness::new(tag);
+        let out = run_tty(
+            &h,
+            &["--no-enroll", "--tailscale-login", LOGIN, "--rp-id", RP_ID],
+            input,
+        );
+        let t = text(&out);
+        assert_eq!(code(&out), 0, "{tag}: {t}");
+        let unlock = t
+            .find("Allow unlocking this PC from the phone?")
+            .unwrap_or_else(|| panic!("{tag}: the unlock question is asked: {t}"));
+        let camera = t
+            .find("Allow the live camera view of this PC from the Internet through Funnel?")
+            .unwrap_or_else(|| panic!("{tag}: the camera question is asked: {t}"));
+        let proceed = t
+            .find("Proceed with this plan?")
+            .expect("plan confirmation");
+        assert!(unlock < camera && camera < proceed, "{tag}: order: {t}");
+        assert_eq!(
+            fs::read_to_string(h.remote_toml()).unwrap(),
+            managed(LOGIN, expected, &[]),
+            "{tag}"
+        );
+    }
+    // No question for a key its option or the managed file already decides.
+    let h = Harness::new("srd3decided");
+    let out = run_tty(
+        &h,
+        &[
+            "--no-enroll",
+            "--tailscale-login",
+            LOGIN,
+            "--rp-id",
+            RP_ID,
+            "--remote-unlock",
+            "off",
+            "--camera-view-funnel",
+            "on",
+        ],
+        "y\n",
+    );
+    let t = text(&out);
+    assert_eq!(code(&out), 0, "{t}");
+    assert!(!t.contains("Allow unlocking this PC"), "{t}");
+    assert!(!t.contains("Allow the live camera view"), "{t}");
+}
+
+/// SRD4 (SETB-02, SETBB-01): the reader tracks multi-line literal strings opened with `'''`
+/// whatever they contain, comments, single-line strings, dotted keys and escapes, so a `[` line
+/// inside a string or array is never a table header and an explicit `false` after it is kept; a
+/// `true` inside a string is never read.
+#[test]
+fn test_srd4_reader_tracks_strings_comments_dotted_keys_and_escapes() {
+    let pinned = format!("allowed_hosts = [\"{RP_ID}\"]\n");
+    for (tag, body, expected, carried) in [
+        (
+            "literal",
+            "socket_path = '''/tmp/a\"\"\"\n\"\"\"\n[x]\n'''\nallow_funnel = false\ncamera_view = false\n",
+            [false, false, true, true, true, false, false],
+            String::new(),
+        ),
+        (
+            "comment",
+            "push_previews = \"generic\" # quote style: \"\"\"\nsocket_path = \"\"\"\n[x]\n\"\"\"\nallow_funnel = false\n",
+            [false, false, true, true, true, true, false],
+            "push_previews = \"generic\"\n".to_string(),
+        ),
+        (
+            "instring",
+            "lock_screen_programs = [\"swaylock'''\"]\nsocket_path = '''\n[x]\n'''\ncamera_view = false\n",
+            [true, false, true, true, true, false, false],
+            String::new(),
+        ),
+        (
+            "dotted",
+            "notes.text = \"\"\"\n[x]\nallow_unlock = true\n\"\"\"\ncamera_view = false\n",
+            [true, false, true, true, true, false, false],
+            String::new(),
+        ),
+        (
+            "arrayescape",
+            "allowed_hosts = [\"\\\"]\",\n  [\"x\"],\n]\ncamera_view = false\n",
+            [true, false, true, true, true, false, false],
+            pinned.clone(),
+        ),
+    ] {
+        let h = Harness::new(&format!("srd4{tag}"));
+        h.user_file(&format!(
+            "allowed_logins = [\"{USER_LOGIN}\"]\nrp_id = \"{RP_ID}\"\n{body}"
+        ));
+        let out = h.run_companion(&[]);
+        let t = text(&out);
+        assert_eq!(code(&out), 0, "{tag}: {t}");
+        assert_eq!(
+            fs::read_to_string(h.remote_toml()).unwrap(),
+            managed_carried(expected, &carried),
+            "{tag}"
+        );
+        assert!(
+            !config_plan_line(&t).contains("[x]"),
+            "{tag}: a [ line inside a string or array is no table: {t}"
+        );
+    }
+}
+
+/// SRD5 (SETBB-01): a construct the reader cannot model (a string or array still open at the
+/// end of the file, a one-line string never closed, a closing bracket without an opening one, a
+/// backslash outside a string) turns every feature off and says so, never naming a value.
+#[test]
+fn test_srd5_unreadable_construct_turns_every_feature_off() {
+    for (tag, body) in [
+        ("openml", "note = \"\"\"\nallow_funnel = true\n"),
+        (
+            "openarray",
+            "lock_screen_programs = [\n  \"/usr/bin/swaylock\",\n",
+        ),
+        ("openstring", "note = \"unclosed\npassword_alerts = true\n"),
+        ("stray", "note = 1]\nallow_funnel = true\n"),
+        ("backslash", "note = \\x\nallow_funnel = true\n"),
+    ] {
+        let h = Harness::new(&format!("srd5{tag}"));
+        h.user_file(&format!(
+            "allowed_logins = [\"{USER_LOGIN}\"]\nrp_id = \"{RP_ID}\"\n{body}"
+        ));
+        let out = h.run_companion(&[]);
+        let t = text(&out);
+        assert_eq!(code(&out), 0, "{tag}: {t}");
+        assert_eq!(
+            fs::read_to_string(h.remote_toml()).unwrap(),
+            managed(LOGIN, [false; 7], &[]),
+            "{tag}"
+        );
+        assert!(
+            config_plan_line(&t)
+                .contains("every feature kept off: the file has a construct setup cannot read"),
+            "{tag}: {t}"
+        );
+        assert!(!t.contains("unclosed"), "{tag}: no value printed: {t}");
+    }
+}
+
+/// SRD6 (RCFG-02): the hardening and privacy keys of a rewritten file are carried over after
+/// strict validation, `allowed_hosts` is pinned to the node name, the result stays managed on
+/// the next run and equals the fixture `soos-remote` parses; a `credentials_path` setup cannot
+/// carry over refuses the run before any change.
+#[test]
+fn test_srd6_hardening_keys_carried_over_and_allowed_hosts_pinned() {
+    let h = Harness::new("srd6");
+    h.user_file(&format!(
+        "allowed_logins = [\"{USER_LOGIN}\"]\nrp_id = \"{RP_ID}\"\n\
+         allowed_hosts = [\"{RP_ID}\", \"lan-box.example\"]\n\
+         push_previews = 'generic'   # privacy\n\
+         battery_status = false\n\
+         lock_screen_programs = [ \"/usr/bin/swaylock\", \"/opt/locker/bin/lock\" ]\n\
+         credentials_path = \"/srv/soos-passkeys/remote-passkeys.json\"\n\
+         vapid_subject = \"{SENTINEL}\"\n"
+    ));
+    let out = h.run_companion(&[]);
+    let t = text(&out);
+    assert_eq!(code(&out), 0, "{t}");
+    let written = fs::read_to_string(h.remote_toml()).unwrap();
+    assert_eq!(
+        written,
+        managed_carried(
+            SRD_DEFAULT,
+            &format!(
+                "allowed_hosts = [\"{RP_ID}\"]\n\
+                 push_previews = \"generic\"\n\
+                 battery_status = false\n\
+                 lock_screen_programs = [\"/usr/bin/swaylock\", \"/opt/locker/bin/lock\"]\n\
+                 credentials_path = \"/srv/soos-passkeys/remote-passkeys.json\"\n"
+            )
+        )
+    );
+    assert_eq!(
+        written.replace(&format!("\"{LOGIN}\""), "\"owner.login@example.com\""),
+        read_repo("tests/fixtures/setup/remote_carried.toml"),
+        "the carried render equals the fixture soos-remote parses"
+    );
+    let line = config_plan_line(&t);
+    assert!(
+        line.contains("carried over: allowed_hosts (pinned to the node name), push_previews, battery_status, lock_screen_programs, credentials_path"),
+        "{line}"
+    );
+    assert!(
+        line.contains("not carried over (names only, see the backup): vapid_subject"),
+        "{line}"
+    );
+    assert!(!t.contains(SENTINEL) && !t.contains("soos-passkeys"), "{t}");
+
+    let before = h.snapshot();
+    let out = h.run(&["--yes"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert!(
+        text(&out).contains("[PLAN] companion config: already done"),
+        "the carried keys keep the file managed: {}",
+        text(&out)
+    );
+    assert_eq!(before, h.snapshot());
+
+    // allowed_hosts of any value is pinned; a value outside the strict grammar is dropped.
+    let h = Harness::new("srd6pin");
+    h.user_file(&format!(
+        "allowed_logins = [\"{USER_LOGIN}\"]\nrp_id = \"{RP_ID}\"\nallowed_hosts = []\npush_previews = \"loud\"\n"
+    ));
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(h.remote_toml()).unwrap(),
+        managed_carried(SRD_DEFAULT, &format!("allowed_hosts = [\"{RP_ID}\"]\n"))
+    );
+    assert!(
+        config_plan_line(&text(&out))
+            .contains("not carried over (names only, see the backup): push_previews"),
+        "{}",
+        text(&out)
+    );
+
+    for value in [
+        "\"relative/passkeys.json\"",
+        "\"/a/../b.json\"",
+        "\"/x/\"",
+        "[\"/x.json\"]",
+    ] {
+        let h = Harness::new("srd6cred");
+        h.user_file(&format!(
+            "allowed_logins = [\"{USER_LOGIN}\"]\nrp_id = \"{RP_ID}\"\ncredentials_path = {value}\n"
+        ));
+        let before = h.snapshot();
+        let out = h.run_companion(&[]);
+        assert_eq!(code(&out), 2, "{value}: {}", text(&out));
+        assert!(
+            text(&out).contains("credentials_path") && text(&out).contains("cannot carry it over"),
+            "{value}: {}",
+            text(&out)
+        );
+        assert!(!text(&out).contains("relative/passkeys"), "{}", text(&out));
+        assert_eq!(before, h.snapshot(), "{value}: refused before any change");
+    }
+}
+
+/// SRD7 (SETB-03, SETB-01, GUI-03): with Funnel on, the guide checks `tailscale serve status`
+/// before the Funnel command, says Funnel publishes every handler on port 443 of the node,
+/// states what becomes reachable from the Internet behind a passkey, and says that turning Funnel
+/// off keeps the public listener until the Tailscale command of the operator guide removes it
+/// (setup.sh never contains that command's `--https` spelling, SET3); the manual installer and
+/// the operator guide say the same.
+#[test]
+fn test_srd7_funnel_guide_checks_serve_status_and_states_the_exposure() {
+    let h = Harness::new("srd7");
+    let out = h.run_companion(&[]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    let status = t
+        .find("tailscale serve status")
+        .expect("serve status check");
+    let funnel = t
+        .find("tailscale funnel --bg unix:")
+        .expect("funnel command");
+    assert!(status < funnel, "the check comes first:\n{t}");
+    for needle in [
+        "Funnel publishes every handler on port 443 of this node",
+        "From the Internet, whoever holds a passkey of this PC",
+        "keeps the public listener published",
+        "Docs/REMOTE_COMPANION.md section 2b",
+    ] {
+        assert!(t.contains(needle), "{needle}:\n{t}");
+    }
+    let risk = t
+        .lines()
+        .find(|l| l.contains("From the Internet, whoever holds a passkey"))
+        .expect("risk line");
+    assert!(
+        !risk.contains("unlock this PC") && !risk.contains("live camera"),
+        "{risk}"
+    );
+
+    let h = Harness::new("srd7on");
+    let out = h.run_companion(&["--remote-unlock", "on", "--camera-view-funnel", "on"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let t = text(&out);
+    let risk = t
+        .lines()
+        .find(|l| l.contains("From the Internet, whoever holds a passkey"))
+        .expect("risk line");
+    assert!(
+        risk.contains("unlock this PC") && risk.contains("live camera"),
+        "{risk}"
+    );
+
+    let manual = read_repo("scripts/install_remote.sh");
+    let status = manual
+        .find("tailscale serve status")
+        .expect("install_remote.sh check");
+    let funnel = manual
+        .find("tailscale funnel --bg")
+        .expect("install_remote.sh funnel");
+    assert!(status < funnel);
+    assert!(manual.contains("every handler on port 443"));
+    let doc = read_repo("Docs/REMOTE_COMPANION.md");
+    assert!(doc.contains("Funnel publishes every handler on port 443 of this node"));
+    assert!(doc.contains("must list only `/` proxy unix:"));
+}
+
+/// SRD8 (SETB-01): the help says which two features stay off unless asked, and the kept-file
+/// summary lists them off.
+#[test]
+fn test_srd8_help_and_kept_summary_name_the_asked_features() {
+    let h = Harness::new("srd8");
+    let out = h.run(&["--help"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let help = text(&out).split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        help.contains(
+            "Remote unlock and the camera view over Funnel stay off unless their option says on"
+        ),
+        "{help}"
+    );
+    let setup = read_repo(SETUP);
+    assert!(setup.contains("allow_unlock = false (asked), password_alerts = true"));
+    assert!(setup.contains("camera_view_funnel = false (asked)"));
+}
+
+/// SRD9: the ADR, the matrix rows and the walkthrough record the change.
+#[test]
+fn test_srd9_adr_matrix_and_walkthrough() {
+    let decisions = read_repo("AI/DECISIONS.md");
+    assert!(
+        decisions.contains("Setup Leaves Remote Unlock and the Camera View Over Funnel Off"),
+        "AI/DECISIONS.md must carry the batch 3 ADR"
+    );
+    let matrix = read_repo("AI/VERIFICATION_MATRIX.md");
+    for row in 1..=9 {
+        assert!(
+            matrix.contains(&format!("| SRD{row} |")),
+            "matrix row SRD{row}"
+        );
+    }
+    assert!(workspace_root()
+        .join("AI/walkthroughs/259_setup_remote_defaults.md")
+        .is_file());
 }

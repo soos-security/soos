@@ -945,7 +945,7 @@ fn test_set_u5_dry_run_prints_the_companion_plan_without_change() {
         "[PLAN] companion: will run",
         "[PLAN] companion config: will run",
         "Funnel on",
-        "remote unlock on",
+        "remote unlock off",
         "camera view on",
         "push on",
         "offline alerts on",
@@ -1024,7 +1024,7 @@ fn test_set_u6_full_run_sets_up_the_default_on_companion() {
     let remote = h.remote_toml();
     assert_eq!(
         fs::read_to_string(&remote).expect("remote.toml"),
-        managed_remote([true; 7])
+        managed_remote([true, false, true, true, true, true, false])
     );
     assert_eq!(mode_of(&remote), 0o600);
     assert_eq!(mode_of(remote.parent().unwrap()), 0o700);
@@ -1140,7 +1140,7 @@ fn test_set_u7_second_run_is_idempotent() {
 #[test]
 fn test_set_u8_explicit_false_is_kept_unless_its_flag_says_on() {
     let h = Harness::new("keepoff");
-    let first = h.run_companion(&[]);
+    let first = h.run_companion(&["--remote-unlock", "on", "--camera-view-funnel", "on"]);
     assert_eq!(code(&first), 0, "{}", text(&first));
     gui_turn_off(&h.remote_toml(), "allow_funnel");
     gui_turn_off(&h.remote_toml(), "camera_view_funnel");
@@ -1195,7 +1195,7 @@ fn test_set_u9_prerequisites_cascade_and_offline_needs_push() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed_remote([true, true, true, false, false, true, true])
+        managed_remote([true, false, true, false, false, true, false])
     );
     assert!(!h.user_unit("soos-push-sender.service", "enabled"));
 
@@ -1204,7 +1204,7 @@ fn test_set_u9_prerequisites_cascade_and_offline_needs_push() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed_remote([false, true, false, false, false, true, false])
+        managed_remote([false, false, false, false, false, true, false])
     );
     let t = text(&out);
     assert!(
@@ -1217,7 +1217,7 @@ fn test_set_u9_prerequisites_cascade_and_offline_needs_push() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed_remote([true, true, true, true, true, false, false])
+        managed_remote([true, false, true, true, true, false, false])
     );
     assert!(
         !h.daemon_toml().exists(),
@@ -1298,7 +1298,7 @@ fn test_set_u12_template_replaced_user_file_untouched() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed_remote([true; 7])
+        managed_remote([true, false, true, true, true, true, false])
     );
     let backup = dir.join("remote.toml.soos-setup.bak");
     assert_eq!(fs::read_to_string(&backup).unwrap(), template);
@@ -1351,7 +1351,7 @@ fn test_set_u12_template_replaced_user_file_untouched() {
     assert_eq!(mode_of(&backups[0]), 0o600);
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed_remote([false, true, true, true, true, true, false])
+        managed_remote([false, false, true, true, true, true, false])
     );
     assert!(!has_line(&h.log_lines(), &["funnel --bg"]));
 
@@ -1366,7 +1366,7 @@ fn test_set_u12_template_replaced_user_file_untouched() {
     assert_eq!(code(&out), 0, "{}", text(&out));
     assert_eq!(
         fs::read_to_string(h.remote_toml()).unwrap(),
-        managed_remote([false, true, true, true, true, true, false])
+        managed_remote([false, false, true, true, true, true, false])
             .replace(LOGIN, "me@example.com")
     );
     assert_eq!(backups_of(&dir).len(), 1);
@@ -1542,7 +1542,7 @@ fn test_set_u22_rollback_stops_a_unit_started_by_the_run() {
 
     // Active before the run and restarted by it: the rollback restarts it on the restored file.
     let mut h = Harness::new("urestart");
-    let first = h.run_companion(&[]);
+    let first = h.run_companion(&["--remote-unlock", "on"]);
     assert_eq!(code(&first), 0, "{}", text(&first));
     let good = fs::read_to_string(h.remote_toml()).unwrap();
     h.set_env("STUB_USER_DIE_UNIT", "soos-remote.service");
@@ -1725,7 +1725,7 @@ fn test_set_u20_writable_config_dir_refused_and_render_matches_fixture() {
     assert_eq!(before, h.snapshot());
 
     assert_eq!(
-        managed_remote([true; 7]),
+        managed_remote([true, false, true, true, true, true, false]),
         read_repo("tests/fixtures/setup/remote.toml"),
         "the contract render and the parser fixture are the same bytes"
     );

@@ -29,7 +29,8 @@
 #   preview     camera view, daemon side: <sysconfdir>/soos/daemon.toml [preview]
 #               created only when the file is absent (root)
 #   companion   phone companion as the session owner (never root): remote.toml
-#               written with the owner's default-on features (a remote.toml setup did
+#               written with the owner's default-on features, remote unlock and the
+#               camera view over Funnel only when asked (GitHub #480) (a remote.toml setup did
 #               not write is first saved as remote.toml.bak-<UTC>), scripts/install_remote.sh,
 #               user units, verification; Tailscale steps are printed, never run
 #   lock screen the adapters install.sh installed (GitHub #432, PR 6 of #352):
@@ -119,6 +120,23 @@ declare -rA FEATURE_LABEL=([allow_funnel]="Funnel" [allow_unlock]="remote unlock
 # soos-remote refuses a key whose prerequisite is off (exit 78).
 declare -rA FEATURE_PREREQS=([push_notifications]="password_alerts"
     [offline_alerts]="push_notifications" [camera_view_funnel]="camera_view allow_funnel")
+# The features setup leaves off unless asked (security review 2026-11-10, GitHub #480 SETB-01):
+# unlocking the session from the phone and the live camera view from the Internet. Each is on
+# only through its --<feature> on option, an explicit `true` already in remote.toml, or a yes
+# to its own question in an interactive run (default no); an absent key is never turned on.
+readonly ASKED_KEYS=(allow_unlock camera_view_funnel)
+declare -rA FEATURE_QUESTION=(
+    [allow_unlock]="Allow unlocking this PC from the phone? A passkey check (Face ID, fingerprint or screen lock) is asked every time, also from the Internet when Funnel is on. [y/N] "
+    [camera_view_funnel]="Allow the live camera view of this PC from the Internet through Funnel? A passkey check is asked for every view. [y/N] ")
+# Keys of soos-remote that only narrow its exposure or keep a privacy choice (GitHub #480
+# RCFG-02): setup carries them over, validated by a strict grammar, when it rewrites
+# remote.toml, in this order after the feature keys. allowed_hosts is always written pinned to
+# the node name (rp_id must be a member of a non-empty list, so that list is the narrowest).
+readonly CARRIED_KEYS=(allowed_hosts push_previews battery_status lock_screen_programs credentials_path)
+# soos-remote bounds of the carried values (crates/remote/src/lib.rs MAX_LOCK_SCREEN_PROGRAMS,
+# MAX_CREDENTIALS_PATH_LEN; crates/remote/src/config.rs MAX_LOCK_SCREEN_PROGRAM_LEN).
+readonly MAX_CARRIED_PROGRAMS=4
+readonly MAX_CARRIED_PATH_LEN=4096
 # A remote.toml that setup did not write is saved as <config dir>/remote.toml.bak-<UTC>
 # (suffixes -1..-9 when the name exists) before setup writes its own (owner decision of
 # 2026-10-23; spec AI/architect_spec_one_command_setup.md section 6).
@@ -250,9 +268,12 @@ Options:
 
 Phone companion (soos-remote; set up as the session owner after the system phase,
 only when setup is started as that user, never as root). Every feature below is on
-by default (owner decision). Funnel, remote unlock, push, offline alerts and the
-camera view can be turned off later in soos-gui (Features), which also turns off
-the features that need them. The failed-password alerts have no switch there: turn
+by default (owner decision), with two exceptions. Remote unlock and the camera view
+over Funnel stay off unless their option says on, remote.toml already sets them true,
+or you answer yes to their own question in an interactive run (default no); a key
+absent from remote.toml is never turned on for them. Funnel, remote unlock, push,
+offline alerts and the camera view can be turned off later in soos-gui (Features),
+which also turns off the features that need them. The failed-password alerts have no switch there: turn
 them off with --password-alerts off, or set password_alerts, push_notifications and
 offline_alerts to false in remote.toml. A feature already turned off in a
 setup-managed remote.toml stays off unless its option says on. A remote.toml that
@@ -542,30 +563,56 @@ elif [[ -n "${ARTIFACT_DIR_ARG}" || -n "${LOCAL_SEAT_ARG}" || -n "${PUSH_SENDER_
     usage_error "--artifact-dir, --local-seat and --push-sender are internal to --system-phase"
 fi
 
-# Feature values: the option, else an explicit false of the setup-managed remote.toml
-# (FILE_BOOL, filled by classify_remote_config), else on (owner default). A feature whose
-# prerequisite resolves off is off too, unless its own option says on: then the run is
-# refused before any change (soos-remote would refuse the file with exit 78).
+# Feature values: the option, else an explicit value of the existing remote.toml (FILE_BOOL,
+# filled by classify_remote_config or parse_user_remote_config), else the default: on (owner
+# default) for every key except ASKED_KEYS, which are on only after a yes to their question in
+# an interactive run (FEATURE_ANSWER) and otherwise off, so an absent key is never turned on
+# (GitHub #480). A feature whose prerequisite resolves off is off too, unless its own option
+# says on: then the run is refused before any change (soos-remote would refuse the file with
+# exit 78).
 declare -A FILE_BOOL=()
 declare -A FEATURE_VALUE=()
 declare -A FEATURE_NOTE=()
+declare -A FEATURE_ANSWER=()
 RESOLVE_CONFLICT=""
+
+# The key is one of ASKED_KEYS.
+asked_key() {
+    local key
+    for key in "${ASKED_KEYS[@]}"; do
+        [[ "${key}" == "$1" ]] && return 0
+    done
+    return 1
+}
+
 resolve_features() {
-    local use_file="$1" key flag prereq value
+    local use_file="$1" key flag prereq value file_value
     FEATURE_VALUE=()
     FEATURE_NOTE=()
     RESOLVE_CONFLICT=""
     for key in "${COMPANION_KEYS[@]}"; do
         flag="${FEATURE_FLAG[${key}]:-}"
+        file_value=""
+        [[ "${use_file}" == true ]] && file_value="${FILE_BOOL[${key}]:-}"
         value=true
         if [[ "${flag}" == on ]]; then
             value=true
         elif [[ "${flag}" == off ]]; then
             value=false
             FEATURE_NOTE[${key}]="${FEATURE_OPTION[${key}]} off"
-        elif [[ "${use_file}" == true && "${FILE_BOOL[${key}]:-}" == false ]]; then
+        elif [[ "${file_value}" == false ]]; then
             value=false
             FEATURE_NOTE[${key}]="kept off"
+        elif [[ "${file_value}" == true ]]; then
+            value=true
+        elif asked_key "${key}"; then
+            if [[ "${FEATURE_ANSWER[${key}]:-}" == on ]]; then
+                value=true
+                FEATURE_NOTE[${key}]="you answered yes"
+            else
+                value=false
+                FEATURE_NOTE[${key}]="${FEATURE_OPTION[${key}]} on to turn it on"
+            fi
         fi
         for prereq in ${FEATURE_PREREQS[${key}]:-}; do
             [[ "${FEATURE_VALUE[${prereq}]}" == true ]] && continue
@@ -579,6 +626,29 @@ resolve_features() {
             fi
         done
         FEATURE_VALUE[${key}]="${value}"
+    done
+}
+
+# Interactive run only: one yes/no question (default no) for each key of ASKED_KEYS that no
+# option and no explicit value of the existing file decides and whose prerequisites are on.
+ask_features() {
+    local use_file="$1" key prereq ready answer
+    resolve_features "${use_file}" || return 0
+    for key in "${ASKED_KEYS[@]}"; do
+        [[ -z "${FEATURE_FLAG[${key}]:-}" ]] || continue
+        [[ "${use_file}" == true && -n "${FILE_BOOL[${key}]:-}" ]] && continue
+        ready=true
+        for prereq in ${FEATURE_PREREQS[${key}]:-}; do
+            [[ "${FEATURE_VALUE[${prereq}]}" == true ]] || ready=false
+        done
+        [[ "${ready}" == true ]] || continue
+        answer=""
+        read -r -p "${FEATURE_QUESTION[${key}]}" answer || answer=""
+        case "${answer}" in
+            y|Y|yes|YES|Yes) FEATURE_ANSWER[${key}]=on ;;
+            *) ;;
+        esac
+        resolve_features "${use_file}" || return 0
     done
 }
 
@@ -1444,6 +1514,8 @@ declare -A USER_BOOL_PRESENT=()
 USER_UNRECOGNIZED=()
 USER_DROPPED_KEYS=()
 USER_ANDROID_DROPPED=false
+# Whether the reader met a construct it cannot model (every feature is then kept off).
+USER_UNMODELED=false
 USER_BACKUP=""
 COMPANION_LOGIN=""
 COMPANION_RP_ID=""
@@ -1475,6 +1547,16 @@ render_remote_config() {
     printf 'rp_id = "%s"\n' "${COMPANION_RP_ID}"
     for key in "${COMPANION_KEYS[@]}"; do
         printf '%s = %s\n' "${key}" "${FEATURE_VALUE[${key}]}"
+    done
+    # The hardening and privacy keys carried over from the existing file (GitHub #480 RCFG-02);
+    # allowed_hosts is pinned to the node name.
+    for key in "${CARRIED_KEYS[@]}"; do
+        [[ -n "${FILE_CARRIED[${key}]:-}" ]] || continue
+        if [[ "${key}" == allowed_hosts ]]; then
+            printf 'allowed_hosts = ["%s"]\n' "${COMPANION_RP_ID}"
+        else
+            printf '%s = %s\n' "${key}" "${FILE_CARRIED[${key}]}"
+        fi
     done
     # TOML: a key after a table header belongs to the table, so [android] is always last.
     if [[ ${#FILE_ANDROID_FPS[@]} -gt 0 ]]; then
@@ -1516,44 +1598,162 @@ report_name() {
     printf '%s' "${name:0:64}"
 }
 
-# Bracket depth a TOML value opens on one line: `[` minus `]` outside "..." and '...' strings
-# and before a comment (a multi-line array continues while it is positive).
-bracket_depth() {
-    local v="$1" open close
-    local re_str="(\"[^\"]*\"|'[^']*')"
-    while [[ "${v}" =~ ${re_str} ]]; do
-        v="${v/"${BASH_REMATCH[0]}"/}"
+# Lexical state of the TOML being read, carried from line to line (GitHub #480 SETB-02,
+# SETBB-01): LEX_ML is the delimiter of an open multi-line string (""" or '''), LEX_DEPTH the
+# number of open [ and { of a multi-line array or inline table, LEX_BAD true once a construct
+# TOML refuses was met (a one-line string never closed, a closing bracket without an opening
+# one, a backslash outside a string, more than five quotes closing a multi-line string).
+LEX_ML=""
+LEX_DEPTH=0
+LEX_BAD=false
+
+# Scans one line in the state left by the previous one: comments end the line, basic strings
+# honour backslash escapes, literal strings have none, a multi-line string ends only at its own
+# delimiter (up to two quotes of content may precede it), brackets and braces count only outside
+# strings and comments. Nothing is evaluated.
+toml_scan_line() {
+    local s="$1" n i=0 c run
+    n=${#s}
+    while (( i < n )); do
+        c="${s:i:1}"
+        if [[ -n "${LEX_ML}" ]]; then
+            if [[ "${LEX_ML}" == '"""' && "${c}" == "\\" ]]; then
+                i=$((i + 2))
+                continue
+            fi
+            if [[ "${c}" == "${LEX_ML:0:1}" ]]; then
+                run=0
+                while (( i < n )) && [[ "${s:i:1}" == "${c}" ]]; do
+                    run=$((run + 1))
+                    i=$((i + 1))
+                done
+                if (( run >= 3 )); then
+                    (( run <= 5 )) || LEX_BAD=true
+                    LEX_ML=""
+                fi
+                continue
+            fi
+            i=$((i + 1))
+            continue
+        fi
+        case "${c}" in
+            '#')
+                return 0
+                ;;
+            '"'|"'")
+                if [[ "${s:i:3}" == "${c}${c}${c}" ]]; then
+                    LEX_ML="${c}${c}${c}"
+                    i=$((i + 3))
+                    continue
+                fi
+                i=$((i + 1))
+                while (( i < n )) && [[ "${s:i:1}" != "${c}" ]]; do
+                    [[ "${c}" == '"' && "${s:i:1}" == "\\" ]] && i=$((i + 1))
+                    i=$((i + 1))
+                done
+                if (( i >= n )); then
+                    LEX_BAD=true
+                    return 0
+                fi
+                ;;
+            '['|'{')
+                LEX_DEPTH=$((LEX_DEPTH + 1))
+                ;;
+            ']'|'}')
+                if (( LEX_DEPTH > 0 )); then
+                    LEX_DEPTH=$((LEX_DEPTH - 1))
+                else
+                    LEX_BAD=true
+                fi
+                ;;
+            "\\")
+                LEX_BAD=true
+                ;;
+        esac
+        i=$((i + 1))
     done
-    v="${v%%#*}"
-    open="${v//[^\[]/}"
-    close="${v//[^\]]/}"
-    printf '%s' "$(( ${#open} - ${#close} ))"
 }
 
-# Number of occurrences of the delimiter $2 in $1. In a basic string (`"""`) the escaped pairs
-# `\\` and `\"` are dropped first, so `\"""` never ends it (literal `'''` strings have no escapes).
-count_of() {
-    local text="$1" delim="$2" rest
-    if [[ "${delim}" == '"""' ]]; then
-        text="${text//\\\\/}"
-        text="${text//\\\"/}"
-    fi
-    rest="${text//"${delim}"/}"
-    printf '%s' "$(( (${#text} - ${#rest}) / ${#delim} ))"
+# Carried keys read from the existing remote.toml (key -> the value setup writes; allowed_hosts
+# -> "pinned"); CARRY_REFUSED is true when it sets credentials_path in a form setup cannot write
+# back (a missing key would move the passkeys back to the default store, so the run is refused).
+declare -A FILE_CARRIED=()
+CARRY_REFUSED=false
+
+# A path soos-remote accepts that setup can write back verbatim: absolute, at most
+# MAX_CARRIED_PATH_LEN bytes, letters, digits and . _ / @ + - only, no trailing / and no ..
+# component.
+carry_path_ok() {
+    local p="$1"
+    [[ ${#p} -ge 2 && ${#p} -le ${MAX_CARRIED_PATH_LEN} ]] || return 1
+    [[ "${p}" =~ ^/[A-Za-z0-9._/@+-]+$ ]] || return 1
+    [[ "${p}" != */ && "${p}/" != */../* ]]
+}
+
+# Prints the value setup writes for the carried key $1 whose TOML value is $2 (the text after
+# `=`, a trailing comment allowed); fails when $2 is outside the strict grammar. Any value of
+# allowed_hosts is written pinned to the node name.
+carried_value() {
+    local key="$1" value="$2" rest path list="" n=0
+    local re_bool='^[[:space:]]*(true|false)[[:space:]]*(#.*)?$'
+    local re_previews="^[[:space:]]*(\"(detailed|generic)\"|'(detailed|generic)')[[:space:]]*(#.*)?$"
+    local re_path="^[[:space:]]*(\"([^\"]*)\"|'([^']*)')[[:space:]]*(#.*)?$"
+    local re_list='^[[:space:]]*\[(.*)\][[:space:]]*(#.*)?$'
+    local re_item="^[[:space:]]*(\"([^\"]*)\"|'([^']*)')[[:space:]]*(,(.*))?$"
+    case "${key}" in
+        allowed_hosts)
+            printf 'pinned'
+            ;;
+        push_previews)
+            [[ "${value}" =~ ${re_previews} ]] || return 1
+            printf '"%s"' "${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+            ;;
+        battery_status)
+            [[ "${value}" =~ ${re_bool} ]] || return 1
+            printf '%s' "${BASH_REMATCH[1]}"
+            ;;
+        credentials_path)
+            [[ "${value}" =~ ${re_path} ]] || return 1
+            path="${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+            carry_path_ok "${path}" || return 1
+            printf '"%s"' "${path}"
+            ;;
+        lock_screen_programs)
+            [[ "${value}" =~ ${re_list} ]] || return 1
+            rest="${BASH_REMATCH[1]}"
+            while [[ "${rest}" =~ [^[:space:]] ]]; do
+                [[ "${rest}" =~ ${re_item} ]] || return 1
+                path="${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+                rest="${BASH_REMATCH[5]}"
+                [[ -n "${BASH_REMATCH[4]}" || ! "${rest}" =~ [^[:space:]] ]] || return 1
+                carry_path_ok "${path}" || return 1
+                n=$((n + 1))
+                (( n <= MAX_CARRIED_PROGRAMS )) || return 1
+                list+="${list:+, }\"${path}\""
+            done
+            printf '[%s]' "${list}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 # Reads a remote.toml that setup did not write (spec section 6.1, R2-1, R2-9, R1-9, R2-11; candid
-# review B1): top-level lines only (up to the first table header, a line starting with `[` that
-# is not inside a multi-line string or array), each line matched on its own, bounded by
-# MAX_REMOTE_CONFIG_BYTES; nothing is sourced or evaluated. Keys may be bare, "double" or
-# 'single' quoted (TOML). Fills FILE_LOGIN and FILE_RP_ID (exactly one valid login, a valid node
-# name), FILE_BOOL (an explicit true or false; fail-safe: a value the rule does not recognize is
-# false, and so is a feature key named by any other top-level line that is not parsed, such as a
-# line inside a multi-line string or array), USER_BOOL_PRESENT, USER_UNRECOGNIZED (each key once),
-# USER_DROPPED_KEYS, and FILE_ANDROID_FPS when the file ends with an [android] table of the
-# strict grammar (USER_ANDROID_DROPPED otherwise). Keys below a real table header are ignored.
+# review B1; GitHub #480 SETB-02, SETBB-01): top-level lines only (up to the first table header,
+# a line starting with `[` outside any string, array or inline table, as toml_scan_line tracks
+# them across lines), each line matched on its own, bounded by MAX_REMOTE_CONFIG_BYTES; nothing
+# is sourced or evaluated. Keys may be bare, "double" or 'single' quoted (TOML). Fills
+# FILE_LOGIN and FILE_RP_ID (exactly one valid login, a valid node name), FILE_BOOL (an explicit
+# true or false; fail-safe: a value the rule does not recognize is false, and so is a feature
+# key named by any other top-level line that is not parsed, such as a line inside a multi-line
+# string or array; a top-level construct TOML refuses, or a string or array still open at the
+# end, turns every feature key off and sets USER_UNMODELED), FILE_CARRIED and CARRY_REFUSED
+# (CARRIED_KEYS), USER_BOOL_PRESENT, USER_UNRECOGNIZED (each key once), USER_DROPPED_KEYS, and
+# FILE_ANDROID_FPS when the file ends with an [android] table of the strict grammar
+# (USER_ANDROID_DROPPED otherwise). Keys below a real table header are ignored.
 parse_user_remote_config() {
-    local line norm key value inner top=true android=0 strict=true name ml="" depth=0 delim
+    local line norm key value inner carried top=true android=0 strict=true name
     local re_key="^[[:space:]]*(\"([A-Za-z0-9_-]+)\"|'([A-Za-z0-9_-]+)'|([A-Za-z0-9_-]+))[[:space:]]*=(.*)$"
     local re_login='^[[:space:]]*\[[[:space:]]*"([^"]*)"[[:space:]]*\][[:space:]]*(#.*)?$'
     local re_rp='^[[:space:]]*"([^"]*)"[[:space:]]*(#.*)?$'
@@ -1561,14 +1761,21 @@ parse_user_remote_config() {
     local re_android='^[[:space:]]*\[[[:space:]]*android[[:space:]]*\]'
     local -A dropped=()
     local -A unrecognized=()
+    local -A carried_seen=()
     FILE_LOGIN=""
     FILE_RP_ID=""
     FILE_BOOL=()
     FILE_ANDROID_FPS=()
+    FILE_CARRIED=()
+    CARRY_REFUSED=false
     USER_BOOL_PRESENT=()
     USER_UNRECOGNIZED=()
     USER_DROPPED_KEYS=()
     USER_ANDROID_DROPPED=false
+    USER_UNMODELED=false
+    LEX_ML=""
+    LEX_DEPTH=0
+    LEX_BAD=false
     # Fail-safe: every feature key named by a top-level line that was not parsed as that key's
     # boolean is off ($2: the key this line set, if any).
     fail_safe_line() {
@@ -1583,14 +1790,9 @@ parse_user_remote_config() {
         done
     }
     while IFS= read -r line || [[ -n "${line}" ]]; do
-        if [[ "${top}" == true && -n "${ml}" ]]; then
+        if [[ "${top}" == true && ( -n "${LEX_ML}" || "${LEX_DEPTH}" -gt 0 ) ]]; then
             fail_safe_line "${line}" ""
-            (( $(count_of "${line}" "${ml}") % 2 == 1 )) && ml=""
-            continue
-        fi
-        if [[ "${top}" == true && "${depth}" -gt 0 ]]; then
-            fail_safe_line "${line}" ""
-            depth=$(( depth + $(bracket_depth "${line}") ))
+            toml_scan_line "${line}"
             continue
         fi
         # Table lines are compared without a trailing comment and surrounding blanks (the
@@ -1622,6 +1824,9 @@ parse_user_remote_config() {
             esac
             continue
         fi
+        # Every top-level line is scanned whole (key, value and comment), so a string, array or
+        # inline table it opens is tracked whatever the key looks like (dotted keys included).
+        toml_scan_line "${line}"
         # A key spelled with a TOML escape (a backslash before the first `=`) may be any of the
         # feature keys for soos-remote: every feature key is turned off (lead review round 2).
         if [[ "${line}" == *=* && "${line%%=*}" == *\\* ]]; then
@@ -1667,24 +1872,39 @@ parse_user_remote_config() {
                     fail_safe_line "${line}" ""
                 fi
                 ;;
+            allowed_hosts|push_previews|battery_status|lock_screen_programs|credentials_path)
+                # Carried over only from one line of the strict grammar (GitHub #480 RCFG-02).
+                if [[ -z "${carried_seen[${key}]:-}" ]] && carried="$(carried_value "${key}" "${value}")"; then
+                    FILE_CARRIED[${key}]="${carried}"
+                else
+                    unset 'FILE_CARRIED[${key}]'
+                    dropped[${key}]=1
+                    [[ "${key}" == credentials_path ]] && CARRY_REFUSED=true
+                fi
+                carried_seen[${key}]=1
+                fail_safe_line "${line}" ""
+                ;;
             *)
                 name="$(report_name "${key}")"
                 dropped[${name}]=1
                 fail_safe_line "${line}" ""
                 ;;
         esac
-        # A value that opens a multi-line string or array: its next lines are not headers.
-        for delim in '"""' "'''"; do
-            if (( $(count_of "${value}" "${delim}") % 2 == 1 )); then
-                ml="${delim}"
-                break
-            fi
-        done
-        [[ -n "${ml}" ]] || depth="$(bracket_depth "${value}")"
-        (( depth > 0 )) || depth=0
     done < <(head -c "${MAX_REMOTE_CONFIG_BYTES}" -- "${REMOTE_CONFIG}")
+    # A construct the reader cannot model: setup cannot tell which keys the file sets, so every
+    # feature is off (GitHub #480 SETBB-01).
+    if [[ "${LEX_BAD}" == true || -n "${LEX_ML}" || "${LEX_DEPTH}" -gt 0 ]]; then
+        USER_UNMODELED=true
+        for key in "${COMPANION_KEYS[@]}"; do
+            FILE_BOOL[${key}]=false
+            USER_BOOL_PRESENT[${key}]=1
+        done
+    fi
     for key in "${COMPANION_KEYS[@]}"; do
         [[ -n "${unrecognized[${key}]:-}" ]] && USER_UNRECOGNIZED+=("${key}")
+    done
+    for key in "${CARRIED_KEYS[@]}"; do
+        [[ -n "${FILE_CARRIED[${key}]:-}" ]] && unset 'dropped[${key}]'
     done
     if [[ "${android}" == 3 && "${strict}" == true ]]; then
         FILE_ANDROID_FPS=("${PARSED_FPS[@]}")
@@ -1765,7 +1985,7 @@ daemon_preview_hint() {
 # Classifies remote.toml: absent, template (the untouched install_remote.sh template),
 # managed (setup's marker and strict grammar; FILE_LOGIN, FILE_RP_ID, FILE_BOOL) or user.
 classify_remote_config() {
-    local line key value inner size n=0 managed=true template=true empty_logins=0 android=0
+    local line key value inner carried size n=0 managed=true template=true empty_logins=0 android=0
     local -A seen=()
     CONFIG_STATE="absent"
     CONFIG_OVERSIZE=false
@@ -1773,6 +1993,8 @@ classify_remote_config() {
     FILE_RP_ID=""
     FILE_BOOL=()
     FILE_ANDROID_FPS=()
+    FILE_CARRIED=()
+    CARRY_REFUSED=false
     [[ -e "${REMOTE_CONFIG}" ]] || return 0
     size="$(head -c $((MAX_REMOTE_CONFIG_BYTES + 1)) -- "${REMOTE_CONFIG}" | wc -c)"
     if (( size > MAX_REMOTE_CONFIG_BYTES )); then
@@ -1851,6 +2073,24 @@ classify_remote_config() {
                     managed=false
                 fi
                 ;;
+            allowed_hosts)
+                # Exactly as render_remote_config writes it: pinned to the node name above it.
+                if [[ -n "${FILE_RP_ID}" && "${value}" == "[\"${FILE_RP_ID}\"]" ]]; then
+                    FILE_CARRIED[${key}]="pinned"
+                else
+                    managed=false
+                fi
+                ;;
+            push_previews|battery_status|lock_screen_programs|credentials_path)
+                # The carried keys in their rendered spelling only (GitHub #480 RCFG-02).
+                carried=""
+                carried="$(carried_value "${key}" "${value}")" || carried=""
+                if [[ -n "${carried}" && "${carried}" == "${value}" ]]; then
+                    FILE_CARRIED[${key}]="${carried}"
+                else
+                    managed=false
+                fi
+                ;;
             *) managed=false ;;
         esac
     done < <(head -c "${MAX_REMOTE_CONFIG_BYTES}" -- "${REMOTE_CONFIG}")
@@ -1863,6 +2103,7 @@ classify_remote_config() {
     FILE_RP_ID=""
     FILE_BOOL=()
     FILE_ANDROID_FPS=()
+    FILE_CARRIED=()
     if [[ "${template}" == true && ${empty_logins} -eq 1 ]]; then
         CONFIG_STATE="template"
     else
@@ -1967,14 +2208,26 @@ features_summary() {
 # their value is not recognized, the keys and tables not carried over, a dropped [android].
 user_config_notes() {
     [[ "${CONFIG_ACTION}" == backup ]] || return 0
-    local key on=""
+    local key on="" carried=""
     for key in "${COMPANION_KEYS[@]}"; do
         if [[ -z "${USER_BOOL_PRESENT[${key}]:-}" && "${FEATURE_VALUE[${key}]}" == true \
-                && -z "${FEATURE_FLAG[${key}]:-}" ]]; then
+                && -z "${FEATURE_FLAG[${key}]:-}" && -z "${FEATURE_ANSWER[${key}]:-}" ]]; then
             on+="${on:+, }${key}"
         fi
     done
     [[ -n "${on}" ]] && printf "; turned on by setup's default profile: %s (switch them off in soos-gui)" "${on}"
+    if [[ "${USER_UNMODELED}" == true ]]; then
+        printf '; every feature kept off: the file has a construct setup cannot read (see the backup)'
+    fi
+    for key in "${CARRIED_KEYS[@]}"; do
+        [[ -n "${FILE_CARRIED[${key}]:-}" ]] || continue
+        if [[ "${key}" == allowed_hosts ]]; then
+            carried+="${carried:+, }allowed_hosts (pinned to the node name)"
+        else
+            carried+="${carried:+, }${key}"
+        fi
+    done
+    [[ -n "${carried}" ]] && printf '; carried over: %s' "${carried}"
     if [[ ${#USER_UNRECOGNIZED[@]} -gt 0 ]]; then
         local list
         list="$(printf '%s, ' "${USER_UNRECOGNIZED[@]}")"
@@ -2084,6 +2337,8 @@ resolve_companion() {
             CAMERA_DAEMON="off"
             FILE_BOOL=()
             FILE_ANDROID_FPS=()
+            FILE_CARRIED=()
+            CARRY_REFUSED=false
             resolve_features false || true
             return 0
         fi
@@ -2118,7 +2373,14 @@ resolve_companion() {
         companion_skip "needs the Tailscale login and node name" "re-run with --tailscale-login <you@example.com> --rp-id <pc>.<tailnet>.ts.net (Docs/REMOTE_COMPANION.md section 4)"
         return 0
     fi
-    if ! resolve_features "$([[ "${CONFIG_STATE}" == managed || "${CONFIG_STATE}" == user ]] && printf true || printf false)"; then
+    local use_file=false
+    [[ "${CONFIG_STATE}" == managed || "${CONFIG_STATE}" == user ]] && use_file=true
+    if [[ "${CARRY_REFUSED}" == true ]]; then
+        preflight_fail "${REMOTE_CONFIG} sets credentials_path in a form setup cannot carry it over (one absolute path in double quotes, letters, digits and . _ / @ + - only, no .. component): fix that line or move the file aside (mv ${REMOTE_CONFIG} ${REMOTE_CONFIG}.mine), then re-run setup. Without it the passkeys would move back to the default store."
+        return 0
+    fi
+    [[ "${INTERACTIVE}" == true ]] && ask_features "${use_file}"
+    if ! resolve_features "${use_file}"; then
         preflight_fail "${RESOLVE_CONFLICT} (${REMOTE_CONFIG} keeps it off)"
         return 0
     fi
@@ -3439,8 +3701,8 @@ print_companion_guide() {
     info "Phone companion:"
     if [[ "${CONFIG_ACTION}" == kept ]]; then
         info "  ${REMOTE_CONFIG} is yours: setup did not edit it. The owner defaults it would write are:"
-        info "  allowed_logins, rp_id, allow_funnel = true, allow_unlock = true, password_alerts = true,"
-        info "  push_notifications = true, offline_alerts = true, camera_view = true, camera_view_funnel = true"
+        info "  allowed_logins, rp_id, allow_funnel = true, allow_unlock = false (asked), password_alerts = true,"
+        info "  push_notifications = true, offline_alerts = true, camera_view = true, camera_view_funnel = false (asked)"
         info "  (Docs/REMOTE_COMPANION.md section 5), then: systemctl --user enable --now soos-remote"
         return 0
     fi
@@ -3451,9 +3713,15 @@ print_companion_guide() {
         warn "  Tailscale ${TAILSCALE_VERSION} is older than ${MIN_TAILSCALE_VERSION} (or unknown): upgrade it first; older releases were not verified to strip forged identity headers."
     fi
     if [[ "${FEATURE_VALUE[allow_funnel]}" == true ]]; then
-        info "  1. Publish the companion on the internet (no VPN on the phone):"
+        local reach="sign in, see the lock state and lock it"
+        [[ "${FEATURE_VALUE[allow_unlock]}" == true ]] && reach+=", unlock this PC"
+        [[ "${FEATURE_VALUE[camera_view_funnel]}" == true ]] && reach+=", open the live camera of this PC"
+        info "  1. Publish the companion on the internet (no VPN on the phone). First check what this node already serves:"
+        info "       tailscale serve status"
+        info "     Funnel publishes every handler on port 443 of this node, not only the companion, and replaces the one at /: move any other port-443 handler to another port (or stop) before you run:"
         info "       tailscale funnel --bg unix:${REMOTE_SOCKET}"
         info "     Funnel must be allowed for this node by the funnel attribute of your tailnet policy (Tailscale admin console)."
+        warn "     From the Internet, whoever holds a passkey of this PC (for example a stolen phone that passes its screen lock) can then ${reach}. Removing the public listener later is a Tailscale command (Docs/REMOTE_COMPANION.md section 2b; soos-gui shows it under Internet access)."
     else
         info "  1. Publish the companion on your tailnet:"
         info "       tailscale serve --bg unix:${REMOTE_SOCKET}"
@@ -3495,6 +3763,9 @@ print_companion_guide() {
     fi
     info "  Optional: 'loginctl enable-linger ${TARGET_USER}' keeps the companion answering while you are logged out (setup never enables it)."
     info "  Funnel, remote unlock, push, offline alerts and the camera view can be turned off later in soos-gui (Features); the failed-password alerts have no switch there: run setup again with --password-alerts off. Remove the companion with scripts/install_remote.sh --uninstall."
+    if [[ "${FEATURE_VALUE[allow_funnel]}" == true ]]; then
+        info "  Turning Funnel off in soos-gui makes Funnel requests answer 403 but keeps the public listener published: remove it with the Tailscale command of Docs/REMOTE_COMPANION.md section 2b (soos-gui shows it), then restore the tailnet handler with tailscale serve --bg unix:${REMOTE_SOCKET} if tailscale serve status no longer lists it."
+    fi
 }
 
 # --- packages (root; never removed by a rollback) ---
