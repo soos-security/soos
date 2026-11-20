@@ -16,11 +16,11 @@ use hmac::{Hmac, Mac};
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
 use p256::elliptic_curve::point::AffineCoordinates;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::{PublicKey, SecretKey};
 use sha2::Sha256;
 use soos_push_protocol::PUSH_HOSTS;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::RandomSource;
 use crate::{
@@ -81,7 +81,7 @@ fn draw_secret(random: &RandomSource) -> Result<SecretKey, WebPushError> {
 
 /// The 65-byte uncompressed SEC1 encoding of `key`.
 fn uncompressed(key: &PublicKey) -> Vec<u8> {
-    key.to_encoded_point(false).as_bytes().to_vec()
+    key.to_sec1_point(false).as_bytes().to_vec()
 }
 
 /// VAPID P-256 key. The secret zeroizes on drop; `Debug` is redacted.
@@ -179,11 +179,12 @@ fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> Result<Zeroizing<[u8; 32]>, WebPu
     for part in parts {
         mac.update(part);
     }
-    let digest = Zeroizing::new(mac.finalize().into_bytes());
+    let mut digest = mac.finalize().into_bytes();
     let mut out = Zeroizing::new([0u8; 32]);
     for (dst, src) in out.iter_mut().zip(digest.iter()) {
         *dst = *src;
     }
+    digest.as_mut_slice().zeroize();
     Ok(out)
 }
 

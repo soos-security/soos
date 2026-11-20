@@ -94,7 +94,7 @@ aes-gcm = "0.10"
 ciborium = "0.2"
 # WebAuthn ES256 verification of soos-remote (ADR 2026-10-06 "Tailscale Funnel Access and
 # In-House Passkey Authentication"): RustCrypto only, no OpenSSL
-p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
 base64ct = { version = "1.8", features = ["alloc"] }
 subtle = "2.6"
 # Web Push (ADR 2026-10-06 "Web Push Notifications for Failed-Password Alerts Through a

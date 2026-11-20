@@ -3,9 +3,9 @@
 //! Authentication for `soos-remote`", architect spec §10.8 RMC-S13–RMC-S21, tests 46–53a,
 //! matrix RMC39):
 //!
-//! - RMC-S13 pure-Rust passkey dependencies (`p256 0.13.2`, RustCrypto), no OpenSSL, `ring`,
+//! - RMC-S13 pure-Rust passkey dependencies (`p256 0.14.0`, RustCrypto), no OpenSSL, `ring`,
 //!   `aws-lc`, `rand` or `webauthn-rs` (exact crate names; `rand_core` allowed);
-//! - RMC-S14 the one documented `der@0.7.10` skip;
+//! - RMC-S14 no stale `der@0.7.10` skip (removed with p256 0.14);
 //! - RMC-S15 no passkey material in any tracing field or inline capture;
 //! - RMC-S16 `getrandom::fill` is the only CSPRNG, in `auth.rs` only;
 //! - RMC-S17 the `__Host-` cookie name and attributes, never a `Domain`;
@@ -79,7 +79,7 @@ fn dependency_keys(table: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Test 46 (RMC-S13, F-3): the workspace pins `p256 0.13.2` without default features; the
+/// Test 46 (RMC-S13, F-3): the workspace pins `p256 0.14.0` without default features; the
 /// remote manifest takes every passkey crate from the workspace; no forbidden crate is a
 /// dependency key or, when `cargo` is available, a crate of the normal tree (exact names,
 /// `rand_core` allowed).
@@ -96,9 +96,9 @@ fn test_rmc_s13_passkey_dependencies_are_pure_rust() {
     let workspace = toml_table(&root, "workspace.dependencies");
     assert!(
         workspace.contains(
-            &"p256 = { version = \"0.13.2\", default-features = false, features = [\"ecdsa\"] }"
+            &"p256 = { version = \"0.14.0\", default-features = false, features = [\"ecdsa\"] }"
         ),
-        "[workspace.dependencies] pins p256 0.13.2 with only the ecdsa feature"
+        "[workspace.dependencies] pins p256 0.14.0 with only the ecdsa feature"
     );
     let manifest = read("crates/remote/Cargo.toml");
     let deps = toml_table(&manifest, "dependencies");
@@ -178,24 +178,16 @@ fn test_rmc_s13_passkey_dependencies_are_pure_rust() {
     }
 }
 
-/// Test 47 (RMC-S14): exactly one `der@0.7.10` skip, naming its dependents.
+/// Test 47 (RMC-S14): p256 0.14 dropped der 0.7.10 from the lock, so no stale `der@0.7.10`
+/// skip may remain in deny.toml (owner-approved amendment, 2026-11-20).
 #[test]
-fn test_rmc_s14_deny_skip_for_der_is_documented() {
+fn test_rmc_s14_no_stale_der_skip_remains() {
     let deny = read("deny.toml");
     let lines: Vec<&str> = deny
         .lines()
         .filter(|l| !l.trim_start().starts_with('#') && l.contains("der@0.7.10"))
         .collect();
-    assert_eq!(lines.len(), 1, "exactly one der@0.7.10 skip: {lines:?}");
-    for needle in [
-        "crate = \"der@0.7.10\"",
-        "ecdsa",
-        "sec1",
-        "ureq",
-        "reason =",
-    ] {
-        assert!(lines[0].contains(needle), "{needle} in {}", lines[0]);
-    }
+    assert!(lines.is_empty(), "no der@0.7.10 skip remains: {lines:?}");
 }
 
 /// Test 48 (RMC-S15, D-H): no tracing field key or inline capture names passkey material or

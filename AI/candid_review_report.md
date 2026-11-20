@@ -1,168 +1,148 @@
 # Candid Review Report
 
-- **Date**: 2026-10-23
-- **Target Branch**: `feat/setup-preflight-deps`
-- **Base (merge-base)**: `d5e3c09`
-- **Reviewed-Diff-Fingerprint**: `443966868121a10ec6348439ee36d3240679fac85ae4d6bb7d7477c5e3fbe38e`
-- **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/architect_spec_one_command_setup.md`, `AI/auditor_constraints_setup_preflight_deps.md`,
-  `AI/plan_evaluator_report.md`, `AI/walkthroughs/256_setup_preflight_deps.md`,
-  `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`,
-  `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/check_build_deps.sh`,
-  `scripts/install.sh`, `scripts/setup.sh`, `scripts/uninstall.sh`,
-  `tests/docker/setup_packages_test.sh`, `tests/fixtures/setup/remote_android.toml`,
-  `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`,
-  `tests/invariants/src/setup_deps_contract.rs`, `tests/invariants/src/setup_scanner_contract.rs`,
-  `tests/invariants/src/setup_user_phase_contract.rs`
+- **Date**: 2026-11-20
+- **Target Branch**: `fix/ci-unblock`
+- **Base (merge-base)**: `0cce947`
+- **Reviewed-Diff-Fingerprint**: `ceae31a36dd24e803faf0cf61dc18eddc537b5ac7d7e5e63d9739e0fc97027da`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+  `AI/walkthroughs/271_arch_matrix_full_upgrade.md`, `Cargo.lock`, `Cargo.toml`,
+  `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`,
+  `crates/remote/src/webpush.rs`, `crates/remote/tests/common/passkey.rs`,
+  `crates/remote/tests/common/push.rs`, `deny.toml`, `tests/docker/setup_packages_test.sh`,
+  `tests/invariants/src/remote_passkey_contract.rs`,
+  `tests/invariants/src/remote_push_contract.rs`, `tests/invariants/src/setup_deps_contract.rs`
 
 ## 1. Executive Summary
 
-PR A of the one-command setup (GitHub #362, owner decisions of 2026-10-23; spec §5, §6, §19,
-§20): `companion` and `android` package groups in `check_build_deps.sh`, the scoped
-`REQUIRED_TOOLS` table of `setup.sh` with a lexer-based coverage invariant (SDP3), a preflight of
-every requested group, the `remote.toml.bak-<UTC>` backup of a user-written `remote.toml` with a
-tolerant fail-safe parser, the trailing `[android]` table of the managed grammar, a
-digest-pinned Docker package matrix job, and the #473 drop-in follow-ups.
+The diff unblocks two required CI checks: (a) the Arch leg of the `setup-packages` Docker matrix
+now runs a full `pacman -Syu` instead of the partial-upgrade `pacman -Sy`, guarded by a new
+invariant SDP30; (b) RUSTSEC-2026-0387 (`crypto-bigint` timing variability) is resolved by
+moving the workspace `p256` from `0.13.2` to `0.14.0`, without any advisory exception.
 
-Second review round. Round 1 (at `6209533`) raised one MAJOR finding: a TOML quoted key
-(`"allow_funnel" = false`, `'allow_unlock' = false`) was silently skipped by the line parser, so
-setup's default profile turned Funnel and remote unlock on against the user's written `false`.
-It is fixed in `dcbcc47` (bare, double- and single-quoted keys; any unparsed top-level line that
-names a feature key forces it off and lists it as not recognized; multi-line strings and arrays
-tracked so a `[` line inside them is not a header) and pinned by SDP27. The two MINOR round-1
-items are also fixed: the drop-in marker is checked on the first line only, on a regular
-non-link file, in `install.sh` and `uninstall.sh` (SDP29), and the `optional` scope is enforced
-by SDP28.
+Claims verified independently, not taken from the walkthrough:
 
-Rebind after `e14b604` (round 3). The developer closed the two MINOR fail-open residuals of
-round 2 (escaped keys, and an escaped quote before `"""`; see §4). The reviewer proved each
-SDP27 case red:
+- The local advisory database entry for RUSTSEC-2026-0387 lists `patched = [">= 0.7.6"]`;
+  `Cargo.lock` now locks only `crypto-bigint 0.7.11`. `crypto-bigint 0.5.5` and `der 0.7.10`
+  are gone from the lock (only `der 0.8.2` remains).
+- `deny.toml` `[advisories] ignore` is untouched; `cargo deny --locked check` →
+  `advisories ok, bans ok, licenses ok, sources ok` (run by the reviewer).
+- Every new `[bans] skip` (`block-buffer@0.12.1`, `cpufeatures@0.3.1`, `crypto-common@0.2.2`,
+  `digest@0.11.3`, `hmac@0.13.0`, `rand_core@0.10.1`, `sha2@0.11.1`) is a locked version with a
+  second locked version, and each reason names real direct dependents (checked against the lock
+  diff; enforced by `dependency_tooling_contract`, which passes).
+- `p256` is used only by `crates/remote`; no other manifest is affected. No OpenSSL, `ring`,
+  `aws-lc` or `rand` enters the `soos-remote` normal tree (RMC-S13 passes with its `cargo tree`
+  branch).
+- `cargo test --locked -p soos-remote -p soos-invariants -- --test-threads=4`: 46 suites,
+  1386 passed, 0 failed (includes RFC 8291 Appendix A, the WebAuthn known-answer vector, the
+  high-S `n - s` acceptance test and the VAPID signature checks).
+- `cargo clippy --locked -p soos-remote -p soos-invariants --all-targets --all-features --
+  -D warnings` clean; `cargo fmt --all -- --check` clean.
 
-- `escapedkey` against the round-2 `setup.sh` of `5f7f315`;
-- `escapedquotes` against the current `setup.sh` with only the `count_of` hunk removed.
-
-Both are green on this tree. No test line was removed in this round.
-
-Gates re-run on this tree: `cargo fmt --check`; workspace clippy (all targets, all features,
-`-D warnings`); `cargo test -p soos-invariants -p soos-remote --test-threads=3` (invariants 923
-passed, every suite green, 0 failed); shellcheck on every touched script (no error-severity
-finding; `setup.sh`, `check_build_deps.sh` and the Docker test are fully clean, and the
-`install.sh`/`uninstall.sh` warnings already exist on `origin/main`); and, in round 1,
-`tests/docker/setup_packages_test.sh` (every name resolves on ubuntu:24.04, fedora:40, fedora:44
-and arch, with the asserted Fedora `java` gap). The package lists did not change since. The
-remaining findings are MINOR only.
+Not verified by the reviewer: the Arch Docker container run end to end (no Docker run in this
+review); it is exercised by the required `setup-packages` CI job itself.
 
 ## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-Removed or changed pre-existing lines in `git diff origin/main...HEAD -- tests crates/*/tests`
-(19 lines; everything else is an addition). Every line is in the owner-approved or acknowledged
-set; no other pre-existing assertion changed. Rounds 2 and 3 (`a25b60e`..`defac7e`) only add
-tests.
+Test files touched (frozen patch):
 
-- `tests/invariants/src/setup_user_phase_contract.rs`
-  `test_set_u12_template_replaced_user_file_untouched`: `let before = h.snapshot();`, the
-  expected exit code `2` (now `0`) and `assert_eq!(before, h.snapshot());` are replaced by the
-  owner-approved M1. M1 checks: exit 0, exactly one byte-equal 0600 `remote.toml.bak-<YYYYmmddTHHMMSSZ>`, managed file
-  `[false,true,true,true,true,true,false]`, no `funnel --bg`. The `--yes` case becomes M2
-  (identity from the file, backup, managed file, units enabled, no Tailscale change command). The
-  former "kept" assertions are carried unchanged onto a new no-identity user file, plus an added
-  "no backup" assertion.
-- Same file, `Harness::new`: `for group in ["build", "models", "gui"]` gains `"companion"`, and
-  inert `jq`/`dig` log-only stubs are added. This is harness wiring M3 (acknowledged): setup never
-  runs either tool in PR A, so the stubs cannot make a test pass vacuously.
-- Same file, `test_pss16_system_up_to_date_includes_the_push_sender`: setup-only fixture
-  M17 (approved). It writes the `prefix.conf` drop-in that `install.sh` leaves for the fake
-  non-`/usr` prefix. No assertion changes.
-- `tests/invariants/src/setup_scanner_contract.rs`: `struct ShCmd` and its fields, `try_lex`,
-  `lex`, `unquote`, `assignment_prefix`, `VarRef`, `variable_refs`, `names_fixed_program`,
-  `Origin`, `script_assignments` and `command_word_index` become `pub(crate)`. This is a
-  visibility change only (acknowledged, §20 F6), and every SCN test body is byte-identical.
-- `tests/invariants/src/setup_contract.rs`: `cksum` is appended to `SAFE_TOOLS` (M3 wiring).
-- `crates/remote/tests/setup_render_tests.rs`: the import line adds `parse_config_with_android`
-  (for the new SDP25 test).
+| File | Change | ADR 2026-11-20 item (4) | Verdict |
+|---|---|---|---|
+| `tests/invariants/src/remote_passkey_contract.rs` Test 46 (RMC-S13) | expected `p256` line `0.13.2` → `0.14.0` in the `assert!`, its message string and the doc comment | listed | Matches |
+| same file, Test 47 (RMC-S14) | `test_rmc_s14_deny_skip_for_der_is_documented` (exactly one `der@0.7.10` skip naming `ecdsa`, `sec1`, `ureq`) → `test_rmc_s14_no_stale_der_skip_remains` (zero such skips) | listed ("inverted to `test_rmc_s14_no_stale_der_skip_remains`") | Matches |
+| same file, module doc (`//!` lines for RMC-S13/S14) | text updated to `0.14.0` / "no stale skip" | not listed explicitly; documentation of the two listed tests, no assertion | Accepted (cosmetic, consistent with the listed edits) |
+| `tests/invariants/src/remote_push_contract.rs` Test 43 (RMC-S33) | expected `p256` line `0.13.2` → `0.14.0`; message unchanged | listed | Matches |
+| `crates/remote/tests/common/passkey.rs` | `to_encoded_point(false)` → `to_sec1_point(false)` | listed (helpers, setup only) | Matches |
+| `crates/remote/tests/common/push.rs` | import `ToEncodedPoint` → `ToSec1Point`, same call rename | listed | Matches |
+| `tests/invariants/src/setup_deps_contract.rs` | NEW test `test_sdp30_arch_matrix_never_partially_upgrades` (additive, no existing line removed) | not an edit of an existing test | Additive contract, no weakening |
 
-CI portability: the new harness labels user calls `uid=1000` (fixed role label). The real uid
-only feeds the `id` stub and `SUDO_UID`, so CI runners with uid 1001 behave the same.
+Removed/changed assertions (`grep '^-[^-].*(assert|#[test]…)'`): only the Test 47 body
+(`assert_eq!(lines.len(), 1, …)` and the per-needle loop), covered by the ADR. No `#[ignore]`,
+`#[cfg(any())]`, `should_panic`, tolerance or epsilon was added. No inline `mod tests` touched.
+
+The diff matches exactly what the 2026-11-20 ADR lists, plus the cosmetic module/doc comments of
+the same tests and one purely additive test. No other test change exists.
+
+Justification of the Test 47 inversion: the old contract (exactly one `der@0.7.10` skip) cannot
+hold once `der 0.7` leaves the lock, because the pre-existing
+`dependency_tooling_contract::test_deny_skip_entries_are_locked_versions` rejects any skip that is
+not locked. The two contracts were mutually exclusive after the upgrade; the inversion keeps a
+regression guard against a stale skip. The skip-reason correctness the old test partly covered is
+still enforced generically by `dependency_tooling_contract`.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Preflight:**
-  - `check_scope_tools base` and `family:<f>` run before any change (exit 2, `command -v` only).
-  - Group tools are checked after the package step and before the build. A missing `companion` tool is non-fatal (R1-3), and in PR A no group with entries other than `companion` is ever requested.
-  - `cargo` is checked after `install_rustup.sh` (exit 1).
-- **SDP3 coverage, verified by mutation:** I injected `frobnicate --x`, `X="$(tr a b <<< c)"`,
-  `… | sed -n p`, `run_bounded 5 udevadm settle` and `if ! awk …` into `setup.sh` one at a
-  time. SDP3 failed for each and named the tool. The tree was restored byte for byte.
-- **User file:** with an identity (options first, then the file) it is backed up and replaced; without one it is
-  kept as before (M2, §20 F3). An oversized file is refused in preflight (§20 F4).
-- **`[android]` binding:** an `[android]` binding while Funnel resolves off is refused in preflight. The managed grammar
-  keeps a trailing strict `[android]` block and re-renders it last.
-- **Push sender drop-in:** `push_sender_drop_in_current` reads only a regular non-link file. Its first-line rule now
-  matches `install.sh` and `uninstall.sh`. With `/usr`, a marked stale file forces an install.sh
-  run that removes it.
+- `webpush.rs` `uncompressed()`: `to_sec1_point(false)` is the renamed SEC1 encoder; the
+  65-byte output is pinned by the RFC 8291 Appendix A vector, which passes → PASS.
+- `hmac_sha256`: the output is still copied into a `Zeroizing<[u8; 32]>`; only the wipe of the
+  intermediate `GenericArray` changed from a `Zeroizing` drop to an explicit
+  `as_mut_slice().zeroize()` after the copy. Scenario: an early return between `finalize` and
+  the wipe would leave the buffer unwiped; none exists (the copy loop cannot fail or panic) → PASS.
+- `generic-array` lost its `zeroize` feature in the lock; any other `Zeroizing<GenericArray>` would
+  fail to compile. The crate builds, and `SecretKey::to_bytes()` (line 118) now returns a
+  `hybrid-array` type that implements `Zeroize` (`hybrid-array` depends on `zeroize`) → PASS.
+- WebAuthn: ecdsa 0.17 could have started refusing high-S signatures (WebAuthn authenticators may
+  emit them). `test_rmc_verify_assertion_accepts_a_valid_uv_assertion` verifies both `s` and
+  `n - s` and passes → PASS.
+- `SecretKey::from_slice` is always given exactly 32 bytes; `from_sec1_bytes` inputs are bounded
+  SEC1 points; no exposure to changed length semantics → PASS.
+- SDP30 classifier: tried `-Sy`, `-yS`, `--sync --refresh`, `-Syu`, `--sync --refresh
+  --sysupgrade`, the new comment lines (back-quoted `` `pacman ``, not the bare word, so ignored),
+  `pacman -Si`, `pacman -S --needed` (no refresh) → behaves as intended. Gap: split short flags
+  (`pacman -S -y`) are not recognised as a refresh (SUGGESTION S1).
 
 ### PAM Concurrency & Deadlines
-Not touched: no PAM, FFI or daemon code changes. Setup's bounded calls (`run_bounded`) are
-unchanged.
+- No file under `crates/pam` or the daemon changes; no Tokio/thread/IPC change → PASS (N/A).
 
 ### Panic Safety & Fail-Closed
-- **Fail-safe parser.** I ran the extracted parser on adversarial inputs:
-  - **Kept off, as required:** double- and single-quoted keys, tabs, CRLF, `false` then `true` duplicates (`false` wins), dotted keys, inline tables, a UTF-8 BOM, Unicode quotes, unterminated multi-line strings, `[` lines inside multi-line strings and arrays, `'''` literals, and comments naming a key. Every written `false` stayed `false`. Ambiguity only ever turns keys off.
-- **Keys below a real table header are ignored** (spec R2-1, SDP14). This opens no path for a valid config: `FileConfig` and `FileAndroid` use `deny_unknown_fields`, and `[android]` is the only table, so soos-remote refuses any feature key under a header.
-- **Round-3 adversarial run, all fail-safe:**
-  - Quoted feature keys spelled with a short or long TOML unicode escape turn every feature key off.
-  - An escaped quote followed by `""` keeps a multi-line basic string open.
-  - An escaped backslash followed by `"""` closes the string, and the `[x]` line that follows is a real header, as in TOML.
-  - A backslash inside a value (a `mailto:` subject, a Windows-style path, `"a=b"` with a backslash) changes nothing, because only text before the first `=` triggers the rule.
-  - A comment line with a backslash is skipped before the rule applies.
-  - Every round-2 input still keeps the written `false`.
-- **No known residual input enables a feature the user wrote `false` for.**
-- **Backup:**
-  - **Creation:** `set -C` (O_EXCL) under `umask 077`; a name that exists or is a link (dangling included) is skipped; suffixes go up to `-9`, then the run fails with nothing replaced; the read is bounded by `head -c`; `cmp` runs before the replacement.
-  - **Never deleted:** setup does not remove the backup.
-  - **Rollback:** restores through a temporary file and rename under `set +e`.
-  - **Privilege:** the companion phase runs as the session owner, so there is no cross-privilege race.
+- No new `unwrap`/`expect`/indexing in production code (`webpush.rs` adds none). Errors still map
+  to `WebPushError`/`WebAuthnError`; nothing can reach an `Allow`/`PAM_SUCCESS` → PASS.
+- `expect` calls in `crates/remote/tests/common/*` are pre-existing test helpers → PASS.
 
 ### Test Integrity & Anti-Weakening
-See §2: only approved or acknowledged lines changed. SDP27 to SDP29 are additions, and their synthetic
-self-checks reject and accept as stated. The SDP28 guard check is heuristic (a `command -v
-<tool>` anywhere in the function or in all of its callers up to depth 3), which is enough for the
-current call sites.
+- See §2. Every changed assertion is listed in the ADR; the remaining edits are doc comments of
+  those tests and one new additive test. SDP30 fails against the old `pacman -Sy` line (the
+  `-Sy` case is asserted as `(true, false)` and the script loop rejects it) → PASS.
+- The owner approval itself is recorded in an ADR authored in the same diff; the reviewer cannot
+  independently confirm the owner's statement (MINOR M1).
 
 ### Memory, Bounds & Secrets
-- **Bounded reads:** the user file is read only through `head -c MAX_REMOTE_CONFIG_BYTES`, and nothing is sourced or evaluated.
-- **No values printed:** plan and result lines print only key names, reduced to `[A-Za-z0-9_.-]` and capped at `MAX_REPORTED_KEYS`. SDP14 and SDP27 assert that no value is printed.
-- **Login:** never printed, and never passed to the root half.
+- HMAC output buffer is still wiped; ECDH x-coordinate and VAPID secret handling unchanged; no new
+  log line or `Debug` added → PASS.
 
 ### Supply Chain & Automation
-The `setup-packages` job:
-- uses the pinned `actions/checkout` SHA with `persist-credentials: false`, under workflow-level `contents: read`;
-- uses no secrets;
-- runs digest-pinned images in unprivileged containers on a read-only mount;
-- has a 60-minute ceiling and is required through `ci-success`.
-
-`setup.sh` adds no `curl`, `wget`, repository or Tailscale command.
+- Sources: all new packages from crates.io (`sources ok`). Licenses: `licenses ok`.
+- No advisory exception; `multiple-versions = "deny"` kept; seven new skips documented and
+  validated by the dependency tooling contract; the `rand_core` three-version documentation is
+  added to the comment block.
+- No `.github/`, `scripts/` or `.githooks/` change. The `tests/docker/setup_packages_test.sh`
+  change is a one-flag change aligned with `tests/docker/Dockerfile.arch` and
+  `tests/docker/Dockerfile.system-ort` (both already `pacman -Syu`, verified) → PASS.
+- Note: a full `-Syu` on a digest-pinned image makes the Arch leg depend on the live repository
+  state, which package resolution already did; documented → acceptable.
 
 ### English-Only Policy
-All code, comments, docs, the walkthrough and commit messages are in English (checked on the
-diff).
+- All added code, comments, docs, ADR, matrix rows and walkthrough are in English → PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. **CLOSED (round 3), escaped quoted keys.** A quoted key that spells a feature key with a
-   TOML escape sequence (valid TOML, the same key for soos-remote) now turns all seven feature
-   keys off and names them. The rule is a backslash before the first `=` of a top-level line.
-   Pinned by SDP27 `escapedkey`.
-2. **CLOSED (round 3), an escaped quote before `"""` inside a multi-line basic string.**
-   `count_of` drops the escaped backslash and escaped quote pairs before counting the delimiter,
-   so the string stays open and its `[x]` line is not read as a header. Pinned by SDP27
-   `escapedquotes`.
-3. **CLOSED (round 3), `scripts/install.sh` `drop_in_first`:** now initialised at top level.
-4. **INFO, SDP3 lexer:** it does not resolve `find -exec <cmd>` or `xargs <cmd>` targets. Neither
-   is used in `setup.sh` today.
+- **[MINOR] M1** `AI/DECISIONS.md:162` (new 2026-11-20 entry, item (4)) — the owner approval of
+  the test edits is asserted only by the ADR written in this same diff. The edits are technically
+  justified (§2) and exactly scoped, but the lead must confirm the owner decision of 2026-11-20
+  exists before merging.
+- **[SUGGESTION] S1** `tests/invariants/src/setup_deps_contract.rs` (`pacman_refresh_upgrade`) —
+  the classifier requires `S` and `y` in the same short-option word, so `pacman -S -y` would pass
+  undetected. Optional: accumulate `S`/`y`/`u` across all short-option words of the line.
+- **[SUGGESTION] S2** `AI/architect_spec_remote_passkey_funnel.md`, `AI/research_webauthn.md`,
+  `AI/auditor_constraints_remote_passkey_funnel.md` still describe `p256 0.13.2` and the
+  `der@0.7.10` skip. They are historical design records superseded by the new ADR; optionally add a
+  pointer to the 2026-11-20 ADR.
+- **[SUGGESTION] S3** `AI/VERIFICATION_MATRIX.md` — the new SDP30 row sits between SDP29 and
+  SDP26; cosmetic ordering only.
 
-No CRITICAL or MAJOR finding remains.
+No CRITICAL or MAJOR finding.
 
 ## 5. Final Verdict
+
 **VERDICT: APPROVED**

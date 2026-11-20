@@ -82,11 +82,15 @@ host_main() {
 # -----------------------------------------------------------------------------
 # Container mode
 # -----------------------------------------------------------------------------
+# Arch is rolling while its image is digest-pinned: `pacman -Sy` followed by
+# `pacman -S` is a partial upgrade that breaks as soon as the live repositories
+# bump a soname (OpenSSL 3 to 4), so the refresh is a full `pacman -Syu`
+# (invariant SDP30), like tests/docker/Dockerfile.arch.
 refresh_index() {
     case "$1" in
         debian) DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null ;;
         fedora) dnf -q makecache >/dev/null ;;
-        arch) pacman -Sy --noconfirm >/dev/null ;;
+        arch) pacman -Syu --noconfirm >/dev/null ;;
     esac
 }
 

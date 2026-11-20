@@ -320,7 +320,7 @@ fn test_rmc_s33_sender_tls_stack_without_openssl() {
     );
     assert!(
         workspace.contains(
-            &"p256 = { version = \"0.13.2\", default-features = false, features = [\"ecdsa\"] }"
+            &"p256 = { version = \"0.14.0\", default-features = false, features = [\"ecdsa\"] }"
         ),
         "the p256 line is unchanged (RMC-S13)"
     );

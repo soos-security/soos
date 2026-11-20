@@ -2378,3 +2378,60 @@ fn test_sdp29_drop_in_marker_on_the_first_line_only() {
         "install.sh checks a regular file, not a link, before the journaled copy and removal"
     );
 }
+
+/// SDP30 (GitHub #477 CI unblock): the Arch image of the package matrix is digest-pinned but
+/// Arch is rolling, so the index refresh is a full `pacman -Syu`, never a refresh alone
+/// (`-Sy`, `-yS`, `--sync --refresh`). A refresh without the upgrade followed by `pacman -S` is
+/// a partial upgrade: once the live repositories bump a soname (OpenSSL 3 to 4), the group
+/// install fails with "could not satisfy dependencies" against the stale libraries of the
+/// pinned image.
+#[test]
+fn test_sdp30_arch_matrix_never_partially_upgrades() {
+    /// (refreshes, upgrades) of the pacman options on one line.
+    fn pacman_refresh_upgrade(line: &str) -> Option<(bool, bool)> {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let at = words.iter().position(|w| *w == "pacman")?;
+        let (mut refresh, mut upgrade) = (false, false);
+        for word in &words[at + 1..] {
+            if let Some(long) = word.strip_prefix("--") {
+                refresh |= long == "refresh";
+                upgrade |= long == "sysupgrade";
+            } else if let Some(short) = word.strip_prefix('-') {
+                refresh |= short.contains('S') && short.contains('y');
+                upgrade |= short.contains('S') && short.contains('u');
+            }
+        }
+        Some((refresh, upgrade))
+    }
+    assert_eq!(
+        pacman_refresh_upgrade("pacman -Sy --noconfirm"),
+        Some((true, false))
+    );
+    assert_eq!(pacman_refresh_upgrade("pacman -yS x"), Some((true, false)));
+    assert_eq!(
+        pacman_refresh_upgrade("pacman --sync --refresh x"),
+        Some((true, false))
+    );
+    assert_eq!(
+        pacman_refresh_upgrade("pacman --sync --refresh --sysupgrade"),
+        Some((true, true))
+    );
+    assert_eq!(
+        pacman_refresh_upgrade("pacman -Syu --noconfirm"),
+        Some((true, true))
+    );
+
+    let script = read_repo(DOCKER_TEST);
+    assert!(
+        script.contains("arch) pacman -Syu --noconfirm"),
+        "{DOCKER_TEST} must refresh Arch with a full `pacman -Syu --noconfirm`"
+    );
+    for line in script.lines() {
+        if let Some((refresh, upgrade)) = pacman_refresh_upgrade(line) {
+            assert!(
+                !refresh || upgrade,
+                "{DOCKER_TEST} refreshes the Arch index without upgrading: {line}"
+            );
+        }
+    }
+}

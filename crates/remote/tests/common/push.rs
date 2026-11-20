@@ -34,7 +34,7 @@ use aes_gcm::{Aes128Gcm, Nonce};
 use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
 use p256::elliptic_curve::point::AffineCoordinates;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::{PublicKey, SecretKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -140,7 +140,7 @@ impl UaFixture {
     pub fn public_bytes(&self) -> Vec<u8> {
         self.secret
             .public_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec()
     }
