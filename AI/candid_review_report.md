@@ -1,168 +1,173 @@
 # Candid Review Report
 
-- **Date**: 2026-10-23
-- **Target Branch**: `feat/setup-preflight-deps`
-- **Base (merge-base)**: `d5e3c09`
-- **Reviewed-Diff-Fingerprint**: `443966868121a10ec6348439ee36d3240679fac85ae4d6bb7d7477c5e3fbe38e`
-- **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/architect_spec_one_command_setup.md`, `AI/auditor_constraints_setup_preflight_deps.md`,
-  `AI/plan_evaluator_report.md`, `AI/walkthroughs/256_setup_preflight_deps.md`,
-  `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`,
-  `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/check_build_deps.sh`,
-  `scripts/install.sh`, `scripts/setup.sh`, `scripts/uninstall.sh`,
-  `tests/docker/setup_packages_test.sh`, `tests/fixtures/setup/remote_android.toml`,
-  `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`,
-  `tests/invariants/src/setup_deps_contract.rs`, `tests/invariants/src/setup_scanner_contract.rs`,
-  `tests/invariants/src/setup_user_phase_contract.rs`
+- **Date**: 2026-11-20
+- **Target Branch**: `fix/remote-tailnet-identity`
+- **Base (merge-base)**: `0cce947`
+- **Reviewed-Diff-Fingerprint**: `221ea96925042723da2c09ae53d8915de2f46a558d8e1d81b7a1dfa02ddd4667`
+- **Audited Files**: `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
+  `AI/architect_spec_remote_tailnet_identity.md`,
+  `AI/auditor_constraints_remote_tailnet_identity.md`,
+  `AI/tester_contract_remote_tailnet_identity.md`,
+  `AI/walkthroughs/258_remote_tailnet_identity.md`, `Docs/REMOTE_COMPANION.md`,
+  `crates/remote/assets/app.js`, `crates/remote/src/auth.rs`, `crates/remote/src/challenge.rs`,
+  `crates/remote/src/identity.rs`, `crates/remote/src/lib.rs`, `crates/remote/src/server.rs`,
+  `crates/remote/tests/common/harness.rs`, `crates/remote/tests/tailnet_caller_tests.rs`,
+  `tests/browser/specs/signin.spec.mjs`, `tests/invariants/src/lib.rs`,
+  `tests/invariants/src/remote_tailnet_identity_contract.rs`
+  (`AI/plan_evaluator_report.md` is excluded from the fingerprint by the gate script.)
 
 ## 1. Executive Summary
 
-PR A of the one-command setup (GitHub #362, owner decisions of 2026-10-23; spec §5, §6, §19,
-§20): `companion` and `android` package groups in `check_build_deps.sh`, the scoped
-`REQUIRED_TOOLS` table of `setup.sh` with a lexer-based coverage invariant (SDP3), a preflight of
-every requested group, the `remote.toml.bak-<UTC>` backup of a user-written `remote.toml` with a
-tolerant fail-safe parser, the trailing `[android]` table of the managed grammar, a
-digest-pinned Docker package matrix job, and the #473 drop-in follow-ups.
+Round 1 of the independent review of security review batch 2 (GitHub #479; findings #584,
+#616, #583, #601, #605). Scope: `crates/remote` (no PAM, daemon or FFI code is touched).
 
-Second review round. Round 1 (at `6209533`) raised one MAJOR finding: a TOML quoted key
-(`"allow_funnel" = false`, `'allow_unlock' = false`) was silently skipped by the line parser, so
-setup's default profile turned Funnel and remote unlock on against the user's written `false`.
-It is fixed in `dcbcc47` (bare, double- and single-quoted keys; any unparsed top-level line that
-names a feature key forces it off and lists it as not recognized; multi-line strings and arrays
-tracked so a `[` line inside them is not a header) and pinned by SDP27. The two MINOR round-1
-items are also fixed: the drop-in marker is checked on the first line only, on a regular
-non-link file, in `install.sh` and `uninstall.sh` (SDP29), and the `optional` scope is enforced
-by SDP28.
+- **#584 PTSN-03** is fixed: one limiter key and one bounded challenge sub-pool per allowed
+  tailnet login. The server tests fail when every caller is mapped back to one key (checked by
+  mutation in this review: 3 of 7 tests fail).
+- **#616 RWEB-02** is fixed in principle, but the new sign-out chain makes the logout request
+  wait on `registerServiceWorker()`, a promise the existing code documents as possibly never
+  settling. One MAJOR finding (section 4).
+- **#583 PTSN-02** is closed as an accepted residual with a documentation fix and a written
+  rationale. Acceptable.
+- **#601 RIDN-01** and **#605 RPSHB-01** are documented only. Their code fixes are deferred
+  to the owner because each needs an existing pinned test to change (RMC-S21 or the tailnet
+  one-tap route tests for #601, PSS1 for #605). The workflow rules require exactly that
+  (stop and ask the owner), so this is not a blocking finding. It does mean this PR does not
+  break chains CH-REMOTE-03 and CH-LOCAL-07. #479, #601 and #605 must stay open.
 
-Rebind after `e14b604` (round 3). The developer closed the two MINOR fail-open residuals of
-round 2 (escaped keys, and an escaped quote before `"""`; see §4). The reviewer proved each
-SDP27 case red:
-
-- `escapedkey` against the round-2 `setup.sh` of `5f7f315`;
-- `escapedquotes` against the current `setup.sh` with only the `count_of` hunk removed.
-
-Both are green on this tree. No test line was removed in this round.
-
-Gates re-run on this tree: `cargo fmt --check`; workspace clippy (all targets, all features,
-`-D warnings`); `cargo test -p soos-invariants -p soos-remote --test-threads=3` (invariants 923
-passed, every suite green, 0 failed); shellcheck on every touched script (no error-severity
-finding; `setup.sh`, `check_build_deps.sh` and the Docker test are fully clean, and the
-`install.sh`/`uninstall.sh` warnings already exist on `origin/main`); and, in round 1,
-`tests/docker/setup_packages_test.sh` (every name resolves on ubuntu:24.04, fedora:40, fedora:44
-and arch, with the asserted Fedora `java` gap). The package lists did not change since. The
-remaining findings are MINOR only.
+Tests run by the reviewer with the per-worktree build env: `cargo test -p soos-remote
+--all-targets --all-features` all green; `cargo test -p soos-invariants --all-targets
+--all-features` 928 passed; `cargo clippy -p soos-remote -p soos-invariants --all-targets
+--all-features -- -D warnings` clean. The browser bench (RTI5) was not run locally.
 
 ## 2. Test Changes (mechanical listing from step 3, with justification per change)
 
-Removed or changed pre-existing lines in `git diff origin/main...HEAD -- tests crates/*/tests`
-(19 lines; everything else is an addition). Every line is in the owner-approved or acknowledged
-set; no other pre-existing assertion changed. Rounds 2 and 3 (`a25b60e`..`defac7e`) only add
-tests.
-
-- `tests/invariants/src/setup_user_phase_contract.rs`
-  `test_set_u12_template_replaced_user_file_untouched`: `let before = h.snapshot();`, the
-  expected exit code `2` (now `0`) and `assert_eq!(before, h.snapshot());` are replaced by the
-  owner-approved M1. M1 checks: exit 0, exactly one byte-equal 0600 `remote.toml.bak-<YYYYmmddTHHMMSSZ>`, managed file
-  `[false,true,true,true,true,true,false]`, no `funnel --bg`. The `--yes` case becomes M2
-  (identity from the file, backup, managed file, units enabled, no Tailscale change command). The
-  former "kept" assertions are carried unchanged onto a new no-identity user file, plus an added
-  "no backup" assertion.
-- Same file, `Harness::new`: `for group in ["build", "models", "gui"]` gains `"companion"`, and
-  inert `jq`/`dig` log-only stubs are added. This is harness wiring M3 (acknowledged): setup never
-  runs either tool in PR A, so the stubs cannot make a test pass vacuously.
-- Same file, `test_pss16_system_up_to_date_includes_the_push_sender`: setup-only fixture
-  M17 (approved). It writes the `prefix.conf` drop-in that `install.sh` leaves for the fake
-  non-`/usr` prefix. No assertion changes.
-- `tests/invariants/src/setup_scanner_contract.rs`: `struct ShCmd` and its fields, `try_lex`,
-  `lex`, `unquote`, `assignment_prefix`, `VarRef`, `variable_refs`, `names_fixed_program`,
-  `Origin`, `script_assignments` and `command_word_index` become `pub(crate)`. This is a
-  visibility change only (acknowledged, §20 F6), and every SCN test body is byte-identical.
-- `tests/invariants/src/setup_contract.rs`: `cksum` is appended to `SAFE_TOOLS` (M3 wiring).
-- `crates/remote/tests/setup_render_tests.rs`: the import line adds `parse_config_with_android`
-  (for the new SDP25 test).
-
-CI portability: the new harness labels user calls `uid=1000` (fixed role label). The real uid
-only feeds the `id` stub and `SUDO_UID`, so CI runners with uid 1001 behave the same.
+- Test files touched: `crates/remote/tests/common/harness.rs`,
+  `crates/remote/tests/tailnet_caller_tests.rs` (new), `tests/browser/specs/signin.spec.mjs`
+  (one test appended), `tests/invariants/src/lib.rs` (one `mod` line added),
+  `tests/invariants/src/remote_tailnet_identity_contract.rs` (new).
+- Removed or changed assertion, `#[test]`, `proptest!` or `#[should_panic]` lines: **none**.
+- New escape hatches (`#[ignore]`, `#[cfg(any())]`, `should_panic`, tolerance, epsilon): **none**.
+- Inline `mod tests` changes: none.
+- `harness.rs`: fixture-only additions. `Options.extra_logins` defaults to empty, and the
+  allowlist built for the default case is identical to before (`[LOGIN]`). `Via::TailnetAs` is
+  handled in `with_cookie` and `headers`. No existing expectation changed. The owner's batch-3
+  default-migration exception is not used and not needed.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Preflight:**
-  - `check_scope_tools base` and `family:<f>` run before any change (exit 2, `command -v` only).
-  - Group tools are checked after the package step and before the build. A missing `companion` tool is non-fatal (R1-3), and in PR A no group with entries other than `companion` is ever requested.
-  - `cargo` is checked after `install_rustup.sh` (exit 1).
-- **SDP3 coverage, verified by mutation:** I injected `frobnicate --x`, `X="$(tr a b <<< c)"`,
-  `… | sed -n p`, `run_bounded 5 udevadm settle` and `if ! awk …` into `setup.sh` one at a
-  time. SDP3 failed for each and named the tool. The tree was restored byte for byte.
-- **User file:** with an identity (options first, then the file) it is backed up and replaced; without one it is
-  kept as before (M2, §20 F3). An oversized file is refused in preflight (§20 F4).
-- **`[android]` binding:** an `[android]` binding while Funnel resolves off is refused in preflight. The managed grammar
-  keeps a trailing strict `[android]` block and re-renders it last.
-- **Push sender drop-in:** `push_sender_drop_in_current` reads only a regular non-link file. Its first-line rule now
-  matches `install.sh` and `uninstall.sh`. With `/usr`, a marked stale file forces an install.sh
-  run that removes it.
+
+- `TailnetCaller::of` uses the same equality as `identity::authorize`, and `allowed_logins`
+  is deduplicated after lowercasing (`config.rs:74`), so positions are unique. It is capped at
+  `MAX_ALLOWED_LOGINS = 8` and converted with `u8::try_from` (no cast). PASS.
+- Every consumer of the old `LimitKey::Tailnet` / `ChallengeBinding::None` was updated:
+  `unlock_key()` and `unlock_binding()` are used by unlock options and verify
+  (`server.rs:1607-1610`, `1755`, `1784`), camera options and start (`2370-2373`, `2405`,
+  `2441`), and both register routes (`1826`, `1930`). No literal tailnet key remains. PASS.
+- Scenario: login B presents a challenge issued to login A. `ChallengeBinding::matches` gives
+  `Tailnet(a) != Tailnet(b)`, so the result is `Mismatch` and the entry is removed. RTI3
+  answers `403 passkey_rejected` with no unlock. PASS.
+- Scenario: a Funnel request carries a tailnet binding. `pool_of` has no
+  `(Funnel, _, Tailnet(_))` arm, so the result is `Mismatch` (RTI1). PASS.
+- Scenario: an authorized login has no position (allowlist inconsistency). The request is
+  refused `403` before routing (fail closed). This path cannot be reached with today's
+  `classify_request` and is not tested. Acceptable.
+- Scenario: sign-out while the service-worker registration is pending or stalled. **FINDING
+  M1** (section 4).
+- Scope: limited to the batch. Nothing in batches 8, 9 or 16 is touched.
 
 ### PAM Concurrency & Deadlines
-Not touched: no PAM, FFI or daemon code changes. Setup's bounded calls (`run_bounded`) are
-unchanged.
+
+- No file under `crates/pam` changed. No Tokio is added outside `crates/remote`. N/A, PASS.
 
 ### Panic Safety & Fail-Closed
-- **Fail-safe parser.** I ran the extracted parser on adversarial inputs:
-  - **Kept off, as required:** double- and single-quoted keys, tabs, CRLF, `false` then `true` duplicates (`false` wins), dotted keys, inline tables, a UTF-8 BOM, Unicode quotes, unterminated multi-line strings, `[` lines inside multi-line strings and arrays, `'''` literals, and comments naming a key. Every written `false` stayed `false`. Ambiguity only ever turns keys off.
-- **Keys below a real table header are ignored** (spec R2-1, SDP14). This opens no path for a valid config: `FileConfig` and `FileAndroid` use `deny_unknown_fields`, and `[android]` is the only table, so soos-remote refuses any feature key under a header.
-- **Round-3 adversarial run, all fail-safe:**
-  - Quoted feature keys spelled with a short or long TOML unicode escape turn every feature key off.
-  - An escaped quote followed by `""` keeps a multi-line basic string open.
-  - An escaped backslash followed by `"""` closes the string, and the `[x]` line that follows is a real header, as in TOML.
-  - A backslash inside a value (a `mailto:` subject, a Windows-style path, `"a=b"` with a backslash) changes nothing, because only text before the first `=` triggers the rule.
-  - A comment line with a backslash is skipped before the rule applies.
-  - Every round-2 input still keeps the written `false`.
-- **No known residual input enables a feature the user wrote `false` for.**
-- **Backup:**
-  - **Creation:** `set -C` (O_EXCL) under `umask 077`; a name that exists or is a link (dangling included) is skipped; suffixes go up to `-9`, then the run fails with nothing replaced; the read is bounded by `head -c`; `cmp` runs before the replacement.
-  - **Never deleted:** setup does not remove the backup.
-  - **Rollback:** restores through a temporary file and rename under `set +e`.
-  - **Privilege:** the companion phase runs as the session owner, so there is no cross-privilege race.
+
+- No `unwrap`, `expect`, `panic!` or indexing in the production changes. `TailnetCaller::of`
+  returns `Option`. The `MAX_PENDING_TAILNET_CHALLENGES` product is a compile-time constant
+  (clippy is clean).
+- No error becomes an `Allow` or a success. The unresolved caller is refused, and the challenge
+  binding mismatch rejects the ceremony. PASS.
 
 ### Test Integrity & Anti-Weakening
-See §2: only approved or acknowledged lines changed. SDP27 to SDP29 are additions, and their synthetic
-self-checks reject and accept as stated. The SDP28 guard check is heuristic (a `command -v
-<tool>` anywhere in the function or in all of its callers up to depth 3), which is enough for the
-current call sites.
+
+- No existing assertion was removed or changed (section 2).
+- Mutation run by the reviewer: every tailnet caller was forced to position 0 in
+  `handle_connection`. `test_rti2_one_login_cannot_lock_another_out`,
+  `test_rti2_register_failures_count_on_the_callers_key` and
+  `test_rti3_challenge_pool_of_one_login_is_not_the_owners` then fail. The store-level RTI1 and
+  RTI2 tests pin the per-caller pool and the key separation. PASS.
+- RTI4 is a static shape test. RTI5 (browser) asserts the request order and the endpoint, but
+  only for a registration that resolves at once. Nothing covers a pending or failing
+  registration (see M1).
 
 ### Memory, Bounds & Secrets
-- **Bounded reads:** the user file is read only through `head -c MAX_REMOTE_CONFIG_BYTES`, and nothing is sourced or evaluated.
-- **No values printed:** plan and result lines print only key names, reduced to `[A-Za-z0-9_.-]` and capped at `MAX_REPORTED_KEYS`. SDP14 and SDP27 assert that no value is printed.
-- **Login:** never printed, and never passed to the root half.
+
+- Pools stay bounded and never evict: at most 4 entries per login and 32 per tailnet
+  unlock or camera pool. Limiter maps have at most 8 tailnet keys.
+- `Debug` of `TailnetCaller`, `LimitKey::Tailnet` and `ChallengeBinding::Tailnet` is redacted
+  (RTI1).
+- The 403 path logs only `"tailnet caller not resolved"`, never the login. PASS.
 
 ### Supply Chain & Automation
-The `setup-packages` job:
-- uses the pinned `actions/checkout` SHA with `persist-credentials: false`, under workflow-level `contents: read`;
-- uses no secrets;
-- runs digest-pinned images in unprivileged containers on a read-only mount;
-- has a 60-minute ceiling and is required through `ci-success`.
 
-`setup.sh` adds no `curl`, `wget`, repository or Tailscale command.
+- No `Cargo.*`, `deny.toml`, `.github/`, `scripts/`, `.githooks/` or packaging change. N/A.
 
 ### English-Only Policy
-All code, comments, docs, the walkthrough and commit messages are in English (checked on the
-diff).
+
+- All added code, comments, documentation, the ADR, the walkthrough and the commit message are
+  in English.
+- No owner-host material: no login name, host path, tailnet name or address of a real machine.
+  The `100.x` and `fd7a:` values are the public Tailscale ranges. Findings are cited only by
+  public issue numbers and IDs. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. **CLOSED (round 3), escaped quoted keys.** A quoted key that spells a feature key with a
-   TOML escape sequence (valid TOML, the same key for soos-remote) now turns all seven feature
-   keys off and names them. The rule is a backslash before the first `=` of a top-level line.
-   Pinned by SDP27 `escapedkey`.
-2. **CLOSED (round 3), an escaped quote before `"""` inside a multi-line basic string.**
-   `count_of` drops the escaped backslash and escaped quote pairs before counting the delimiter,
-   so the string stays open and its `[x]` line is not read as a header. Pinned by SDP27
-   `escapedquotes`.
-3. **CLOSED (round 3), `scripts/install.sh` `drop_in_first`:** now initialised at top level.
-4. **INFO, SDP3 lexer:** it does not resolve `find -exec <cmd>` or `xargs <cmd>` targets. Neither
-   is used in `setup.sh` today.
-
-No CRITICAL or MAJOR finding remains.
+- **[MAJOR] M1** `crates/remote/assets/app.js:1209` (`dropPushSubscription`), together with
+  `requestLogout` at `app.js:1228-1235`.
+  - **Defect.** The logout request now runs only after `registerServiceWorker()` settles.
+    That function issues a fresh `navigator.serviceWorker.register()` whenever
+    `pushRegistration` is still `null`, for example when the start-up registration at
+    `app.js:2650` has not finished or has failed. It has no bound, and the existing comment
+    at `app.js:1383-1385` says so: "a register() that never settles". If it stalls (for example
+    a slow `sw.js` fetch over Funnel on a mobile network), `POST /api/auth/logout` is never
+    sent, the `finally` never runs, and the phone keeps a valid web session after the user
+    tapped Sign out.
+  - **Why it blocks.** Before this diff, logout was sent at once in every case. The ADR item
+    (2), section 2b ("the session ends in every case") and the RTI4 docstring ("bounded") all
+    claim the opposite of the new behaviour.
+  - **Required correction (production code only; the RTI4 needles stay satisfied).**
+    1. Do not register a worker during sign-out. Use the cached registration, or look up an
+       existing one without waiting for installation. For example:
+       `(pushRegistration !== null ? registerServiceWorker() : navigator.serviceWorker.getRegistration().then(function (r) { return r || null; }))`.
+       Alternatively, reuse the existing timer-bounded `readyRegistration()`, which adds no new
+       timer (RMO-S9) but changes an RTI4 needle.
+    2. Keep `.catch` so that a rejection still reaches the logout.
+    3. Add a browser case (RTI5 file) where `register()` never settles and no registration
+       exists, and assert that `/api/auth/logout` is still posted and "Signed out" is shown.
+- **[MINOR] m1** `crates/remote/tests/tailnet_caller_tests.rs:719-720`: the comment says "The
+  owner's failures do not lift or extend login A's lockout", but the test records no owner
+  failure before advancing the clock. Either record owner failures, or reword the comment.
+  This is a new test, so adding a check is allowed; do not remove the existing assertion.
+- **[MINOR] m2 (owner question, not blocking)** #601 RIDN-01 and #605 RPSHB-01 are documented
+  but not fixed. The deferral follows the workflow rule, because each fix changes a pinned
+  existing test (RMC-S21 or the tailnet route tests; PSS1). The PR body must therefore:
+  - say plainly that the chain-breaking fixes of #479 (refuse self-originated tailnet
+    requests, `IPAddressDeny=`) are not delivered;
+  - keep #479, #601 and #605 open;
+  - put the two owner questions explicitly.
+  The G201-01 caveat must be carried into whichever fix the owner picks: interface addresses
+  read at request time with a short cache and fail closed, never a setup-written list.
+- **[MINOR] m3 (residual, documented)** Register-body decode errors still count on the
+  caller's unlock lockout, which the review asked to separate. An existing test pins this.
+  It is recorded as a residual in the ADR and walkthrough §9. Acceptable for this round.
+- **[SUGGESTION] s1** The `403 forbidden` branch for an unresolved tailnet caller
+  (`server.rs:1275-1283`) has no test. It cannot be reached through `classify_request`
+  today, so this is optional.
 
 ## 5. Final Verdict
-**VERDICT: APPROVED**
+
+One MAJOR finding (M1): the sign-out logout can be blocked indefinitely by an unbounded
+service-worker registration.
+
+**VERDICT: CHANGES_REQUESTED**
