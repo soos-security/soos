@@ -1,168 +1,149 @@
 # Candid Review Report
 
-- **Date**: 2026-10-23
-- **Target Branch**: `feat/setup-preflight-deps`
-- **Base (merge-base)**: `d5e3c09`
-- **Reviewed-Diff-Fingerprint**: `443966868121a10ec6348439ee36d3240679fac85ae4d6bb7d7477c5e3fbe38e`
-- **Audited Files**: `.github/workflows/ci.yml`, `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`,
-  `AI/architect_spec_one_command_setup.md`, `AI/auditor_constraints_setup_preflight_deps.md`,
-  `AI/plan_evaluator_report.md`, `AI/walkthroughs/256_setup_preflight_deps.md`,
-  `Docs/CI_CD_AND_SECURITY.md`, `Docs/PACKAGING_AND_PROVISIONING.md`, `Docs/REMOTE_COMPANION.md`,
-  `README.md`, `crates/remote/tests/setup_render_tests.rs`, `scripts/check_build_deps.sh`,
-  `scripts/install.sh`, `scripts/setup.sh`, `scripts/uninstall.sh`,
-  `tests/docker/setup_packages_test.sh`, `tests/fixtures/setup/remote_android.toml`,
-  `tests/invariants/src/lib.rs`, `tests/invariants/src/setup_contract.rs`,
-  `tests/invariants/src/setup_deps_contract.rs`, `tests/invariants/src/setup_scanner_contract.rs`,
-  `tests/invariants/src/setup_user_phase_contract.rs`
+- **Date**: 2026-11-20
+- **Target Branch**: `fix/pam-success-done`
+- **Base (merge-base)**: `0cce947`
+- **Reviewed-Diff-Fingerprint**: `3d978d916d290f61a75d551dfa034adb134c4b40509e6b6ee56f2785a861f53b`
+- **Audited Files**: `.agents/skills/dev-workflow/references/project-facts.md`, `AI/ARCHITECTURE.md`,
+  `AI/DECISIONS.md`, `AI/VERIFICATION_MATRIX.md`, `AI/architect_spec_pam_success_done.md`,
+  `AI/auditor_constraints_pam_success_done.md`, `AI/walkthroughs/264_pam_success_done.md`,
+  `Cargo.lock`, `Cargo.toml`, `Docs/DISTRIBUTION_DEPLOYMENT.md`,
+  `Docs/PACKAGING_AND_PROVISIONING.md`, `crates/admin-cli/Cargo.toml`,
+  `crates/admin-cli/src/{args,gdm,lib,main,pam_check}.rs`,
+  `crates/admin-cli/tests/{gdm_flag_path_tests,pam_success_done_tests}.rs`,
+  `packaging/pam/fedora/soos/README`, `packaging/rpm/soos.spec`, `scripts/install.sh`,
+  `tests/invariants/src/{lib,pam_success_done_contract}.rs`
+
+Review round 1 of security review batch 10 (GitHub #487: #574 `PSTK-01`, #575 `PSTK-02`,
+#581 `PSTKC-01`).
 
 ## 1. Executive Summary
 
-PR A of the one-command setup (GitHub #362, owner decisions of 2026-10-23; spec §5, §6, §19,
-§20): `companion` and `android` package groups in `check_build_deps.sh`, the scoped
-`REQUIRED_TOOLS` table of `setup.sh` with a lexer-based coverage invariant (SDP3), a preflight of
-every requested group, the `remote.toml.bak-<UTC>` backup of a user-written `remote.toml` with a
-tolerant fail-safe parser, the trailing `[android]` table of the managed grammar, a
-digest-pinned Docker package matrix job, and the #473 drop-in follow-ups.
+The diff adds a bounded PAM stack simulator (`pam_check.rs`), a `gdm enable` refusal for
+enforcing rules after the anchor, a read-only `soos-admin pam check`, module-aligned disable
+flags for `soos-admin gdm`, and a profile-gated authselect activation hint. `crates/pam` is not
+touched, no `PAM_SUCCESS` path is added, no existing test is changed, fmt/clippy/tests are green.
 
-Second review round. Round 1 (at `6209533`) raised one MAJOR finding: a TOML quoted key
-(`"allow_funnel" = false`, `'allow_unlock' = false`) was silently skipped by the line parser, so
-setup's default profile turned Funnel and remote unlock on against the user's written `false`.
-It is fixed in `dcbcc47` (bare, double- and single-quoted keys; any unparsed top-level line that
-names a feature key forces it off and lists it as not recognized; multi-line strings and arrays
-tracked so a `[` line inside them is not a header) and pinned by SDP27. The two MINOR round-1
-items are also fixed: the drop-in marker is checked on the first line only, on a regular
-non-link file, in `install.sh` and `uninstall.sh` (SDP29), and the `optional` scope is enforced
-by SDP28.
+Two MAJOR defects remain:
+1. The RPM `%post` warning of #575 does not fire on a typical directory host: `%%` is an RPM
+   macro escape, so the scriptlet runs `${current% *}` (strip the last word only), not
+   `${current%% *}`.
+2. `gdm enable` still inserts its `[success=done]` block when an enforcing factor sits in the
+   anchor's own shared stack after the credential module (for example `auth required
+   pam_u2f.so` appended to `common-auth`): a face match skips a factor the password runs, which
+   is the #574 defect for the GDM managed block, and the new `soos-admin pam check` reports the
+   very layout `gdm enable` just wrote.
 
-Rebind after `e14b604` (round 3). The developer closed the two MINOR fail-open residuals of
-round 2 (escaped keys, and an escaped quote before `"""`; see §4). The reviewer proved each
-SDP27 case red:
+## 2. Test Changes
 
-- `escapedkey` against the round-2 `setup.sh` of `5f7f315`;
-- `escapedquotes` against the current `setup.sh` with only the `count_of` hunk removed.
+Mechanical listing from `target/candid_diff.patch`:
+- Test files touched: `crates/admin-cli/tests/gdm_flag_path_tests.rs` (new),
+  `crates/admin-cli/tests/pam_success_done_tests.rs` (new), `tests/invariants/src/lib.rs`
+  (one added `mod` declaration at the end), `tests/invariants/src/pam_success_done_contract.rs`
+  (new).
+- Removed or changed assertions / `#[test]` lines: none.
+- New escape hatches (`#[ignore]`, `should_panic`, tolerance): none.
+- Inline test modules: one new `mod tests` in `crates/admin-cli/src/pam_check.rs`.
 
-Both are green on this tree. No test line was removed in this round.
-
-Gates re-run on this tree: `cargo fmt --check`; workspace clippy (all targets, all features,
-`-D warnings`); `cargo test -p soos-invariants -p soos-remote --test-threads=3` (invariants 923
-passed, every suite green, 0 failed); shellcheck on every touched script (no error-severity
-finding; `setup.sh`, `check_build_deps.sh` and the Docker test are fully clean, and the
-`install.sh`/`uninstall.sh` warnings already exist on `origin/main`); and, in round 1,
-`tests/docker/setup_packages_test.sh` (every name resolves on ubuntu:24.04, fedora:40, fedora:44
-and arch, with the asserted Fedora `java` gap). The package lists did not change since. The
-remaining findings are MINOR only.
-
-## 2. Test Changes (mechanical listing from step 3, with justification per change)
-
-Removed or changed pre-existing lines in `git diff origin/main...HEAD -- tests crates/*/tests`
-(19 lines; everything else is an addition). Every line is in the owner-approved or acknowledged
-set; no other pre-existing assertion changed. Rounds 2 and 3 (`a25b60e`..`defac7e`) only add
-tests.
-
-- `tests/invariants/src/setup_user_phase_contract.rs`
-  `test_set_u12_template_replaced_user_file_untouched`: `let before = h.snapshot();`, the
-  expected exit code `2` (now `0`) and `assert_eq!(before, h.snapshot());` are replaced by the
-  owner-approved M1. M1 checks: exit 0, exactly one byte-equal 0600 `remote.toml.bak-<YYYYmmddTHHMMSSZ>`, managed file
-  `[false,true,true,true,true,true,false]`, no `funnel --bg`. The `--yes` case becomes M2
-  (identity from the file, backup, managed file, units enabled, no Tailscale change command). The
-  former "kept" assertions are carried unchanged onto a new no-identity user file, plus an added
-  "no backup" assertion.
-- Same file, `Harness::new`: `for group in ["build", "models", "gui"]` gains `"companion"`, and
-  inert `jq`/`dig` log-only stubs are added. This is harness wiring M3 (acknowledged): setup never
-  runs either tool in PR A, so the stubs cannot make a test pass vacuously.
-- Same file, `test_pss16_system_up_to_date_includes_the_push_sender`: setup-only fixture
-  M17 (approved). It writes the `prefix.conf` drop-in that `install.sh` leaves for the fake
-  non-`/usr` prefix. No assertion changes.
-- `tests/invariants/src/setup_scanner_contract.rs`: `struct ShCmd` and its fields, `try_lex`,
-  `lex`, `unquote`, `assignment_prefix`, `VarRef`, `variable_refs`, `names_fixed_program`,
-  `Origin`, `script_assignments` and `command_word_index` become `pub(crate)`. This is a
-  visibility change only (acknowledged, §20 F6), and every SCN test body is byte-identical.
-- `tests/invariants/src/setup_contract.rs`: `cksum` is appended to `SAFE_TOOLS` (M3 wiring).
-- `crates/remote/tests/setup_render_tests.rs`: the import line adds `parse_config_with_android`
-  (for the new SDP25 test).
-
-CI portability: the new harness labels user calls `uid=1000` (fixed role label). The real uid
-only feeds the `id` stub and `SUDO_UID`, so CI runners with uid 1001 behave the same.
+No pre-existing test was weakened; the batch-3 default-migration exception is not used.
 
 ## 3. Deep Reasoning Audit
 
 ### Logic & Architecture
-- **Preflight:**
-  - `check_scope_tools base` and `family:<f>` run before any change (exit 2, `command -v` only).
-  - Group tools are checked after the package step and before the build. A missing `companion` tool is non-fatal (R1-3), and in PR A no group with entries other than `companion` is ever requested.
-  - `cargo` is checked after `install_rustup.sh` (exit 1).
-- **SDP3 coverage, verified by mutation:** I injected `frobnicate --x`, `X="$(tr a b <<< c)"`,
-  `… | sed -n p`, `run_bounded 5 udevadm settle` and `if ! awk …` into `setup.sh` one at a
-  time. SDP3 failed for each and named the tool. The tree was restored byte for byte.
-- **User file:** with an identity (options first, then the file) it is backed up and replaced; without one it is
-  kept as before (M2, §20 F3). An oversized file is refused in preflight (§20 F4).
-- **`[android]` binding:** an `[android]` binding while Funnel resolves off is refused in preflight. The managed grammar
-  keeps a trailing strict `[android]` block and re-renders it last.
-- **Push sender drop-in:** `push_sender_drop_in_current` reads only a regular non-link file. Its first-line rule now
-  matches `install.sh` and `uninstall.sh`. With `/usr`, a marked stale file forces an install.sh
-  run that removes it.
+- Scenario: Ubuntu `gdm-password` = gates, `@include common-auth`, `auth required pam_u2f.so`.
+  `gdm enable` refuses, file unchanged (PSK1). PASS.
+- Scenario: bracketed controls, `-auth`, later `include`/`substack`/`@include`, missing target
+  (caveat G302-03). Classified and refused fail closed. PASS.
+- Scenario (probe run by the reviewer, then deleted): `common-auth` = stock Ubuntu stack plus
+  `auth required pam_u2f.so`, `gdm-password` = `auth requisite pam_nologin.so`,
+  `@include common-auth`, `auth optional pam_gnome_keyring.so`. `gdm enable` returns
+  `Ok(installed=true)` and writes the managed `[success=done]` block; `soos-admin pam check
+  gdm-password` on the result then reports `[SKIP] ... common-auth:5 'pam_u2f.so' (control
+  'required')`. FINDING (MAJOR, see section 4).
+- Scenario (probe): stock Arch `gdm-password` -> `system-local-login` -> `system-login` ->
+  `system-auth` without a soos rule. `gdm enable` inserts and copies the pre-credential gates;
+  `pam check` then reports `pam_shells.so`, `pam_nologin.so` and `pam_faillock.so preauth`
+  (gates that the managed block copied in front of the face rule) as skipped, exit 1.
+  FINDING (MINOR, false positives on a layout the tool itself produced).
+- Disable flags: `pam_service_name`, `module_flag_names`, `module_disabled` match
+  `PamConfig::is_disabled` (PFL1 pins it against `soos-pam`); `gdm disable --pam-file
+  .../sddm` writes `/etc/soos/sddm.disable`, refuses `gdm.disable` and any path outside
+  `/etc/soos`. PASS.
+- `install.sh` hint: `local`/`minimal` print the command with features and without `--force`;
+  other profiles warn. PASS.
+- RPM `%post`: see MAJOR finding 1.
 
 ### PAM Concurrency & Deadlines
-Not touched: no PAM, FFI or daemon code changes. Setup's bounded calls (`run_bounded`) are
-unchanged.
+`crates/pam` is untouched. The new code runs only in the admin CLI. PASS.
 
 ### Panic Safety & Fail-Closed
-- **Fail-safe parser.** I ran the extracted parser on adversarial inputs:
-  - **Kept off, as required:** double- and single-quoted keys, tabs, CRLF, `false` then `true` duplicates (`false` wins), dotted keys, inline tables, a UTF-8 BOM, Unicode quotes, unterminated multi-line strings, `[` lines inside multi-line strings and arrays, `'''` literals, and comments naming a key. Every written `false` stayed `false`. Ambiguity only ever turns keys off.
-- **Keys below a real table header are ignored** (spec R2-1, SDP14). This opens no path for a valid config: `FileConfig` and `FileAndroid` use `deny_unknown_fields`, and `[android]` is the only table, so soos-remote refuses any feature key under a header.
-- **Round-3 adversarial run, all fail-safe:**
-  - Quoted feature keys spelled with a short or long TOML unicode escape turn every feature key off.
-  - An escaped quote followed by `""` keeps a multi-line basic string open.
-  - An escaped backslash followed by `"""` closes the string, and the `[x]` line that follows is a real header, as in TOML.
-  - A backslash inside a value (a `mailto:` subject, a Windows-style path, `"a=b"` with a backslash) changes nothing, because only text before the first `=` triggers the rule.
-  - A comment line with a backslash is skipped before the rule applies.
-  - Every round-2 input still keeps the written `false`.
-- **No known residual input enables a feature the user wrote `false` for.**
-- **Backup:**
-  - **Creation:** `set -C` (O_EXCL) under `umask 077`; a name that exists or is a link (dangling included) is skipped; suffixes go up to `-9`, then the run fails with nothing replaced; the read is bounded by `head -c`; `cmp` runs before the replacement.
-  - **Never deleted:** setup does not remove the backup.
-  - **Rollback:** restores through a temporary file and rename under `set +e`.
-  - **Privilege:** the companion phase runs as the session owner, so there is no cross-privilege race.
+No `unwrap`/`expect`/indexing in production code of `pam_check.rs` (only `get`, checked
+arithmetic, `unwrap_or_default`); `to_json` falls back to `{}`. An unanalysable tail refuses,
+an unanalysable anchor or unfollowable run counts every enforcing tail rule. No path reaches
+`PAM_SUCCESS`. PASS.
 
 ### Test Integrity & Anti-Weakening
-See §2: only approved or acknowledged lines changed. SDP27 to SDP29 are additions, and their synthetic
-self-checks reject and accept as stated. The SDP28 guard check is heuristic (a `command -v
-<tool>` anywhere in the function or in all of its callers up to depth 3), which is enough for the
-current call sites.
+Only new tests. The PSK/PFL tests fail against a plausible wrong implementation (keyword-only
+predicate, no delegation following, `gdm.disable` for `sddm`). Gap: no test covers an enforcing
+rule inside the anchor's shared stack after the credential module (finding 2), and no test runs
+the RPM scriptlet after macro expansion (finding 1; PSK10 only checks substrings).
 
 ### Memory, Bounds & Secrets
-- **Bounded reads:** the user file is read only through `head -c MAX_REMOTE_CONFIG_BYTES`, and nothing is sourced or evaluated.
-- **No values printed:** plan and result lines print only key names, reduced to `[A-Za-z0-9_.-]` and capped at `MAX_REPORTED_KEYS`. SDP14 and SDP27 assert that no value is printed.
-- **Login:** never printed, and never passed to the root half.
+Reads through `read_bounded_utf8`; bounds 256 services, depth 4, 32 reads, 1024 rules,
+8 branch points (256 assignments); names validated as `[A-Za-z0-9._-]`; control characters in
+operator text replaced. No secrets, frames or embeddings involved. PASS.
 
 ### Supply Chain & Automation
-The `setup-packages` job:
-- uses the pinned `actions/checkout` SHA with `persist-credentials: false`, under workflow-level `contents: read`;
-- uses no secrets;
-- runs digest-pinned images in unprivileged containers on a read-only mount;
-- has a 60-minute ceiling and is required through `ci-success`.
-
-`setup.sh` adds no `curl`, `wget`, repository or Tailscale command.
+`soos-pam` added as a workspace path dev-dependency of `soos-admin-cli` only; no external crate.
+`scripts/install.sh` function quotes every expansion. PASS (RPM scriptlet: finding 1).
 
 ### English-Only Policy
-All code, comments, docs, the walkthrough and commit messages are in English (checked on the
-diff).
+All added text is English. No owner-host material or private review material found in the
+patch. PASS.
 
 ## 4. Detailed Findings & Action Items
 
-1. **CLOSED (round 3), escaped quoted keys.** A quoted key that spells a feature key with a
-   TOML escape sequence (valid TOML, the same key for soos-remote) now turns all seven feature
-   keys off and names them. The rule is a backslash before the first `=` of a top-level line.
-   Pinned by SDP27 `escapedkey`.
-2. **CLOSED (round 3), an escaped quote before `"""` inside a multi-line basic string.**
-   `count_of` drops the escaped backslash and escaped quote pairs before counting the delimiter,
-   so the string stays open and its `[x]` line is not read as a header. Pinned by SDP27
-   `escapedquotes`.
-3. **CLOSED (round 3), `scripts/install.sh` `drop_in_first`:** now initialised at top level.
-4. **INFO, SDP3 lexer:** it does not resolve `find -exec <cmd>` or `xargs <cmd>` targets. Neither
-   is used in `setup.sh` today.
-
-No CRITICAL or MAJOR finding remains.
+- **[MAJOR]** `packaging/rpm/soos.spec:141` and `:143` — `%%` is the RPM macro escape for a
+  literal `%`, so the installed `%post` runs `case "${current% *}"`, which removes only the
+  last word. `authselect current --raw` = `sssd with-mkhomedir with-sudo` yields
+  `sssd with-mkhomedir`, which matches no pattern: the #575 warning is silent on a typical
+  directory-joined host (it fires only with zero or one feature). Fix: avoid the `%%` operator
+  in the spec, e.g. `case "${current}" in sssd|"sssd "*|winbind|"winbind "*|nis|"nis "*)`, and
+  print the id from the matched pattern (or write `%%%%`). Add an invariant that rejects a
+  `%%` parameter expansion in this scriptlet, or that checks the expanded form.
+- **[MAJOR]** `crates/admin-cli/src/pam_check.rs:814-826` (`gdm_tail_skips`, `!rule.in_anchor`)
+  — enforcing rules of the anchor's own delegated stack that run after its credential module
+  are never reported, so `gdm enable` inserts `[success=done]` in front of
+  `@include common-auth` even when `common-auth` ends with `auth required pam_u2f.so`; a face
+  match then replaces "password and second factor" with "face" on GDM, the #574 defect for the
+  managed block ("a face match skips every rule the administrator placed after it"). The
+  pre-existing delegated scan stops at the credential module (`pam_stack.rs`), so nothing else
+  classifies these rules, and `soos-admin pam check` flags the result immediately. Fix: in
+  `gdm_tail_skips`, also report reachable enforcing anchor rules after the first credential
+  module (keep the "up to the first credential module" exemption, which covers the copied
+  gates), with explicit, narrow exemptions only where the face path is known to be equivalent
+  (e.g. `pam_faillock.so authsucc`, the already exempt modules), and add a contract test
+  (`common-auth` + trailing `required pam_u2f.so` -> refused). If the owner prefers to keep the
+  exemption, record it as an accepted residual in the ADR, Docs §2.1 and the walkthrough; the
+  current Docs §2.1 text ("follows the credential module or shared stack") does not tell the
+  operator that such a factor is skipped.
+- **[MINOR]** `crates/admin-cli/src/pam_check.rs:658-676` (`check_service`) — `pam check` does
+  not recognise the gates `gdm enable` copied in front of its managed rule, so on a stock Arch or
+  Fedora GDM stack after `gdm enable` it reports `pam_shells.so`, `pam_nologin.so`,
+  `pam_faillock.so preauth` as skipped (exit 1). Docs §3.2 tells operators to run it, so a
+  supported layout looks broken. Apply the same "rules up to the first credential module"
+  logic after a managed block, or treat a skipped rule whose identical copy (module and
+  arguments) ran before the face rule as not skipped; add a test on a post-`gdm enable`
+  Fedora/Arch stack.
+- **[MINOR]** Scope / tracking — the Debian package rule (`packaging/pam/debian/soos`, the
+  default layout of #574) still uses `success=done`; PSK12 is deferred for an owner-approved
+  contract migration. Acceptable as an owner question, but the PR body must reference #574 with
+  `Refs`, not close it, and say that the packaged Debian layout stays affected until PSK12.
+- **[SUGGESTION]** `crates/admin-cli/src/main.rs:193-229` — the flag directory and the
+  "outside" recomputation of `status.enabled` live in `main.rs`; moving them into the library
+  (`configure_gdm_with_options` taking the flag directory) would let tests cover the CLI rule
+  without spawning the binary.
 
 ## 5. Final Verdict
-**VERDICT: APPROVED**
+
+**VERDICT: CHANGES_REQUESTED**
