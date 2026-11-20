@@ -188,3 +188,88 @@ fn test_pstk01_and_pstkc01_behaviour_is_documented() {
     let decisions = read("AI/DECISIONS.md");
     assert!(decisions.contains("GitHub #487"));
 }
+
+/// The `authselect` block of the RPM `%post` scriptlet as the installed package runs it: RPM
+/// macro expansion applied (`%%` becomes `%`, `%{_sysconfdir}` becomes `sysconfdir`).
+fn rpm_post_authselect_block(sysconfdir: &str) -> String {
+    let spec = read("packaging/rpm/soos.spec");
+    let post = &spec[spec
+        .find("\n%post\n")
+        .expect("soos.spec has a %post scriptlet")..];
+    let start = post
+        .find("\nif command -v authselect >/dev/null 2>&1; then\n")
+        .expect("%post runs an authselect block")
+        + 1;
+    let rest = &post[start..];
+    let end = rest
+        .find("\nfi\n")
+        .expect("the authselect block ends with fi")
+        + 4;
+    let block = rest[..end]
+        .replace("%%", "\u{0}")
+        .replace("%{_sysconfdir}", sysconfdir);
+    assert!(
+        !block.contains('%'),
+        "unexpected RPM macro in the %post authselect block: {block}"
+    );
+    block.replace('\u{0}', "%")
+}
+
+/// PSK10b (candid review round 1) — the macro-expanded `%post` warns on every directory
+/// profile whatever its features (`sssd with-mkhomedir with-sudo` included), names the
+/// recorded profile, stays silent on `local`/`minimal`, and records the profile.
+#[test]
+fn test_pstk02_rpm_post_warns_on_directory_profiles_after_macro_expansion() {
+    let tmp = std::env::temp_dir().join(format!("soos-psk10b-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let sysconfdir = tmp.to_str().unwrap().to_string();
+    let block = rpm_post_authselect_block(&sysconfdir);
+    let run = |current: &str| -> String {
+        let script = format!("authselect() {{ printf '%s\\n' \"$SOOS_CURRENT\"; }}\n{block}");
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("SOOS_CURRENT", current)
+            .output()
+            .expect("run sh");
+        assert!(out.status.success(), "{current}: {out:?}");
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+    for current in [
+        "sssd",
+        "sssd with-mkhomedir",
+        "sssd with-mkhomedir with-sudo",
+        "winbind with-mkhomedir with-krb5",
+        "nis with-faillock with-mkhomedir",
+    ] {
+        let stderr = run(current);
+        assert!(
+            stderr.contains("WARNING") && stderr.contains("local accounts only"),
+            "{current}: the directory-host warning must fire: {stderr:?}"
+        );
+        assert!(
+            stderr.contains(current),
+            "{current}: names the profile: {stderr:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.join("soos/authselect.previous")).unwrap(),
+            format!("{current}\n")
+        );
+    }
+    for current in [
+        "local",
+        "local with-faillock with-silent-lastlog",
+        "minimal",
+        "sssdx with-mkhomedir",
+        "custom/soos with-faillock",
+        "",
+    ] {
+        let stderr = run(current);
+        assert!(
+            !stderr.contains("WARNING"),
+            "{current}: no directory-host warning: {stderr:?}"
+        );
+    }
+    let _ = fs::remove_dir_all(&tmp);
+}

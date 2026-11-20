@@ -138,9 +138,12 @@ if command -v authselect >/dev/null 2>&1; then
             chmod 0644 %{_sysconfdir}/soos/authselect.previous || :
             ;;
     esac
-    case "${current%% *}" in
-        sssd|winbind|nis)
-            echo "soos: WARNING: custom/soos serves local accounts only; selecting it on this ${current%% *} host would remove the directory identity source. See Docs/DISTRIBUTION_DEPLOYMENT.md section 4.3." >&2
+    # Match the whole recorded profile, never a prefix-strip parameter expansion:
+    # RPM halves a doubled percent sign in scriptlets, so the expansion would strip
+    # only the last feature word and the warning would stay silent (GitHub #575).
+    case "${current}" in
+        sssd|winbind|nis|"sssd "*|"winbind "*|"nis "*)
+            echo "soos: WARNING: custom/soos serves local accounts only; selecting it on this host (authselect profile: ${current}) would remove the directory identity source. See Docs/DISTRIBUTION_DEPLOYMENT.md section 4.3." >&2
             ;;
         *) : ;;
     esac
