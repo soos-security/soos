@@ -70,6 +70,31 @@ pub enum Commands {
 
     /// Opt-in polkit Wi-Fi lock: status, install and uninstall (GitHub #365).
     NetworkLock(NetworkLockArgs),
+
+    /// Read-only PAM stack checks (GitHub #574).
+    Pam(PamArgs),
+}
+
+/// Arguments for the `pam` command (GitHub #574).
+#[derive(Parser, Debug, Clone)]
+pub struct PamArgs {
+    /// Action to perform.
+    #[command(subcommand)]
+    pub action: PamAction,
+}
+
+/// `pam` actions.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum PamAction {
+    /// Report every service whose `success=done` (or `sufficient`) soos rule ends the auth
+    /// stack before an enforcing rule that the password path still runs (read-only).
+    Check {
+        /// PAM service directory to inspect.
+        #[arg(long, default_value = "/etc/pam.d")]
+        pam_dir: PathBuf,
+        /// Service files to check (default: every service file of the directory).
+        services: Vec<String>,
+    },
 }
 
 /// Arguments for the `network-lock` command (GitHub #365).
@@ -308,7 +333,8 @@ pub enum GdmAction {
     Status,
     /// Enable GDM facial authentication.
     Enable,
-    /// Disable GDM facial authentication (creates /etc/soos/gdm.disable).
+    /// Disable facial authentication for the service of `--pam-file` (creates
+    /// /etc/soos/gdm.disable for a gdm* service, /etc/soos/<service>.disable otherwise).
     Disable,
     /// Restore the pristine PAM file from its `.soos-backup` copy and remove the backup.
     Restore,
@@ -325,9 +351,11 @@ pub struct GdmArgs {
     #[arg(long, default_value = "/etc/pam.d/gdm-password")]
     pub pam_file: PathBuf,
 
-    /// Path to disable flag file (defaults to /etc/soos/gdm.disable).
-    #[arg(long, default_value = "/etc/soos/gdm.disable")]
-    pub disable_file: PathBuf,
+    /// Disable flag file (default: the flag `pam_soos.so` reads for the service of
+    /// `--pam-file`: /etc/soos/gdm.disable for a gdm* service, /etc/soos/<service>.disable
+    /// otherwise). `disable` refuses any other file (GitHub #581).
+    #[arg(long)]
+    pub disable_file: Option<PathBuf>,
 
     /// PAM module directory that must contain `pam_soos.so` before `enable` edits the
     /// PAM file (defaults to probing the distribution security directories).

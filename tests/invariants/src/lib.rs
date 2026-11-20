@@ -4144,3 +4144,11 @@ mod tests {
 /// Created `daemon.toml`"; spec AI/architect_spec_daemon_check_config.md; rows DCC8-DCC10).
 #[cfg(all(test, unix))]
 mod daemon_check_config_contract;
+
+/// Security review 2026-11-10 batch 10 (GitHub #487): the `custom/soos` authselect profile is
+/// local-accounts-only and its activation hint is gated on the recorded profile (#575); the
+/// deployment guide documents the post-include skip of `success=done`, `soos-admin pam check`
+/// (#574) and the per-service disable flag (#581). Spec AI/architect_spec_pam_success_done.md;
+/// rows PSK9-PSK11.
+#[cfg(all(test, unix))]
+mod pam_success_done_contract;

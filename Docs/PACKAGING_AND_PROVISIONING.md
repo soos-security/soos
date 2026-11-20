@@ -237,7 +237,10 @@ auth  optional                       pam_soos.so event=password-failed timeout_m
 - Deployed to `/etc/authselect/custom/soos/`; the previously selected profile is recorded in
   `/etc/soos/authselect.previous` for rollback. The profile is never activated automatically.
 - Enable command: `authselect select custom/soos with-faillock --force` then `authselect check`
-  (append the other features listed by `authselect current --raw`).
+  (append the other features listed by `authselect current --raw`; `--force` only when authselect
+  does not manage the host yet). The profile serves local accounts only: `scripts/install.sh`
+  prints the command only on a `local` or `minimal` host and warns otherwise, the RPM `%post`
+  warns on `sssd`, `winbind` and `nis` hosts (GitHub #575, `Docs/DISTRIBUTION_DEPLOYMENT.md` §4.1).
 - Validation: `./run_tests.sh authselect` (fedora:40 container, see `Docs/DISTRIBUTION_DEPLOYMENT.md` §4).
 
 #### Arch Linux

@@ -126,6 +126,8 @@ soos-biometric-store = { path = "crates/biometric-store", version = "0.1.0" }
 soos-evidence-store = { path = "crates/evidence-store", version = "0.1.0" }
 soos-enrollment-cli = { path = "crates/enrollment-cli", version = "0.1.0", default-features = false }
 soos-admin-cli = { path = "crates/admin-cli", version = "0.1.0" }
+# Dev-dependency of soos-admin-cli only (GitHub #581): pins the `gdm` flag rule to the module.
+soos-pam = { path = "crates/pam", version = "0.1.0" }
 soos-gui = { path = "crates/gui", version = "0.1.0" }
 soos-remote = { path = "crates/remote", version = "0.1.0" }
 soos-push-protocol = { path = "crates/push-protocol", version = "0.1.0" }

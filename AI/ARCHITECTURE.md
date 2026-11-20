@@ -189,7 +189,12 @@ gates of a delegated stack that run before its credential module copied in front
 makes both fail closed), a shared `[success=N]` rule counts only when its jump lands on an auth
 rule of its own stack file, the analysis opens at most `MAX_PAM_STACK_READS` = 32 stack files,
 and `gdm enable` reads `gdm-password` through one `O_NOFOLLOW` descriptor and re-checks it
-before the atomic rename, like `gdm restore`.
+before the atomic rename, like `gdm restore`. Because `done` ends the whole stack (callers of an
+`include` included), `gdm enable` refuses to insert the block when the password path still runs
+an enforcing auth rule after the anchor (a second factor after `@include common-auth`), and
+`soos-admin pam check` reports the same skip for every service, including the Debian shared
+`common-auth` rule (GitHub #574, ADR 2026-11-20). `gdm disable`/`status` use only the flags the
+module reads for the service of `--pam-file` (GitHub #581).
 
 Before deployment, always maintain an active root rescue shell, verify fallback to password in a VM, and test screensavers (`swaylock`, `hyprlock`), TTY, SSH, and `sudo`.
 
