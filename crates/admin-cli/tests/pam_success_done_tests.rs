@@ -566,3 +566,206 @@ fn test_pstk01_soos_admin_pam_check_cli() {
     assert_eq!(json["services_checked"], 1);
     assert!(json["findings"].as_array().unwrap().is_empty());
 }
+
+// ----------------------------------------------------------------------------
+// Candid review round 1 (PSK13-PSK15): rules after the credential module of the anchor's own
+// delegated stack, and the gates `gdm enable` copied in front of its managed rule.
+// ----------------------------------------------------------------------------
+
+/// Arch Linux `pambase` `system-auth` (auth phase).
+const ARCH_SYSTEM_AUTH: &str = "\
+auth       required                    pam_faillock.so      preauth
+-auth      [success=2 default=ignore]  pam_systemd_home.so
+auth       [success=1 default=bad]     pam_unix.so          try_first_pass nullok
+auth       [default=die]               pam_faillock.so      authfail
+auth       optional                    pam_permit.so
+auth       required                    pam_env.so
+auth       required                    pam_faillock.so      authsucc
+account    required                    pam_unix.so
+";
+
+/// Arch Linux `pambase` `system-login` (auth phase).
+const ARCH_SYSTEM_LOGIN: &str = "\
+auth       required   pam_shells.so
+auth       requisite  pam_nologin.so
+auth       include    system-auth
+account    include    system-auth
+";
+
+/// Arch Linux `pambase` `system-local-login`.
+const ARCH_SYSTEM_LOCAL_LOGIN: &str = "\
+auth      include   system-login
+account   include   system-login
+";
+
+/// Arch Linux `gdm` `gdm-password`.
+const ARCH_GDM_PASSWORD: &str = "\
+auth       include                     system-local-login
+auth       optional                    pam_gnome_keyring.so
+account    include                     system-local-login
+";
+
+/// Fedora 40 `gdm-password` (auth phase).
+const FEDORA_GDM_PASSWORD: &str = "\
+auth     [success=done ignore=ignore default=bad] pam_selinux_permit.so
+auth        substack      password-auth
+auth        optional      pam_gnome_keyring.so
+auth        include       postlogin
+account     include       password-auth
+";
+
+/// `pam check` of `service` in the directory of `f` after a successful `gdm enable`.
+fn check_after_enable(f: &Fixture, service: &str) -> PamCheckReport {
+    assert_enable_inserts(f);
+    check(f.pam_file.parent().unwrap(), &[service])
+}
+
+/// PSK13 — a second factor after the credential module of the anchor's own shared stack
+/// (stock Ubuntu `common-auth` + a trailing `required pam_u2f.so`) runs on the password path
+/// and would be skipped by the managed `[success=done]` rule: `gdm enable` refuses.
+#[test]
+fn test_pstk01_gdm_enable_refuses_factor_in_anchor_stack_after_credential() {
+    let common = format!("{UBUNTU_COMMON_AUTH}auth required pam_u2f.so\n");
+    let gdm = "\
+auth requisite pam_nologin.so
+@include common-auth
+auth optional pam_gnome_keyring.so
+";
+    let f = fixture(gdm, &[("common-auth", &common)]);
+    assert_enable_refused(&f, gdm, "pam_u2f.so");
+
+    let common = format!("{UBUNTU_COMMON_AUTH}auth [success=ok default=bad] pam_u2f.so\n");
+    let f = fixture(gdm, &[("common-auth", &common)]);
+    assert_enable_refused(&f, gdm, "pam_u2f.so");
+}
+
+/// PSK13 — the same rule inside a Fedora `substack` after a non-ending credential module is
+/// refused too; the stock `sufficient pam_unix.so` substack stays accepted.
+#[test]
+fn test_pstk01_gdm_enable_refuses_factor_in_anchor_substack_after_credential() {
+    let password_auth = "\
+auth        required      pam_faillock.so preauth silent
+auth        [success=1 default=bad] pam_unix.so nullok
+auth        required      pam_deny.so
+auth        required      pam_u2f.so
+";
+    let f = fixture(
+        FEDORA_GDM_PASSWORD,
+        &[
+            ("password-auth", password_auth),
+            ("postlogin", FEDORA_POSTLOGIN),
+        ],
+    );
+    assert_enable_refused(&f, FEDORA_GDM_PASSWORD, "pam_u2f.so");
+}
+
+/// PSK14 — `pam_faillock.so authsucc` after the credential module is covered only by an
+/// enforcing `pam_faillock.so preauth` gate that runs before the managed rule; without it the
+/// tally check of `authsucc` is the only lockout check and `gdm enable` refuses.
+#[test]
+fn test_pstk01_gdm_enable_authsucc_needs_a_preauth_gate() {
+    let without_preauth = ARCH_SYSTEM_AUTH.replacen(
+        "auth       required                    pam_faillock.so      preauth\n",
+        "",
+        1,
+    );
+    let f = fixture(
+        ARCH_GDM_PASSWORD,
+        &[
+            ("system-auth", &without_preauth),
+            ("system-login", ARCH_SYSTEM_LOGIN),
+            ("system-local-login", ARCH_SYSTEM_LOCAL_LOGIN),
+        ],
+    );
+    assert_enable_refused(&f, ARCH_GDM_PASSWORD, "pam_faillock.so");
+}
+
+/// PSK14/PSK15 — stock Arch: `gdm enable` accepts the stack (the `preauth` gate is copied in
+/// front of the managed rule and covers `authsucc`), and `pam check` on the result recognises
+/// the copied gates: nothing reported, exit code 0.
+#[test]
+fn test_pstk01_pam_check_clean_after_gdm_enable_on_arch() {
+    let f = fixture(
+        ARCH_GDM_PASSWORD,
+        &[
+            ("system-auth", ARCH_SYSTEM_AUTH),
+            ("system-login", ARCH_SYSTEM_LOGIN),
+            ("system-local-login", ARCH_SYSTEM_LOCAL_LOGIN),
+        ],
+    );
+    let report = check_after_enable(&f, "gdm-password");
+    assert!(
+        report.findings.is_empty() && report.unanalysed.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// PSK15 — stock Fedora (`substack password-auth` with faillock): `pam check` after
+/// `gdm enable` recognises the copied `preauth` gate: nothing reported, exit code 0.
+#[test]
+fn test_pstk01_pam_check_clean_after_gdm_enable_on_fedora() {
+    let f = fixture(
+        FEDORA_GDM_PASSWORD,
+        &[
+            ("password-auth", FEDORA_PASSWORD_AUTH),
+            ("postlogin", FEDORA_POSTLOGIN),
+        ],
+    );
+    let report = check_after_enable(&f, "gdm-password");
+    assert!(
+        report.findings.is_empty() && report.unanalysed.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// PSK15 — only an identical copy covers a skipped rule: a gate that runs before the face rule
+/// with different arguments does not hide the skipped original.
+#[test]
+fn test_pstk01_pam_check_reports_gate_copy_with_other_arguments() {
+    let (_d, dir) = pam_dir(&[
+        (
+            "system-auth",
+            "auth required pam_succeed_if.so uid >= 1000\n\
+             auth sufficient pam_unix.so nullok\nauth required pam_deny.so\n",
+        ),
+        (
+            "login",
+            "auth required pam_succeed_if.so uid >= 500\n\
+             auth [success=done default=ignore] pam_soos.so\nauth include system-auth\n",
+        ),
+    ]);
+    let report = check(&dir, &["login"]);
+    assert_eq!(report.findings.len(), 1, "{report:?}");
+    assert!(report.findings[0].skipped[0]
+        .rule
+        .contains("pam_succeed_if.so"));
+
+    let (_d2, dir2) = pam_dir(&[
+        (
+            "system-auth",
+            "auth required pam_succeed_if.so uid >= 1000\n\
+             auth sufficient pam_unix.so nullok\nauth required pam_deny.so\n",
+        ),
+        (
+            "login",
+            "auth required pam_succeed_if.so uid >= 1000\n\
+             auth [success=done default=ignore] pam_soos.so\nauth include system-auth\n",
+        ),
+    ]);
+    let report = check(&dir2, &["login"]);
+    assert!(
+        report.findings.is_empty() && report.unanalysed.is_empty(),
+        "{report:?}"
+    );
+}
+
+/// PSK13 — the `pam_deny.so` exemption is confined to the failure fallback of the anchor's
+/// own stack: an explicit `pam_deny.so` in the edited file after the anchor is still refused.
+#[test]
+fn test_pstk01_gdm_enable_refuses_deny_in_edited_tail() {
+    let gdm = ubuntu_gdm_with_tail("auth required pam_deny.so\n");
+    let f = fixture(&gdm, &[("common-auth", UBUNTU_COMMON_AUTH)]);
+    assert_enable_refused(&f, &gdm, "pam_deny.so");
+}

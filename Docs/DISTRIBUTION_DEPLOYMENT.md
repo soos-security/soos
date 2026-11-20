@@ -67,7 +67,11 @@ missing include target, for instance in a vendor directory such as `/usr/lib/pam
 continuation, unknown control). `--format json` prints the same report. The analysis assumes a
 correct password for scenario "password" and a face match for scenario "face" and compares the
 rules each one runs; the credential modules the face replaces, `pam_permit.so`, `pam_env.so`
-and `pam_faildelay.so` are never reported.
+and `pam_faildelay.so` are never reported. A skipped rule is not reported either when the face
+path already ran an identical copy before its soos rule (same module, `required`/`requisite`
+control and arguments, such as the gates `gdm enable` copies in front of its managed rule), or
+when it is `pam_faillock.so authsucc` and an enforcing `pam_faillock.so preauth` gate ran first
+(same tally check; the face path only skips the reset of the failure tally).
 
 ### Safety Invariants
 1. **Never bypass password authentication**: If `pam_soos.so` fails, times out, or encounters a missing daemon/socket, it **MUST** return `PAM_IGNORE`, yielding execution to `pam_unix`.
@@ -184,15 +188,25 @@ computes the status from `/etc/soos`.
 **Rules after the anchor (GitHub #574, PSTK-01).** The managed rule is `success=done` at the
 top level of `gdm-password`, so a face match ends the whole stack there. `gdm enable` therefore
 refuses (nothing written, the disable flag stays) when an enforcing auth rule that the password
-path still runs follows the credential module or shared stack: `required` / `requisite`, an
+path still runs follows the credential module or shared stack, including a rule placed after
+the credential module **inside** the shared stack itself (for example `auth required
+pam_u2f.so` appended to `common-auth`): `required` / `requisite`, an
 unknown keyword, an `-auth` line with such a control, or a bracketed control that can fail the
 stack (`bad`, `die`, `ok` or `done` on a failure code, `reset`, no `default=`), including such a
 rule inside a later `include`, `substack` or `@include` (followed and analysed like the anchor,
 fail closed when a target is missing; only the Debian `common-account`, `common-password`,
 `common-session` and `common-session-noninteractive` stacks may be absent). The refusal names
 the rule and its line. `optional`, `sufficient`, `[... default=ignore]` and jumps are accepted,
-as is a tail that the password path never reaches (an inline `sufficient pam_unix.so`). Move a
+as is a tail that the password path never reaches (an inline `sufficient pam_unix.so`). Two
+rules of the shared stack are known to be equivalent for the face path and accepted:
+`pam_faillock.so authsucc` when an enforcing `pam_faillock.so preauth` gate runs before the
+managed rule (the stock Arch and Fedora layouts; the face path only skips the reset of the
+failure tally), and the `pam_deny.so` failure fallback of the shared stack (a
+`pam_deny.so` the password path would still reach denies the correct password too). An explicit
+`pam_deny.so` in `gdm-password` after the anchor is refused like any other rule. Move a
 second factor before the credential module or shared stack to keep it in force for face logins.
+`soos-admin pam check` reports the stack `gdm enable` wrote as clean: it recognises the gates
+copied in front of the managed rule.
 
 What `gdm enable` writes on a stack **without** a soos rule, e.g. Fedora 40 with the stock
 authselect `local` profile and `with-faillock`, before the soos `custom/soos` profile is

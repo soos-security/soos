@@ -50,6 +50,13 @@ const EXEMPT_MODULES: &[&str] = &[
     "pam_faildelay.so",
 ];
 
+/// Failure fallback of a shared stack (`auth required pam_deny.so`). In the anchor's own
+/// delegated stack of `gdm enable` it is not reported: the simulation lets every credential
+/// module succeed, so a fallback it still reaches would deny the correct password too (the
+/// shared stack then denies every service). The face path never needs that fallback, and
+/// such a rule in the edited file itself is still reported.
+const ANCHOR_FALLBACK_MODULE: &str = "pam_deny.so";
+
 /// Suffix of the pristine copies kept by `soos-admin gdm enable` (never a service).
 const BACKUP_SUFFIX: &str = ".soos-backup";
 
@@ -185,7 +192,10 @@ struct Rule {
     line: usize,
     control: String,
     module: String,
+    /// Module arguments, verbatim.
+    args: Vec<String>,
     soos_primary: bool,
+    /// Rule of the anchor's own delegated stack (`gdm enable` analysis only).
     in_anchor: bool,
 }
 
@@ -318,6 +328,45 @@ impl Rule {
             && !self.is_credential()
             && (self.control.starts_with('[') || self.control.eq_ignore_ascii_case("sufficient"))
             && action(&self.control, Ret::Success) != action(&self.control, Ret::Failure)
+    }
+
+    fn has_arg(&self, arg: &str) -> bool {
+        self.args.iter().any(|a| a == arg)
+    }
+
+    /// A plain `required` or `requisite` control.
+    fn is_plain_enforcing(&self) -> bool {
+        self.control.eq_ignore_ascii_case("required")
+            || self.control.eq_ignore_ascii_case("requisite")
+    }
+
+    /// `pam_faillock.so preauth` with a plain enforcing control: the tally check.
+    fn is_faillock_preauth_gate(&self) -> bool {
+        self.module == "pam_faillock.so" && self.has_arg("preauth") && self.is_plain_enforcing()
+    }
+
+    /// `pam_faillock.so authsucc`: the tally check repeated after a successful credential,
+    /// then the reset of the failure tally.
+    fn is_faillock_authsucc(&self) -> bool {
+        self.module == "pam_faillock.so" && self.has_arg("authsucc")
+    }
+
+    /// True when skipping this rule is known to be equivalent for the face path because of a
+    /// rule in `ran` (rules that run before the face rule on the face path):
+    ///
+    /// - an identical copy (same module, plain enforcing control, same arguments), such as a
+    ///   gate that `gdm enable` copied in front of its managed rule;
+    /// - for `pam_faillock.so authsucc`, an enforcing `pam_faillock.so preauth` gate, which
+    ///   already ran the same tally check (only the reset of the tally is skipped, which
+    ///   leaves the face path stricter, never weaker).
+    fn covered_by(&self, ran: &[&Rule]) -> bool {
+        ran.iter().any(|r| {
+            (self.is_plain_enforcing()
+                && r.module == self.module
+                && r.control.eq_ignore_ascii_case(&self.control)
+                && r.args == self.args)
+                || (self.is_faillock_authsucc() && r.is_faillock_preauth_gate())
+        })
     }
 
     fn skipped(&self) -> SkippedRule {
@@ -454,6 +503,7 @@ impl<'d> Flattener<'d> {
                     line: number,
                     control: (*control).to_string(),
                     module,
+                    args: args.iter().map(|arg| (*arg).to_string()).collect(),
                     soos_primary,
                     in_anchor,
                 }));
@@ -628,10 +678,17 @@ fn compare(nodes: &[Node]) -> Result<Option<Comparison<'_>>, String> {
         let Some(end) = face.soos_end else {
             continue;
         };
+        // Rules the face path ran before its soos rule ended the stack (copied gates).
+        let ran: Vec<&Rule> = rules
+            .iter()
+            .copied()
+            .filter(|rule| face.visited.contains(&rule.id))
+            .collect();
         for rule in &rules {
             if password.visited.contains(&rule.id)
                 && !face.visited.contains(&rule.id)
                 && rule.is_reportable()
+                && !rule.covered_by(&ran)
                 && !skipped.iter().any(|r| r.id == rule.id)
             {
                 skipped.push(rule);
@@ -756,9 +813,13 @@ fn list_services(pam_dir: &Path) -> Result<Vec<String>, AdminCliError> {
 /// `gdm enable` (GitHub #574): the first enforcing auth rule that the managed
 /// `[success=done]` rule, inserted at the top level right before `lines[anchor_index]` of the
 /// edited file `edited`, would skip although the password path still runs it. Rules up to the
-/// first credential module are the gates `gdm enable` already copies or refuses; rules of the
-/// anchor's own delegated stack follow that stack's ordering (ADR 2026-10-05) and are not
-/// reported; an anchor stack that cannot be analysed is followed as unknown.
+/// first credential module are the gates `gdm enable` already copies or refuses. Every rule
+/// after it counts, in the anchor's own delegated stack too (a second factor after the
+/// credential module of a shared `common-auth`), unless a rule that runs before the managed
+/// rule covers it (`Rule::covered_by`: an identical copy, or `pam_faillock.so authsucc` after
+/// a `pam_faillock.so preauth` gate) or it is the `pam_deny.so` failure fallback of the
+/// anchor's own stack ([`ANCHOR_FALLBACK_MODULE`]). An anchor stack that cannot be analysed is
+/// followed as unknown.
 ///
 /// When the password path cannot be followed exactly, every enforcing rule after the anchor
 /// counts (fail closed: reachability assumed).
@@ -812,16 +873,32 @@ pub(crate) fn gdm_tail_skips(
     // analysed holds that credential module (the scan of `gdm enable` reached it): every tail
     // rule counts (fail closed).
     let mut rules: Vec<&Rule> = Vec::new();
+    let mut gates: Vec<&Rule> = Vec::new();
     let mut credential_met = opaque_anchor;
     for_each_rule(&nodes, &mut |rule| {
         if credential_met {
             rules.push(rule);
+        } else {
+            gates.push(rule);
         }
         credential_met |= rule.is_credential();
     });
+    // The rules of the edited file before the anchor run before the managed rule too. They
+    // are plain rules (the anchor is the first delegation or credential module); when they
+    // cannot be flattened, none of them covers anything (fail closed).
+    let mut head = Vec::new();
+    let head_lines = lines.get(..anchor_index).unwrap_or_default();
+    if Flattener::new(dir)
+        .flatten_lines(edited, head_lines, 0, 0, false, &mut head)
+        .is_err()
+    {
+        head.clear();
+    }
+    for_each_rule(&head, &mut |rule| gates.push(rule));
     let first = rules.iter().find(|rule| {
-        !rule.in_anchor
-            && rule.is_reportable()
+        rule.is_reportable()
+            && !(rule.in_anchor && rule.module == ANCHOR_FALLBACK_MODULE)
+            && !rule.covered_by(&gates)
             && reached.as_ref().is_none_or(|ids| ids.contains(&rule.id))
     });
     Ok(first.map(|rule| rule.skipped()))
@@ -903,6 +980,7 @@ mod tests {
                 control: "[success=1 default=ignore]".into(),
                 module: "pam_succeed_if.so".into(),
                 soos_primary: false,
+                args: Vec::new(),
                 in_anchor: false,
             })
         };

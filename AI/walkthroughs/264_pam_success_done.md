@@ -87,12 +87,40 @@ command on directory profiles.
 Notable decision: `gdm_tail_skips` ignores every rule up to the first credential module, because
 the existing delegated scan already copies those gates in front of the managed rule or refuses
 (found by the pre-existing `test_gdm_enable_scans_past_a_gate_only_include`, which stayed
-unchanged).
+unchanged). Every enforcing rule after it counts, in the anchor's own delegated stack too (candid
+review round 1), with two narrow equivalences: `pam_faillock.so authsucc` when an enforcing
+`pam_faillock.so preauth` gate runs before the managed rule (same tally check; only the reset
+is skipped), and the `pam_deny.so` failure fallback of the anchor's own stack (a fallback the
+simulated password path still reaches denies the correct password too; the pre-existing
+`test_igf18_block_removal_with_crossing_jump_is_refused` uses such a stack and stayed unchanged).
 
 ## 7. Candid Review
 
-Not run in this phase: the fingerprint-bound review is performed next by an independent reviewer
-on the committed diff.
+Round 1 (independent reviewer, fingerprint-bound): **CHANGES_REQUESTED**, two MAJOR items, both
+fixed in round 2:
+
+1. `packaging/rpm/soos.spec` `%post`: RPM macro expansion turns `%%` into `%`, so the installed
+   scriptlet ran `case "${current% *}"`, which strips only the last word: `sssd with-mkhomedir
+   with-sudo` became `sssd with-mkhomedir` and the #575 warning stayed silent on typical joined
+   hosts. Fix: whole-profile `case` patterns (`sssd|winbind|nis|"sssd "*|"winbind "*|"nis "*`),
+   no parameter expansion, the warning names the recorded profile. New invariant PSK10b runs the
+   macro-expanded `%post` authselect block with a stubbed `authselect` (PSK10 only greps).
+2. `gdm_tail_skips` ignored enforcing rules after the credential module of the anchor's own
+   delegated stack: `common-auth` + `auth required pam_u2f.so` was accepted, and `pam check`
+   then flagged the layout `gdm enable` had just written. Fix: those rules count (PSK13), with
+   the two equivalences above (PSK14).
+
+Minor items: `pam check` now recognises the gates `gdm enable` copied in front of its managed
+rule (an identical `required`/`requisite` rule the face path ran before its soos rule) and
+`authsucc` after an enforcing `preauth` gate, so the stock Arch and Fedora stacks are clean after
+`gdm enable` (PSK15). Tracking: the PR uses `Refs #574`, not a closing keyword: the packaged
+Debian rule (`packaging/pam/debian/soos`, the default #574 layout) keeps `success=done` until the
+owner decides PSK12. The suggestion to move the flag-directory derivation of `main.rs` into the
+library is deferred (refactor without behaviour change; the behaviour is covered by PFL4).
+
+Test changes in round 2: new tests only (PSK10b, PSK13-PSK15), plus one setup-only change in the
+branch's own unit test `pam_check::tests::test_assignments_are_bounded` (the `Rule` literal gains
+`args: Vec::new()`; assertions untouched). No existing assertion was modified.
 
 ## 8. Verification Results
 
@@ -122,6 +150,9 @@ All green: fmt clean, clippy clean, 1458 tests passed and 0 failed across `soos-
   regression of #574 depends on it. Until then `soos-admin pam check` and Docs §2/§3.2 cover the
   Debian layout. A jump or `substack` form of `GDM_PAM_LINE` is not needed once `gdm enable`
   refuses the skipping layouts (and would change `test_gdm_pam_line_includes_timeout_ms_2500`).
+- Until PSK12 lands, the packaged Debian layout (`packaging/pam/debian/soos`,
+  `[success=done]` in `common-auth`) stays affected by #574: the PR references #574 and does not
+  close it.
 - An sssd-derived `custom/soos-sssd` profile (#575 "deeper" fix) is L effort, out of scope.
 - `pam check` assumes a module returns success unless its control makes it a branch point;
   `required`/`requisite`/`optional` rules are not forked (an enforcing rule visited only by the
