@@ -714,6 +714,8 @@ pub struct Options {
     pub store: StoreSetup,
     /// Injected CSPRNG (`None`: the production source).
     pub random: Option<RandomSource>,
+    /// Logins allowed after [`LOGIN`] (review PTSN-03, GitHub #584; default none).
+    pub extra_logins: Vec<String>,
 }
 
 impl Options {
@@ -769,7 +771,10 @@ impl Harness {
             StoreSetup::Passkeys(passkeys) => write_store(&store_path, passkeys),
         }
         let config = RemoteConfig {
-            allowed_logins: vec![TailscaleLogin::parse(LOGIN).unwrap()],
+            allowed_logins: std::iter::once(LOGIN)
+                .chain(options.extra_logins.iter().map(String::as_str))
+                .map(|login| TailscaleLogin::parse(login).unwrap())
+                .collect(),
             socket_path: path.clone(),
             poll_interval_ms: options.poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS),
             allowed_hosts: options.allowed_hosts,
@@ -989,6 +994,8 @@ pub fn write_store_with_handle(path: &Path, handle: &[u8], passkeys: &[StoredPas
 pub enum Via {
     /// `tailscale serve` with the allowed identity (no Funnel marker).
     Tailnet,
+    /// `tailscale serve` with another allowed login (review PTSN-03, GitHub #584).
+    TailnetAs(String),
     /// `tailscale funnel`: no identity, the marker `?1`, the client address set by
     /// `tailscaled`, and optionally the session cookie.
     Funnel { ip: String, cookie: Option<String> },
@@ -1005,6 +1012,7 @@ impl Via {
     pub fn with_cookie(&self, cookie: &str) -> Self {
         match self {
             Self::Tailnet => Self::Tailnet,
+            Self::TailnetAs(login) => Self::TailnetAs(login.clone()),
             Self::Funnel { ip, .. } => Self::Funnel {
                 ip: ip.clone(),
                 cookie: Some(cookie.to_string()),
@@ -1017,6 +1025,10 @@ impl Via {
             Self::Tailnet => vec![
                 ("Host".to_string(), HOST.to_string()),
                 ("Tailscale-User-Login".to_string(), LOGIN.to_string()),
+            ],
+            Self::TailnetAs(login) => vec![
+                ("Host".to_string(), HOST.to_string()),
+                ("Tailscale-User-Login".to_string(), login.clone()),
             ],
             Self::Funnel { ip, cookie } => {
                 let mut h = vec![

@@ -222,6 +222,9 @@ pub const CHALLENGE_TTL_MS: u64 = 120_000;
 pub const WEBAUTHN_TIMEOUT_MS: u64 = 120_000;
 /// Pending challenges per authenticated pool.
 pub const MAX_PENDING_CHALLENGES: usize = 4;
+/// Pending challenges of one tailnet unlock or camera-view pool, all callers together: each
+/// allowed login holds at most `MAX_PENDING_CHALLENGES` of them (review PTSN-03, GitHub #584).
+pub const MAX_PENDING_TAILNET_CHALLENGES: usize = MAX_PENDING_CHALLENGES * MAX_ALLOWED_LOGINS;
 /// Stored passkeys.
 pub const MAX_PASSKEYS: usize = 4;
 /// Credential store file bound.

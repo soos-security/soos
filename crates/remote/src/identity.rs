@@ -246,6 +246,28 @@ pub enum Caller {
     Funnel,
 }
 
+/// Limiter and challenge identity of one tailnet caller (review PTSN-03, GitHub #584): the
+/// position of its login in `allowed_logins` (below `MAX_ALLOWED_LOGINS`). Every allowed login
+/// has its own failure lockout, options window and tailnet challenge pools; devices sharing one
+/// login share them. `Debug` is redacted.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TailnetCaller(u8);
+
+impl TailnetCaller {
+    /// The caller of `login`; `None` when it is not in `allowed`.
+    #[must_use]
+    pub fn of(login: &TailscaleLogin, allowed: &[TailscaleLogin]) -> Option<Self> {
+        let position = allowed.iter().position(|candidate| candidate == login)?;
+        u8::try_from(position).ok().map(Self)
+    }
+}
+
+impl std::fmt::Debug for TailnetCaller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TailnetCaller(<redacted>)")
+    }
+}
+
 impl Caller {
     /// The path class of the caller.
     #[must_use]

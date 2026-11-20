@@ -4144,3 +4144,10 @@ mod tests {
 /// Created `daemon.toml`"; spec AI/architect_spec_daemon_check_config.md; rows DCC8-DCC10).
 #[cfg(all(test, unix))]
 mod daemon_check_config_contract;
+
+/// Security review 2026-11-10 batch 2 (GitHub #479): sign-out push clean-up, per-login tailnet
+/// limiter documentation, the tailnet local-listener gap and the sender TCP path (ADR
+/// 2026-11-20 "Per-Login Tailnet Limiters, Sign-Out Push Clean-Up and the Tailnet Local Listener
+/// Residual"; spec AI/architect_spec_remote_tailnet_identity.md; rows RTI4, RTI6-RTI9).
+#[cfg(all(test, unix))]
+mod remote_tailnet_identity_contract;
