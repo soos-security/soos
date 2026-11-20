@@ -201,9 +201,12 @@ as is a tail that the password path never reaches (an inline `sufficient pam_uni
 rules of the shared stack are known to be equivalent for the face path and accepted:
 `pam_faillock.so authsucc` when an enforcing `pam_faillock.so preauth` gate runs before the
 managed rule (the stock Arch and Fedora layouts; the face path only skips the reset of the
-failure tally), and the `pam_deny.so` failure fallback of the shared stack (a
-`pam_deny.so` the password path would still reach denies the correct password too). An explicit
-`pam_deny.so` in `gdm-password` after the anchor is refused like any other rule. Move a
+failure tally), and the `pam_deny.so` failure fallback of the shared stack when the password
+path reaches it on every branch (such a `pam_deny.so` denies the correct password too). A
+`pam_deny.so` of the shared stack reached on one branch of a conditional rule only (a group gate
+such as `[success=1 default=ignore] pam_succeed_if.so user ingroup admins` followed by
+`requisite pam_deny.so`) enforces that gate and is refused. An explicit `pam_deny.so` in
+`gdm-password` after the anchor is refused like any other rule. Move a
 second factor before the credential module or shared stack to keep it in force for face logins.
 `soos-admin pam check` reports the stack `gdm enable` wrote as clean: it recognises the gates
 copied in front of the managed rule.

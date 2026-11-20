@@ -163,7 +163,8 @@ Conditional rules are forked instead of assumed to succeed: a non-credential, no
 whose success action differs from its failure action (bracket: value of `success` versus value
 of `default`, missing = `bad`; keyword `sufficient`) is a branch point. Both scenarios run under
 every assignment of the branch points (`MAX_PAM_CHECK_BRANCHES` = 8, i.e. at most 256
-assignments); more branch points make the run unknown. Credential modules always return
+assignments; candid review round 2 adds `PAM_IGNORE` as a third outcome when its action differs
+from both, at most 6561 assignments); more branch points make the run unknown. Credential modules always return
 `PAM_SUCCESS` in both scenarios (scenario B is the correct-password path). `required`,
 `requisite` and `optional` rules are not branch points (assumed to succeed; an enforcing rule
 visited only in B is reported whatever it returns).

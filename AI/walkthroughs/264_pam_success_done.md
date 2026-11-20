@@ -90,9 +90,11 @@ the existing delegated scan already copies those gates in front of the managed r
 unchanged). Every enforcing rule after it counts, in the anchor's own delegated stack too (candid
 review round 1), with two narrow equivalences: `pam_faillock.so authsucc` when an enforcing
 `pam_faillock.so preauth` gate runs before the managed rule (same tally check; only the reset
-is skipped), and the `pam_deny.so` failure fallback of the anchor's own stack (a fallback the
-simulated password path still reaches denies the correct password too; the pre-existing
-`test_igf18_block_removal_with_crossing_jump_is_refused` uses such a stack and stayed unchanged).
+is skipped), and the `pam_deny.so` failure fallback of the anchor's own stack when the simulated
+password path reaches it in every explored assignment (it then denies the correct password too;
+the pre-existing `test_igf18_block_removal_with_crossing_jump_is_refused` uses such a stack and
+stayed unchanged). A `pam_deny.so` of the anchor's stack reached on one branch only counts
+(candid review round 2).
 
 ## 7. Candid Review
 
@@ -121,6 +123,29 @@ library is deferred (refactor without behaviour change; the behaviour is covered
 Test changes in round 2: new tests only (PSK10b, PSK13-PSK15), plus one setup-only change in the
 branch's own unit test `pam_check::tests::test_assignments_are_bounded` (the `Rule` literal gains
 `args: Vec::new()`; assertions untouched). No existing assertion was modified.
+
+Round 2 (independent reviewer): **CHANGES_REQUESTED**, one MAJOR item, fixed in round 3:
+
+1. `gdm_tail_skips` exempted every `pam_deny.so` of the anchor's delegated stack, including one
+   the password path reaches on one branch of a conditional rule only. A `common-auth` holding
+   `[success=1 default=ignore] pam_unix.so` / `requisite pam_deny.so` / `required pam_permit.so`
+   / `[success=1 default=ignore] pam_succeed_if.so user ingroup admins` / `requisite pam_deny.so`
+   was accepted, so a face match would let a user outside `admins` in at GDM while a correct
+   password is refused, and `pam check` then reported `common-auth:5` on the written file. Fix:
+   the exemption needs the password path to reach that `pam_deny.so` in every explored
+   assignment (an unfollowable run exempts nothing). New contract test (PSK14):
+   `test_pstk01_gdm_enable_refuses_conditional_deny_in_anchor_stack` (refusal, file unchanged, no
+   backup, and `pam check` reports `common-auth:5` on the layout the managed rule would produce).
+
+Minor items fixed in round 3: `Rule::describe` and `PamCheckReport::format_table` route module,
+control, stack, service and reason text through `printable()` (control characters of a PAM file
+no longer reach the terminal); a branch point is now also forked on `PAM_IGNORE` when its action
+differs from both the success and the failure actions (at most `3^8` = 6561 assignments; the
+visited sets are hashed). Unit tests: `test_ignore_outcome_is_explored_when_its_action_differs`,
+`test_reported_rules_strip_control_characters`. The suggestion to move the flag-path derivation
+of `main.rs` into the library stays deferred (refactor without behaviour change, covered by PFL4).
+
+Test changes in round 3: new tests only; no existing test or assertion was modified.
 
 ## 8. Verification Results
 
@@ -156,5 +181,7 @@ All green: fmt clean, clippy clean, 1458 tests passed and 0 failed across `soos-
 - An sssd-derived `custom/soos-sssd` profile (#575 "deeper" fix) is L effort, out of scope.
 - `pam check` assumes a module returns success unless its control makes it a branch point;
   `required`/`requisite`/`optional` rules are not forked (an enforcing rule visited only by the
-  password path is reported whatever it returns).
+  password path is reported whatever it returns). A branch point is forked on success, failure
+  and ignore; other return codes (`user_unknown`, `cred_insufficient`, ...) whose bracket action
+  differs from those three are not explored.
 - Related, other batch: #541 `G304-01` (manual GDM recipe for the authselect `sssd` profile).

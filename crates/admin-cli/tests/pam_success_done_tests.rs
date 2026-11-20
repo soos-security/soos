@@ -769,3 +769,40 @@ fn test_pstk01_gdm_enable_refuses_deny_in_edited_tail() {
     let f = fixture(&gdm, &[("common-auth", UBUNTU_COMMON_AUTH)]);
     assert_enable_refused(&f, &gdm, "pam_deny.so");
 }
+
+/// PSK14 — the `pam_deny.so` exemption of the anchor's own stack holds only for a failure
+/// fallback the password path reaches in every explored assignment. A `pam_deny.so` reached on
+/// one branch of a conditional rule after the credential module (a group gate written as
+/// `[success=1 default=ignore] pam_succeed_if.so` + `requisite pam_deny.so`) enforces that
+/// gate: the face match would skip it, so `gdm enable` refuses and leaves the file unchanged,
+/// and `pam check` on the layout `gdm enable` would have written reports the same rule.
+#[test]
+fn test_pstk01_gdm_enable_refuses_conditional_deny_in_anchor_stack() {
+    let common = "\
+auth [success=1 default=ignore] pam_unix.so nullok
+auth requisite pam_deny.so
+auth required pam_permit.so
+auth [success=1 default=ignore] pam_succeed_if.so user ingroup admins
+auth requisite pam_deny.so
+";
+    let gdm = ubuntu_gdm_with_tail("");
+    let f = fixture(&gdm, &[("common-auth", common)]);
+    assert_enable_refused(&f, &gdm, "pam_deny.so");
+
+    // `pam check` agrees on the layout the managed rule would produce.
+    let enabled = format!(
+        "{}{GDM_PAM_LINE}\n@include common-auth\n{UBUNTU_GDM_TAIL}",
+        UBUNTU_GDM_HEAD.replacen("@include common-auth\n", "", 1)
+    );
+    let (_d, dir) = pam_dir(&[("common-auth", common), ("gdm-password", &enabled)]);
+    let report = check(&dir, &["gdm-password"]);
+    assert_eq!(report.exit_code(), 1, "{report:?}");
+    assert_eq!(report.findings.len(), 1, "{report:?}");
+    let skipped = &report.findings[0].skipped;
+    assert!(
+        skipped
+            .iter()
+            .any(|r| r.stack == "common-auth" && r.line == 5 && r.rule.contains("pam_deny.so")),
+        "{report:?}"
+    );
+}
